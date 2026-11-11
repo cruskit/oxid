@@ -9,6 +9,14 @@ issuer = "https://localhost:9443"
 # mtls_endpoint_aliases for the token, PAR and UserInfo endpoints.
 mtls_base_url = "https://localhost:9444"
 
+# The user experience at the authorization endpoint:
+#   "technical" (default)  no sign-in: inspect the request, pick a customer,
+#                          edit the ID token claims or return an error.
+#                          Development and testing only.
+#   "login"                username and password sign-in with consent.
+# Can be overridden with --experience or the OXID_EXPERIENCE variable.
+experience = "technical"
+
 [server]
 listen = "127.0.0.1:9443"
 mtls_listen = "127.0.0.1:9444"
@@ -72,10 +80,12 @@ profile = "connectid"
 # Needed only when redirect_uris span several hosts.
 # sector_identifier = "rp.example.com"
 
-# Users. If this section is omitted entirely, a built-in demo user is used
-# (username "demo", password "demo-password"). Development only.
+# Users (the customers offered by the technical experience). If this section
+# is omitted entirely, four built-in demo customers are used: demo, riley,
+# margaret and sam, all with the password "demo-password". Development only.
 #
-# Create password_hash with:  echo 'the-password' | oxid hash-password
+# password_hash is needed only to sign in under the login experience.
+# Create it with:  echo 'the-password' | oxid hash-password
 #
 # [[users]]
 # username = "alex"

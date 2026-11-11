@@ -231,7 +231,7 @@ pub(crate) mod test_support {
 
     use super::*;
     use crate::keys::test_support::shared_key;
-    use crate::state::test_support::{ISSUER, state};
+    use crate::state::test_support::{ISSUER, state_with};
     use crate::util::{ManualClock, random_token};
 
     pub const CERT: &str = "client-cert-thumbprint";
@@ -244,8 +244,13 @@ pub(crate) mod test_support {
     }
 
     impl Harness {
+        /// A provider using the `login` experience.
         pub fn new() -> Self {
-            let (state, clock) = state();
+            Self::with_experience(crate::experience::Kind::Login)
+        }
+
+        pub fn with_experience(kind: crate::experience::Kind) -> Self {
+            let (state, clock) = state_with(kind);
             Self {
                 router: router(state.clone()),
                 state,

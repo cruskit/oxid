@@ -1,7 +1,10 @@
 # oxID configuration for the conformance suite run. See docker-compose.yml.
 #
 # TLS certificate, signing key and pairwise salt are left unset, so oxID
-# generates ephemeral ones at startup. The demo user is used for sign-in.
+# generates ephemeral ones at startup. The built-in demo customers are used.
+#
+# The user experience is set per run through OXID_EXPERIENCE (see
+# scripts/conformance.sh), so it is not fixed here.
 
 issuer = "https://oxid:9443"
 mtls_base_url = "https://oxid:9444"

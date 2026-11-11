@@ -18,7 +18,11 @@ pub enum ErrorCode {
     InvalidRequestObject,
     AccessDenied,
     LoginRequired,
+    ConsentRequired,
+    InteractionRequired,
+    AccountSelectionRequired,
     ServerError,
+    TemporarilyUnavailable,
 }
 
 impl ErrorCode {
@@ -34,7 +38,11 @@ impl ErrorCode {
             Self::InvalidRequestObject => "invalid_request_object",
             Self::AccessDenied => "access_denied",
             Self::LoginRequired => "login_required",
+            Self::ConsentRequired => "consent_required",
+            Self::InteractionRequired => "interaction_required",
+            Self::AccountSelectionRequired => "account_selection_required",
             Self::ServerError => "server_error",
+            Self::TemporarilyUnavailable => "temporarily_unavailable",
         }
     }
 
@@ -42,6 +50,7 @@ impl ErrorCode {
         match self {
             Self::InvalidClient => StatusCode::UNAUTHORIZED,
             Self::ServerError => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::TemporarilyUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             _ => StatusCode::BAD_REQUEST,
         }
     }

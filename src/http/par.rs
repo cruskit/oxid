@@ -38,7 +38,10 @@ pub async fn pushed_authorization_request(
     let request = AuthorizationRequest::from_params(&client, &claims)?;
 
     let expires_in = state.security.request_uri_ttl;
-    let request_uri = state.store.push_request(request, now + expires_in);
+    let request_uri =
+        state
+            .store
+            .push_request(request, request_object.to_owned(), now + expires_in);
     tracing::info!(client_id = %client.id, "pushed authorization request accepted");
 
     let body = Json(json!({ "request_uri": request_uri, "expires_in": expires_in }));

@@ -27,6 +27,10 @@ enum Command {
         /// Path to the TOML configuration file.
         #[arg(short, long, env = "OXID_CONFIG", default_value = "oxid.toml")]
         config: PathBuf,
+        /// User experience at the authorization endpoint, overriding the
+        /// configuration file: `technical` or `login`.
+        #[arg(long, env = "OXID_EXPERIENCE")]
+        experience: Option<oxid::experience::Kind>,
     },
     /// Read a password from standard input and print its Argon2 hash, for
     /// use as a user's `password_hash`.
@@ -44,7 +48,7 @@ fn main() -> ExitCode {
         .init();
 
     let result = match cli.command {
-        Command::Serve { config } => serve(&config),
+        Command::Serve { config, experience } => serve(&config, experience),
         Command::HashPassword => hash_password(),
     };
     match result {
@@ -57,8 +61,14 @@ fn main() -> ExitCode {
 }
 
 #[tokio::main]
-async fn serve(config_path: &std::path::Path) -> Result<()> {
-    let config = Config::load(config_path)?;
+async fn serve(
+    config_path: &std::path::Path,
+    experience: Option<oxid::experience::Kind>,
+) -> Result<()> {
+    let mut config = Config::load(config_path)?;
+    if let Some(experience) = experience {
+        config.experience = experience;
+    }
     let server = ServerBuilder::new(config).start().await?;
     shutdown_signal().await;
     tracing::info!("shutting down");

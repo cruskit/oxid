@@ -28,6 +28,8 @@ pub const MAX_CONSENT_RECORDS: usize = 10_000;
 #[derive(Debug, Clone)]
 pub struct PushedRequest {
     pub request: AuthorizationRequest,
+    /// The signed request object exactly as the client sent it.
+    pub request_object: String,
     pub expires_at: i64,
     pub failed_logins: u32,
 }
@@ -50,6 +52,9 @@ pub struct Grant {
     pub txn: String,
     /// The purpose the client gave for this transaction, if any.
     pub purpose: Option<String>,
+    /// Manual changes to the ID token claims, made in the technical
+    /// experience.
+    pub id_token_edits: Option<crate::id_token::ClaimEdits>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,12 +157,18 @@ impl Store {
     }
 
     /// Store a pushed request and return its `request_uri`.
-    pub fn push_request(&self, request: AuthorizationRequest, expires_at: i64) -> String {
+    pub fn push_request(
+        &self,
+        request: AuthorizationRequest,
+        request_object: String,
+        expires_at: i64,
+    ) -> String {
         let uri = format!("{REQUEST_URI_PREFIX}{}", random_token(SECRET_BYTES));
         self.lock().pushed.insert(
             uri.clone(),
             PushedRequest {
                 request,
+                request_object,
                 expires_at,
                 failed_logins: 0,
             },
@@ -365,6 +376,7 @@ mod tests {
             auth_time: NOW,
             txn: "txn-1".to_owned(),
             purpose: None,
+            id_token_edits: None,
         }
     }
 
@@ -431,8 +443,8 @@ mod tests {
     #[test]
     fn request_uri_is_unguessable_and_well_formed() {
         let store = Store::new();
-        let a = store.push_request(request(), NOW + 60);
-        let b = store.push_request(request(), NOW + 60);
+        let a = store.push_request(request(), String::new(), NOW + 60);
+        let b = store.push_request(request(), String::new(), NOW + 60);
         assert_ne!(a, b);
         assert!(a.starts_with(REQUEST_URI_PREFIX));
         assert!(a.len() - REQUEST_URI_PREFIX.len() >= 43);
@@ -441,7 +453,7 @@ mod tests {
     #[test]
     fn pushed_request_can_be_peeked_repeatedly_but_taken_once() {
         let store = Store::new();
-        let uri = store.push_request(request(), NOW + 60);
+        let uri = store.push_request(request(), String::new(), NOW + 60);
         assert!(store.peek_request(&uri, NOW).is_some());
         assert!(store.peek_request(&uri, NOW).is_some());
         assert!(store.take_request(&uri, NOW).is_some());
@@ -452,7 +464,7 @@ mod tests {
     #[test]
     fn pushed_request_expires() {
         let store = Store::new();
-        let uri = store.push_request(request(), NOW + 60);
+        let uri = store.push_request(request(), String::new(), NOW + 60);
         assert!(store.peek_request(&uri, NOW + 59).is_some());
         assert!(store.peek_request(&uri, NOW + 60).is_none());
         assert!(store.take_request(&uri, NOW + 60).is_none());
@@ -466,7 +478,7 @@ mod tests {
     #[test]
     fn repeated_failed_logins_discard_the_request() {
         let store = Store::new();
-        let uri = store.push_request(request(), NOW + 60);
+        let uri = store.push_request(request(), String::new(), NOW + 60);
         for _ in 1..MAX_FAILED_LOGINS {
             assert!(store.record_failed_login(&uri));
         }
@@ -587,8 +599,8 @@ mod tests {
     #[test]
     fn purge_removes_only_expired_entries() {
         let store = Store::new();
-        store.push_request(request(), NOW + 10);
-        store.push_request(request(), NOW + 100);
+        store.push_request(request(), String::new(), NOW + 10);
+        store.push_request(request(), String::new(), NOW + 100);
         store.create_code(code("g1"));
         store.issue_access_token(AccessToken {
             grant: grant("g1"),

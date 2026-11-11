@@ -1,5 +1,7 @@
 //! ID token and `UserInfo` claim assembly.
 
+use std::collections::BTreeSet;
+
 use serde_json::{Map, Value, json};
 
 use crate::claims;
@@ -25,7 +27,53 @@ fn at_hash(access_token: &str) -> String {
     b64url(&sha256(access_token)[..16])
 }
 
-/// Build and sign an ID token.
+/// Shown in place of `at_hash` when previewing an ID token: the real value
+/// depends on the access token, which does not exist yet.
+pub const AT_HASH_PLACEHOLDER: &str = "(set when the access token is issued)";
+
+/// Manual changes to a set of claims: values to set and names to remove.
+///
+/// Edits are kept as a difference from what the user was shown, not as a
+/// replacement, so that claims they left alone (`iat`, `exp`, `at_hash`)
+/// still get their real values when the token is issued.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClaimEdits {
+    pub set: Map<String, Value>,
+    pub remove: BTreeSet<String>,
+}
+
+impl ClaimEdits {
+    /// The changes that turn `base` into `edited`.
+    pub fn between(base: &Map<String, Value>, edited: &Map<String, Value>) -> Self {
+        Self {
+            set: edited
+                .iter()
+                .filter(|(name, value)| base.get(*name) != Some(*value))
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
+            remove: base
+                .keys()
+                .filter(|name| !edited.contains_key(*name))
+                .cloned()
+                .collect(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.set.is_empty() && self.remove.is_empty()
+    }
+
+    pub fn apply(&self, claims: &mut Map<String, Value>) {
+        for name in &self.remove {
+            claims.remove(name);
+        }
+        for (name, value) in &self.set {
+            claims.insert(name.clone(), value.clone());
+        }
+    }
+}
+
+/// Build and sign an ID token, applying any manual edits on the grant.
 pub fn issue(
     state: &AppState,
     client: &Client,
@@ -34,6 +82,34 @@ pub fn issue(
     nonce: Option<&str>,
     access_token: &str,
 ) -> Result<String, crate::jose::JoseError> {
+    let mut claims = claims(state, client, user, grant, nonce, &at_hash(access_token));
+    if let Some(edits) = &grant.id_token_edits {
+        edits.apply(&mut claims);
+    }
+    state.signing_key.sign(Some("JWT"), &claims)
+}
+
+/// The ID token claims for a grant as they would be issued now, with
+/// [`AT_HASH_PLACEHOLDER`] for `at_hash` and before any manual edits.
+pub fn preview(
+    state: &AppState,
+    client: &Client,
+    user: &User,
+    grant: &Grant,
+    nonce: Option<&str>,
+) -> Map<String, Value> {
+    claims(state, client, user, grant, nonce, AT_HASH_PLACEHOLDER)
+}
+
+/// The claims of an ID token, before signing.
+fn claims(
+    state: &AppState,
+    client: &Client,
+    user: &User,
+    grant: &Grant,
+    nonce: Option<&str>,
+    at_hash: &str,
+) -> Map<String, Value> {
     let now = state.now();
     // Requested identity claims first, so they can never override the
     // protocol claims set below.
@@ -54,7 +130,7 @@ pub fn issue(
         "auth_time": grant.auth_time,
         // ConnectID: every ID token carries a transaction identifier.
         "txn": grant.txn,
-        "at_hash": at_hash(access_token),
+        "at_hash": at_hash,
     });
     if let Value::Object(protocol) = protocol {
         claims.extend(protocol);
@@ -62,7 +138,7 @@ pub fn issue(
     if let Some(nonce) = nonce {
         claims.insert("nonce".to_owned(), nonce.into());
     }
-    state.signing_key.sign(Some("JWT"), &claims)
+    claims
 }
 
 /// The `UserInfo` response body for a grant.
@@ -104,6 +180,7 @@ mod tests {
             auth_time: NOW - 5,
             txn: "txn-123".to_owned(),
             purpose: None,
+            id_token_edits: None,
         }
     }
 
@@ -181,6 +258,82 @@ mod tests {
         assert_eq!(jws.str_claim("given_name"), Some("Alex"));
         assert_eq!(jws.str_claim("iss"), Some(ISSUER));
         assert_eq!(jws.str_claim("txn"), Some("txn-123"));
+    }
+
+    #[test]
+    fn edits_are_the_difference_between_preview_and_edited_claims() {
+        let base = json!({"a": 1, "b": "x", "c": {"k": true}, "d": null});
+        let edited = json!({"a": 1, "b": "y", "c": {"k": false}, "e": [1]});
+        let edits = ClaimEdits::between(base.as_object().unwrap(), edited.as_object().unwrap());
+        assert_eq!(
+            Value::Object(edits.set.clone()),
+            json!({"b": "y", "c": {"k": false}, "e": [1]})
+        );
+        assert_eq!(edits.remove.iter().collect::<Vec<_>>(), ["d"]);
+        assert!(!edits.is_empty());
+
+        let mut live = json!({"a": 2, "b": "x", "d": 0, "z": 9});
+        edits.apply(live.as_object_mut().unwrap());
+        assert_eq!(
+            live,
+            json!({"a": 2, "b": "y", "c": {"k": false}, "e": [1], "z": 9}),
+            "untouched claims keep their live values"
+        );
+
+        let none = ClaimEdits::between(base.as_object().unwrap(), base.as_object().unwrap());
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn preview_matches_the_issued_token_apart_from_at_hash() {
+        let (state, _) = state();
+        let client = state.clients.get("rp").unwrap();
+        let user = state
+            .users
+            .authenticate(DEMO_USERNAME, DEMO_PASSWORD)
+            .unwrap();
+        let grant = grant(json!({"id_token": {"given_name": null}}));
+        let preview = preview(&state, &client, &user, &grant, Some("n-1"));
+        assert_eq!(preview["at_hash"], AT_HASH_PLACEHOLDER);
+
+        let token = issue(&state, &client, &user, &grant, Some("n-1"), "at").unwrap();
+        let mut issued = Jws::parse(&token, &[SigningAlg::PS256]).unwrap().claims;
+        assert_eq!(issued["at_hash"], at_hash("at"));
+        issued.insert("at_hash".to_owned(), AT_HASH_PLACEHOLDER.into());
+        assert_eq!(issued, preview);
+    }
+
+    #[test]
+    fn manual_edits_are_applied_to_the_issued_token() {
+        let (state, clock) = state();
+        let client = state.clients.get("rp").unwrap();
+        let user = state
+            .users
+            .authenticate(DEMO_USERNAME, DEMO_PASSWORD)
+            .unwrap();
+        let mut grant = grant(json!({"id_token": {"given_name": null, "family_name": null}}));
+        let base = preview(&state, &client, &user, &grant, Some("n-1"));
+        let mut edited = base.clone();
+        edited.insert("given_name".to_owned(), "Edited".into());
+        edited.insert("custom".to_owned(), json!({"nested": [1, 2]}));
+        edited.insert("sub".to_owned(), "someone-else".into());
+        edited.remove("family_name");
+        edited.remove("nonce");
+        grant.id_token_edits = Some(ClaimEdits::between(&base, &edited));
+
+        // Time passes between the preview and the token request.
+        clock.advance(7);
+        let token = issue(&state, &client, &user, &grant, Some("n-1"), "at").unwrap();
+        let jws = Jws::parse(&token, &[SigningAlg::PS256]).unwrap();
+        jws.verify(&state.signing_key.jwks()).unwrap();
+        assert_eq!(jws.str_claim("given_name"), Some("Edited"));
+        assert_eq!(jws.str_claim("sub"), Some("someone-else"));
+        assert_eq!(jws.claims["custom"], json!({"nested": [1, 2]}));
+        assert!(!jws.claims.contains_key("family_name"));
+        assert!(!jws.claims.contains_key("nonce"));
+        // Untouched claims are live, not frozen at preview time.
+        assert_eq!(jws.time_claim("iat"), Some(NOW + 7));
+        assert_eq!(jws.claims["at_hash"], at_hash("at"));
     }
 
     #[test]

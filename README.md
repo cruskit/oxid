@@ -24,7 +24,8 @@ numbers from `aws-lc-rs`, and password hashing from `argon2`.
 | Refresh tokens | Optional per client, not rotated. |
 | ID tokens | PS256, pairwise `sub`, always carry `txn`, never carry `acr`. |
 | Claims | Set per client by its profile: the ConnectID identity assurance claims, or every standard OpenID Connect claim; see [Claims](#claims). |
-| Consent | The user chooses which voluntary claims to share. Essential claims can only be refused by cancelling; see [Consent](#consent). |
+| User experience | Pluggable: the interaction at the authorization endpoint is a module chosen in configuration; see [User experience modules](#user-experience-modules). |
+| Consent | In the `login` experience, the user chooses which voluntary claims to share. Essential claims can only be refused by cancelling; see [Consent](#consent). |
 | Purpose | The `purpose` parameter is validated, shown to the user at consent, and recorded with the transaction; see [Purpose](#purpose). |
 | Authorization response | Query mode, with the `iss` parameter (RFC 9207), sent with a 303 redirect. |
 | Discovery | OpenID Connect Discovery and RFC 8414 metadata, including `mtls_endpoint_aliases`. |
@@ -67,9 +68,56 @@ The ConnectID claims:
   claims, as that profile requires. Registering an `oidc` client adds the
   remaining standard claims and the claim scopes.
 
+### User experience modules
+
+What the user sees at the authorization endpoint is a module, selected with
+`experience` in the configuration file (or `--experience` /
+`OXID_EXPERIENCE`, which override it). The protocol work around it is shared:
+finding the pushed request, CSRF protection, single use of the `request_uri`,
+issuing the code, recording the transaction and building the redirect.
+
+| Module | For | What it does |
+| --- | --- | --- |
+| `technical` (default) | Development, debugging, testing relying parties | No sign-in. Shows the request, lets you pick a customer and an outcome, and lets you edit the ID token claims before they are issued. |
+| `login` | The basis for a real end-user flow | Username and password sign-in with per-claim consent, described under [Consent](#consent). |
+
+> The `technical` module has no authentication: anyone who can reach the
+> authorization endpoint can act as any customer and change what is asserted
+> about them. oxID logs a warning when it starts with it. Never expose it to
+> real users.
+
+The `technical` module has two pages:
+
+1. **Request.** The request object is shown decoded (header and payload), with
+   the original encoded JWT one click away. You choose one of the predefined
+   customers, whose attributes can be expanded; the customer used on the last
+   completed flow is preselected (remembered in a cookie). You choose the
+   outcome: success, or one of the predefined errors (`access_denied`,
+   `login_required`, `consent_required`, `interaction_required`,
+   `account_selection_required`, `invalid_request`, `invalid_scope`,
+   `unauthorized_client`, `server_error`, `temporarily_unavailable`). Two
+   shortcut buttons send an unedited success or `access_denied` immediately.
+2. **Response.** For a success, the ID token payload is shown as JSON, before
+   signing, and can be edited freely: change, add or remove any claim,
+   including protocol claims such as `iss` or `exp`. For an error, the error
+   response is shown with an editable `error_description`.
+
+Edits are stored as differences from what was shown. Claims you leave alone
+get their real values when the token is issued: `iat`, `exp` and `auth_time`
+are set at that moment and `at_hash` is computed from the access token. The
+token is always properly signed. Edits apply to the ID token, not to UserInfo.
+
+The customers are the configured `users`, or four built-in ones when none are
+configured: `demo` (an adult with every claim), `riley` (under 18), `margaret`
+(over 65) and `sam` (sparse details). A configured user needs a
+`password_hash` only to sign in under `login`.
+
+To add a module, implement the `Experience` trait in `src/experience/`, add a
+variant to `experience::Kind`, and construct it in `experience::build`.
+
 ### Consent
 
-The sign-in page lists every claim that would be released. Claims requested
+This describes the `login` module. The sign-in page lists every claim that would be released. Claims requested
 with `"essential": true` are marked as required and have no checkbox; the only
 way to refuse them is to cancel the request. Every other claim, including those
 implied by a scope, has a checkbox that starts ticked, and the user can untick
@@ -113,9 +161,11 @@ one and is advertised through `mtls_endpoint_aliases`.
 This is an initial version. By design it does not yet have:
 
 - **User registration.** Users are a static list in the configuration file. If
-  none are configured, a single built-in demo user is used (`demo` /
-  `demo-password`); oxID logs a warning when it does this. Do not expose an
-  instance running with the demo user.
+  none are configured, four built-in demo customers are used (`demo`, `riley`,
+  `margaret` and `sam`, all with the password `demo-password`); oxID logs a
+  warning when it does this. Do not expose an instance running with them.
+- **Other experience modules.** Presenting verifiable credentials, and
+  self-registration, are planned as further modules and are not built.
 - **Client registration.** Clients are a static list in the configuration file.
 - **Persistence.** Pushed requests, codes and tokens are held in memory, so they
   are lost on restart and a deployment is a single instance.
@@ -170,8 +220,9 @@ that would break compliance (for example a 20 minute access token) is refused.
 
 `.github/workflows/build.yml` runs on GitHub-hosted runners for every push to
 `main` and every pull request. It checks formatting, lints, runs the unit and
-integration tests, and runs the conformance suite, whose results are kept as
-the `conformance-results` artifact.
+integration tests, and runs the conformance suite once per user experience
+module, in parallel jobs, whose results are kept as the
+`conformance-results-<experience>` artifacts.
 
 Releases are made on demand:
 
@@ -203,9 +254,17 @@ against oxID. It needs Docker, Python 3 and git. It:
    ```
 
 5. stops the containers, leaving logs and exported results in
-   `conformance/results/`.
+   `conformance/results/<experience>/`.
 
-The suite's browser automation signs in as the demo user. Nothing is published
+The whole plan is run once for each user experience module. A module decides
+who the response is about and what goes into the tokens, so a module can break
+conformance on its own, and the plan takes about two minutes. Each module has
+its own browser automation in `conformance/generate.py`: for `technical` the
+suite goes through the response preview page and sends it unedited; for
+`login` it signs in as the demo user. A new module needs an entry there and in
+the `EXPERIENCES` list in `scripts/conformance.sh` and the workflow matrix.
+
+Nothing is published
 beyond loopback: the suite UI is on `https://localhost:8943/` and oxID on
 `https://localhost:9443/`.
 
@@ -216,7 +275,8 @@ Useful settings:
 | `SUITE_TAG` | `release-v5.3.4` | Suite release, used for both the images and `run-test-plan.py` |
 | `SUITE_HOST_PORT` | `8943` | Loopback port for the suite UI and API |
 | `OXID_HOST_PORT` | `9443` | Loopback port for oxID's public listener |
-| `KEEP_RUNNING` | `0` | Set to `1` to leave the containers up so results can be browsed |
+| `OXID_EXPERIENCE` | unset | Run for one module only (`technical` or `login`); unset runs each in turn |
+| `KEEP_RUNNING` | `0` | Set to `1` to leave the containers up so results can be browsed (use with `OXID_EXPERIENCE`) |
 
 Results the suite is expected to report as failures or skips, if any, are
 recorded with their reasons in `conformance/expected-failures.json` and
@@ -232,6 +292,7 @@ src/
   config.rs          configuration file and its validation
   state.rs           shared application state
   http/              routing, endpoints, shared extractors and headers
+  experience/        pluggable user experiences: technical, login
   authz.rs           authorization request parameters and their rules
   request_object.rs  signed request object verification
   client_auth.rs     private_key_jwt client authentication
