@@ -385,6 +385,35 @@ async fn authorization_parameters_are_validated_at_par() {
     op.stop().await;
 }
 
+// --- Purpose (OAuth 2 Purpose 3) --------------------------------------------
+
+#[tokio::test]
+async fn invalid_purpose_fails_with_the_specified_error() {
+    let op = TestOp::start().await;
+    for purpose in [
+        json!("ab"),
+        json!("x".repeat(301)),
+        json!("   "),
+        json!("two\nlines"),
+        json!(42),
+    ] {
+        let response = op
+            .par(&op.request_object(&Pkce::new(), &json!({"purpose": purpose})))
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{purpose}");
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["error"], "invalid_request", "{purpose}");
+        if purpose.is_string() {
+            assert_eq!(body["error_description"], "invalid_purpose", "{purpose}");
+        }
+    }
+    // The boundaries themselves are accepted, as is a request with no purpose.
+    for purpose in [json!("abc"), json!("x".repeat(300)), Value::Null] {
+        op.push(&Pkce::new(), &json!({"purpose": purpose})).await;
+    }
+    op.stop().await;
+}
+
 // --- Client authentication (ConnectID 4.2-3.4, FAPI 2.0 5.3.2.1-8) ---------
 
 #[tokio::test]

@@ -1,0 +1,152 @@
+name: Build
+
+# Every push to main and every pull request is checked, tested and run through
+# the OpenID Foundation conformance suite.
+#
+# To publish a release: set the new version in Cargo.toml, merge it to main,
+# then start this workflow by hand (Actions > Build > Run workflow) on main
+# with "Create a GitHub release" ticked. The release is created only after the
+# checks and the conformance suite have passed for that commit.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Create a GitHub release from this commit (version comes from Cargo.toml)
+        type: boolean
+        default: false
+      prerelease:
+        description: Mark the release as a pre-release
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  # Never cancel a run that may be publishing a release.
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Format, lint and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # Installs the toolchain pinned in mise.toml, so CI and local builds
+      # use the same tasks.
+      - uses: jdx/mise-action@v2
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: mise run fmt
+
+      - name: Lint
+        run: mise run lint
+
+      - name: Unit and integration tests
+        run: mise run test
+
+  conformance:
+    name: OpenID conformance suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # Builds oxID into a container and runs the FAPI 2.0 Message Signing
+      # plan (ConnectID profile) against it. Needs only Docker, Python and
+      # git, all of which the runner image provides.
+      - name: Run the conformance suite
+        run: scripts/conformance.sh
+
+      - name: Upload conformance results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-results
+          path: conformance/results/
+          if-no-files-found: warn
+          retention-days: 30
+
+  release:
+    name: Publish release
+    if: github.event_name == 'workflow_dispatch' && inputs.release
+    needs: [check, conformance]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TARGET: x86_64-unknown-linux-gnu
+    steps:
+      - name: Releases are cut from the default branch only
+        if: github.ref_name != github.event.repository.default_branch
+        run: |
+          echo "::error::Run this workflow on ${{ github.event.repository.default_branch }} to create a release."
+          exit 1
+
+      - uses: actions/checkout@v4
+
+      - uses: jdx/mise-action@v2
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Read the version from Cargo.toml
+        id: version
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 --locked \
+            | jq -r '.packages[] | select(.name == "oxid") | .version')"
+          test -n "$version"
+          tag="v$version"
+          if gh release view "$tag" >/dev/null 2>&1 \
+            || git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "::error::$tag already exists. Set a new version in Cargo.toml first."
+            exit 1
+          fi
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          echo "tag=$tag" >>"$GITHUB_OUTPUT"
+
+      - name: Build the release binary
+        run: cargo build --release --locked --bin oxid
+
+      - name: Package
+        id: package
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          name="oxid-$TAG-$TARGET"
+          mkdir -p "dist/$name"
+          cp target/release/oxid README.md oxid.example.toml "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && sha256sum "$name.tar.gz" >"$name.tar.gz.sha256")
+          echo "archive=dist/$name.tar.gz" >>"$GITHUB_OUTPUT"
+
+      - name: Create the GitHub release
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          flags=()
+          if [[ "$PRERELEASE" == "true" ]]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
+            --title "oxID $VERSION" \
+            --generate-notes \
+            "${flags[@]}" \
+            "$ARCHIVE" "$ARCHIVE.sha256"

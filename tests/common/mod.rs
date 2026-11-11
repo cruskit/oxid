@@ -87,9 +87,11 @@ impl TestOp {
             redirect_uris: vec![REDIRECT_URI.to_owned()],
             jwks_file: None,
             jwks: Some(rp_key.jwks()),
-            scopes: vec!["openid".to_owned(), "email".to_owned()],
+            scopes: vec!["openid".to_owned()],
             grant_types: vec!["authorization_code".to_owned(), "refresh_token".to_owned()],
             sector_identifier: None,
+            profile: oxid::client::Profile::Connectid,
+            claims: None,
         });
         adjust(&mut config);
 
@@ -130,6 +132,11 @@ impl TestOp {
         if let Some(server) = self.server.take() {
             server.shutdown().await;
         }
+    }
+
+    /// The running provider's state, for assertions on what it recorded.
+    pub fn state(&self) -> &oxid::state::AppState {
+        self.server.as_ref().expect("server is running").state()
     }
 
     pub fn now(&self) -> i64 {
@@ -231,7 +238,8 @@ impl TestOp {
         LoginPage::from_response(response).await
     }
 
-    /// Submit the login form.
+    /// Submit the login form as a browser would, with every offered claim
+    /// left ticked.
     pub async fn decide(
         &self,
         page: &LoginPage,
@@ -240,17 +248,38 @@ impl TestOp {
         password: &str,
         action: &str,
     ) -> Response {
+        self.decide_declining(page, request_uri, username, password, action, &[])
+            .await
+    }
+
+    /// As [`Self::decide`], but unticking the checkboxes of `declined` claims.
+    pub async fn decide_declining(
+        &self,
+        page: &LoginPage,
+        request_uri: &str,
+        username: &str,
+        password: &str,
+        action: &str,
+        declined: &[&str],
+    ) -> Response {
+        let mut form = vec![
+            ("csrf".to_owned(), page.csrf.clone()),
+            ("client_id".to_owned(), CLIENT_ID.to_owned()),
+            ("request_uri".to_owned(), request_uri.to_owned()),
+            ("username".to_owned(), username.to_owned()),
+            ("password".to_owned(), password.to_owned()),
+            ("action".to_owned(), action.to_owned()),
+        ];
+        form.extend(
+            page.ticked()
+                .into_iter()
+                .filter(|field| !declined.iter().any(|d| *field == format!("share_{d}")))
+                .map(|field| (field, "1".to_owned())),
+        );
         self.browser
             .post(self.url("/authorize/decision"))
             .header(COOKIE, &page.cookie)
-            .form(&[
-                ("csrf", page.csrf.as_str()),
-                ("client_id", CLIENT_ID),
-                ("request_uri", request_uri),
-                ("username", username),
-                ("password", password),
-                ("action", action),
-            ])
+            .form(&form)
             .send()
             .await
             .unwrap()
@@ -327,6 +356,19 @@ pub struct LoginPage {
 }
 
 impl LoginPage {
+    /// Field names of the ticked consent checkboxes.
+    pub fn ticked(&self) -> Vec<String> {
+        self.html
+            .split("<input type=\"checkbox\"")
+            .skip(1)
+            .filter_map(|rest| {
+                let tag = rest.split('>').next()?;
+                let name = tag.split("name=\"").nth(1)?.split('"').next()?;
+                tag.contains(" checked").then(|| name.to_owned())
+            })
+            .collect()
+    }
+
     pub async fn from_response(response: Response) -> Self {
         let cookie = response
             .headers()

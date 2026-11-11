@@ -5,18 +5,19 @@ use axum::extract::State;
 use serde_json::{Value, json};
 
 use super::{PATH_AUTHORIZE, PATH_JWKS, PATH_PAR, PATH_TOKEN, PATH_USERINFO};
-use crate::authz::SCOPE_OPENID;
 use crate::claims;
+use crate::client::Profile;
 use crate::keys::SigningKey;
 use crate::pkce;
 use crate::state::AppState;
 
 pub async fn metadata(State(state): State<AppState>) -> Json<Value> {
     let alg = [SigningKey::ALG.as_str()];
-    let mut scopes = vec![SCOPE_OPENID];
-    scopes.extend_from_slice(claims::CLAIM_SCOPES);
+    // Advertise what the registered clients' profiles offer, no more.
+    let profiles = state.clients.profiles();
+    let connectid = profiles.contains(&Profile::Connectid);
 
-    Json(json!({
+    let mut metadata = json!({
         "issuer": state.issuer,
         "authorization_endpoint": state.url(PATH_AUTHORIZE),
         "token_endpoint": state.url(PATH_TOKEN),
@@ -31,7 +32,7 @@ pub async fn metadata(State(state): State<AppState>) -> Json<Value> {
             "pushed_authorization_request_endpoint": state.mtls_url(PATH_PAR),
         },
 
-        "scopes_supported": scopes,
+        "scopes_supported": claims::scopes_supported(&profiles),
         "response_types_supported": ["code"],
         "response_modes_supported": ["query"],
         "grant_types_supported": ["authorization_code", "refresh_token"],
@@ -52,11 +53,16 @@ pub async fn metadata(State(state): State<AppState>) -> Json<Value> {
 
         "claims_parameter_supported": true,
         "claim_types_supported": ["normal"],
-        "claims_supported": claims::claims_supported(),
-        "verified_claims_supported": true,
-        "trust_frameworks_supported": [claims::TRUST_FRAMEWORK],
-        "claims_in_verified_claims_supported": claims::verified_claims_supported(),
-    }))
+        "claims_supported": claims::claims_supported(&profiles),
+    });
+    // OpenID Connect for Identity Assurance metadata, for ConnectID clients.
+    if connectid {
+        metadata["verified_claims_supported"] = true.into();
+        metadata["trust_frameworks_supported"] = json!([claims::TRUST_FRAMEWORK]);
+        metadata["claims_in_verified_claims_supported"] =
+            claims::verified_claims_supported().into();
+    }
+    Json(metadata)
 }
 
 pub async fn jwks(State(state): State<AppState>) -> Json<jsonwebtoken::jwk::JwkSet> {
@@ -107,6 +113,37 @@ mod tests {
         }
         assert_eq!(m["claims_parameter_supported"], true);
         assert_eq!(m["trust_frameworks_supported"], json!(["au_connectid"]));
+        // Only a ConnectID client is registered, so only that profile's
+        // scope and claims are advertised (identity assurance 5.1).
+        assert_eq!(m["scopes_supported"], json!(["openid"]));
+        assert_eq!(m["verified_claims_supported"], true);
+        let listed =
+            |member: &str, claim: &str| m[member].as_array().unwrap().contains(&json!(claim));
+        for claim in ["given_name", "middle_name", "family_name", "email"] {
+            assert!(listed("claims_supported", claim), "{claim}");
+        }
+        for claim in ["birthdate", "phone_number", "address", "txn"] {
+            assert!(listed("claims_supported", claim), "{claim}");
+        }
+        for claim in ["name", "nickname", "email_verified", "locale"] {
+            assert!(!listed("claims_supported", claim), "{claim}");
+        }
+        assert!(!listed("claims_supported", "acr"));
+        for claim in [
+            "over16",
+            "over18",
+            "over21",
+            "over25",
+            "over65",
+            "beneficiary_account_au",
+            "beneficiary_account_au_payid",
+            "beneficiary_account_international",
+        ] {
+            assert!(
+                listed("claims_in_verified_claims_supported", claim),
+                "{claim}"
+            );
+        }
         let aliases = &m["mtls_endpoint_aliases"];
         assert_eq!(aliases["token_endpoint"], format!("{MTLS}/token"));
         assert_eq!(aliases["userinfo_endpoint"], format!("{MTLS}/userinfo"));

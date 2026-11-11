@@ -37,7 +37,14 @@ pub fn issue(
     let now = state.now();
     // Requested identity claims first, so they can never override the
     // protocol claims set below.
-    let mut claims = claims::release(user, &grant.claims.id_token, &[], now);
+    let mut claims = claims::release(
+        user,
+        client,
+        &grant.claims.id_token,
+        &[],
+        &grant.shared_claims,
+        now,
+    );
     let protocol = json!({
         "iss": state.issuer,
         "sub": subject_for(state, client, user),
@@ -65,7 +72,14 @@ pub fn userinfo(
     user: &User,
     grant: &Grant,
 ) -> Map<String, Value> {
-    let mut claims = claims::release(user, &grant.claims.userinfo, &grant.scope, state.now());
+    let mut claims = claims::release(
+        user,
+        client,
+        &grant.claims.userinfo,
+        &grant.scope,
+        &grant.shared_claims,
+        state.now(),
+    );
     claims.insert("sub".to_owned(), subject_for(state, client, user).into());
     claims
 }
@@ -86,8 +100,10 @@ mod tests {
             user_subject: "demo-user-0001".to_owned(),
             scope: vec!["openid".to_owned()],
             claims: ClaimsRequest::parse(&claims).unwrap(),
+            shared_claims: claims::test_support::everything(),
             auth_time: NOW - 5,
             txn: "txn-123".to_owned(),
+            purpose: None,
         }
     }
 
@@ -187,5 +203,32 @@ mod tests {
         assert_eq!(body["sub"], subject_for(&state, &client, &user));
         assert_eq!(body["email"], "alex.citizen@example.com");
         assert_eq!(body.len(), 2, "{body:?}");
+    }
+
+    #[test]
+    fn id_token_carries_connectid_verified_claims_and_never_acr() {
+        let (state, _) = state();
+        let client = state.clients.get("rp").unwrap();
+        let user = state
+            .users
+            .authenticate(DEMO_USERNAME, DEMO_PASSWORD)
+            .unwrap();
+        let grant = grant(json!({"id_token": {
+            "acr": {"essential": true, "value": "urn:mace:incommon:iap:silver"},
+            "verified_claims": {
+                "verification": {"trust_framework": {"value": "au_connectid"}},
+                "claims": {"over18": null, "beneficiary_account_au": null},
+            },
+        }}));
+        let token = issue(&state, &client, &user, &grant, None, "at").unwrap();
+        let jws = Jws::parse(&token, &[SigningAlg::PS256]).unwrap();
+        assert!(!jws.claims.contains_key("acr"));
+        let verified = &jws.claims["verified_claims"];
+        assert_eq!(verified["verification"]["trust_framework"], "au_connectid");
+        assert_eq!(verified["claims"]["over18"], true);
+        assert_eq!(
+            verified["claims"]["beneficiary_account_au"]["account_bsb"],
+            "123456"
+        );
     }
 }

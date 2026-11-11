@@ -10,6 +10,7 @@
 //! redirected (the provider must not be an open redirector, §5.3.2.1-7).
 //! Otherwise the error goes back to the client's redirect URI.
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use axum::body::Bytes;
@@ -21,12 +22,15 @@ use uuid::Uuid;
 
 use super::{PATH_DECISION, Params, no_store};
 use crate::authz::AuthorizationRequest;
-use crate::claims::VERIFIED_CLAIMS;
+use crate::claims::{self, ConsentItem};
 use crate::client::Client;
 use crate::error::ErrorCode;
 use crate::state::AppState;
-use crate::store::{AuthorizationCode, Grant, PushedRequest};
+use crate::store::{AuthorizationCode, ConsentOutcome, ConsentRecord, Grant, PushedRequest};
 use crate::util::{ct_eq, html_escape, random_token};
+
+/// Prefix of the consent form's per-claim checkboxes: `share_<claim>`.
+const SHARE_FIELD_PREFIX: &str = "share_";
 
 /// Double-submit CSRF cookie. The `__Host-` prefix pins it to this origin,
 /// `Secure` and path `/` (RFC 6265bis §4.1.3.2).
@@ -37,7 +41,9 @@ const CONTENT_SECURITY_POLICY: &str =
 
 const STYLE: &str = "body{font-family:system-ui,sans-serif;max-width:32rem;margin:3rem auto;\
 padding:0 1rem;color:#1a1a1a}h1{font-size:1.4rem}label{display:block;margin:.8rem 0 .2rem}\
-input{width:100%;padding:.5rem;box-sizing:border-box}button{padding:.6rem 1.2rem;margin:1rem .5rem 0 0}\
+input{width:100%;padding:.5rem;box-sizing:border-box}\
+input[type=checkbox]{width:auto;margin-right:.5rem}ul.claims{list-style:none;padding:0}\
+ul.claims li{margin:.4rem 0}ul.claims label{display:inline;margin:0}.required{color:#555;font-size:.85em}button{padding:.6rem 1.2rem;margin:1rem .5rem 0 0}\
 .error{color:#b00020}.box{background:#f4f4f4;padding:.8rem;border-radius:.3rem}";
 
 fn page(status: StatusCode, title: &str, body: &str) -> Response {
@@ -191,7 +197,14 @@ pub async fn authorize(
     let csrf = cookie(&headers, CSRF_COOKIE)
         .filter(|v| is_csrf_token(v))
         .map_or_else(|| random_token(32), str::to_owned);
-    login_page(&client, &request_uri, &pushed.request, &csrf, None)
+    login_page(
+        &client,
+        &request_uri,
+        &pushed.request,
+        &csrf,
+        None,
+        &BTreeSet::new(),
+    )
 }
 
 fn login_page(
@@ -200,6 +213,8 @@ fn login_page(
     request: &AuthorizationRequest,
     csrf: &str,
     error: Option<&str>,
+    // Voluntary claims to show unticked, when the page is shown again.
+    declined: &BTreeSet<String>,
 ) -> Response {
     let mut body = String::new();
     let _ = write!(
@@ -217,41 +232,66 @@ fn login_page(
     if let Some(purpose) = &request.purpose {
         let _ = write!(
             body,
-            "<p>Reason given for this request:</p><p id=\"purpose\" class=\"box\">{}</p>",
+            "<p>Why this is being requested:</p><p id=\"purpose\" class=\"box\">{}</p>",
             html_escape(purpose)
         );
     }
 
-    let mut requested: Vec<String> = request
-        .claims
-        .id_token
-        .keys()
-        .chain(request.claims.userinfo.keys())
-        .filter(|name| *name != VERIFIED_CLAIMS)
-        .cloned()
-        .collect();
-    for location in [&request.claims.id_token, &request.claims.userinfo] {
-        let verified = location.get(VERIFIED_CLAIMS).and_then(|v| v.get("claims"));
-        if let Some(claims) = verified.and_then(|c| c.as_object()) {
-            requested.extend(claims.keys().map(|name| format!("{name} (verified)")));
+    let _ = write!(body, "<form method=\"post\" action=\"{PATH_DECISION}\">");
+
+    // Only what can actually be released is listed. `txn` is technical and
+    // is not shown (ConnectID identity assurance §5.3.2). Essential claims
+    // have no checkbox: they can only be refused by cancelling.
+    let requested = request.claims.consentable(client, &request.scope);
+    if requested.is_empty() {
+        body.push_str(
+            "<p id=\"requested-none\">This application will confirm that you signed in. \
+             No personal details will be shared.</p>",
+        );
+    } else {
+        body.push_str(
+            "<p>If you continue, this will be shared:</p><ul id=\"requested\" class=\"claims\">",
+        );
+        for item in &requested {
+            let name = html_escape(&item.name);
+            let label = html_escape(&item.label);
+            if item.essential {
+                let _ = write!(
+                    body,
+                    "<li data-claim=\"{name}\" data-essential=\"true\">{label} \
+                     <span class=\"required\">(required)</span></li>"
+                );
+            } else {
+                let checked = if declined.contains(&item.name) {
+                    ""
+                } else {
+                    " checked"
+                };
+                let _ = write!(
+                    body,
+                    "<li data-claim=\"{name}\"><label>\
+                     <input type=\"checkbox\" id=\"share-{name}\" \
+                     name=\"{SHARE_FIELD_PREFIX}{name}\" value=\"1\"{checked}>{label}</label></li>"
+                );
+            }
+        }
+        body.push_str("</ul>");
+        if requested.iter().any(|item| !item.essential) {
+            body.push_str(
+                "<p id=\"optional-hint\">Untick anything optional that you do not want to share.</p>",
+            );
+        }
+        if requested.iter().any(|item| item.essential) {
+            body.push_str(
+                "<p id=\"required-hint\">Required items are needed by the application. \
+                 If you do not want to share them, cancel.</p>",
+            );
         }
     }
-    requested.sort();
-    requested.dedup();
-
-    body.push_str("<p>This application is asking for:</p><ul id=\"requested\">");
-    for scope in &request.scope {
-        let _ = write!(body, "<li>scope: {}</li>", html_escape(scope));
-    }
-    for claim in &requested {
-        let _ = write!(body, "<li>{}</li>", html_escape(claim));
-    }
-    body.push_str("</ul>");
 
     let _ = write!(
         body,
-        "<form method=\"post\" action=\"{PATH_DECISION}\">\
-         <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+        "<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
          <input type=\"hidden\" name=\"client_id\" value=\"{client_id}\">\
          <input type=\"hidden\" name=\"request_uri\" value=\"{request_uri}\">\
          <label for=\"username\">Username</label>\
@@ -272,6 +312,61 @@ fn login_page(
         response.headers_mut().insert(header::SET_COOKIE, value);
     }
     response
+}
+
+/// What the user chose on the consent form: the claims they agreed to share
+/// and the voluntary ones they unticked. Essential claims are always shared,
+/// whatever was submitted, and only claims that were offered count.
+fn user_selection(
+    client: &Client,
+    request: &AuthorizationRequest,
+    params: &Params,
+) -> (BTreeSet<String>, Vec<String>) {
+    let items: Vec<ConsentItem> = request.claims.consentable(client, &request.scope);
+    let shared = claims::shared_claims(&items, |name| {
+        params.get(&format!("{SHARE_FIELD_PREFIX}{name}")).is_some()
+    });
+    let declined = items
+        .into_iter()
+        .map(|item| item.name)
+        .filter(|name| !shared.contains(name))
+        .collect();
+    (shared, declined)
+}
+
+/// Record the outcome of a transaction, with the purpose the client gave
+/// (OAuth 2 Purpose §5), and return the transaction's identifier.
+fn record_decision(
+    state: &AppState,
+    client: &Client,
+    user_subject: Option<&str>,
+    purpose: Option<&str>,
+    (shared, declined): (&BTreeSet<String>, &[String]),
+    now: i64,
+    outcome: ConsentOutcome,
+) -> String {
+    let txn = Uuid::new_v4().to_string();
+    let claims: Vec<String> = shared.iter().cloned().collect();
+    tracing::info!(
+        %txn,
+        client_id = %client.id,
+        purpose = purpose.unwrap_or_default(),
+        shared = %claims.join(" "),
+        declined = %declined.join(" "),
+        ?outcome,
+        "authorization request decided"
+    );
+    state.store.record_consent(ConsentRecord {
+        txn: txn.clone(),
+        client_id: client.id.clone(),
+        user_subject: user_subject.map(str::to_owned),
+        purpose: purpose.map(str::to_owned),
+        claims,
+        declined: declined.to_vec(),
+        decided_at: now,
+        outcome,
+    });
+    txn
 }
 
 /// `POST /authorize/decision`: the user's sign-in and consent.
@@ -312,14 +407,19 @@ pub async fn decision(State(state): State<AppState>, headers: HeaderMap, body: B
 
     match params.get("action") {
         Some("deny") => {
-            if state
-                .store
-                .take_request(&request_uri, state.now())
-                .is_none()
-            {
+            let now = state.now();
+            if state.store.take_request(&request_uri, now).is_none() {
                 return used();
             }
-            tracing::info!(client_id = %client.id, "user denied the authorization request");
+            record_decision(
+                &state,
+                &client,
+                None,
+                request.purpose.as_deref(),
+                (&BTreeSet::new(), &[]),
+                now,
+                ConsentOutcome::Denied,
+            );
             redirect_error(
                 &state,
                 &request.redirect_uri,
@@ -341,12 +441,14 @@ pub async fn decision(State(state): State<AppState>, headers: HeaderMap, body: B
 
             let Some(user) = user else {
                 if state.store.record_failed_login(&request_uri) {
+                    let (_, declined) = user_selection(&client, request, &params);
                     return login_page(
                         &client,
                         &request_uri,
                         request,
                         csrf,
                         Some("The username or password is incorrect."),
+                        &declined.into_iter().collect(),
                     );
                 }
                 tracing::warn!(client_id = %client.id, "too many failed sign-in attempts");
@@ -365,6 +467,16 @@ pub async fn decision(State(state): State<AppState>, headers: HeaderMap, body: B
                 return used();
             };
             let request = pushed.request;
+            let (shared, declined) = user_selection(&client, &request, &params);
+            let txn = record_decision(
+                &state,
+                &client,
+                Some(&user.subject),
+                request.purpose.as_deref(),
+                (&shared, &declined),
+                now,
+                ConsentOutcome::Approved,
+            );
             let code = state.store.create_code(AuthorizationCode {
                 grant: Grant {
                     id: random_token(16),
@@ -372,16 +484,16 @@ pub async fn decision(State(state): State<AppState>, headers: HeaderMap, body: B
                     user_subject: user.subject.clone(),
                     scope: request.scope,
                     claims: request.claims,
+                    shared_claims: shared,
                     auth_time: now,
-                    txn: Uuid::new_v4().to_string(),
+                    txn,
+                    purpose: request.purpose,
                 },
                 redirect_uri: request.redirect_uri.clone(),
                 code_challenge: request.code_challenge,
                 nonce: request.nonce,
                 expires_at: now + state.security.authorization_code_ttl,
             });
-            tracing::info!(client_id = %client.id, "user approved the authorization request");
-
             let mut out = vec![("code", code.as_str())];
             if let Some(client_state) = &request.state {
                 out.push(("state", client_state));
@@ -452,22 +564,48 @@ pub(crate) mod test_support {
         (base.to_string(), params)
     }
 
-    /// Run the browser leg for a pushed request and return the code.
+    /// Names of the ticked checkboxes on a consent page, as a browser would
+    /// submit them.
+    pub fn ticked(html: &str) -> Vec<String> {
+        html.split("<input type=\"checkbox\"")
+            .skip(1)
+            .filter_map(|rest| {
+                let tag = rest.split('>').next()?;
+                let name = tag.split("name=\"").nth(1)?.split('"').next()?;
+                tag.contains(" checked").then(|| name.to_owned())
+            })
+            .collect()
+    }
+
+    /// Run the browser leg for a pushed request, sharing everything offered,
+    /// and return the code.
     pub async fn approve(harness: &Harness, request_uri: &str) -> String {
+        approve_declining(harness, request_uri, &[]).await
+    }
+
+    /// As [`approve`], but unticking the checkboxes for `declined` claims.
+    pub async fn approve_declining(
+        harness: &Harness,
+        request_uri: &str,
+        declined: &[&str],
+    ) -> String {
+        let page = harness.get(None, &authorize_path(request_uri)).await;
+        let html = body_text(page).await;
         let csrf = open_login(harness, request_uri).await;
-        let response = submit(
-            harness,
-            Some(&csrf),
-            &[
-                ("csrf", &csrf),
-                ("client_id", "rp"),
-                ("request_uri", request_uri),
-                ("username", crate::user::DEMO_USERNAME),
-                ("password", crate::user::DEMO_PASSWORD),
-                ("action", "approve"),
-            ],
-        )
-        .await;
+        let ticked: Vec<String> = ticked(&html)
+            .into_iter()
+            .filter(|field| !declined.iter().any(|d| *field == format!("share_{d}")))
+            .collect();
+        let mut fields = vec![
+            ("csrf", csrf.as_str()),
+            ("client_id", "rp"),
+            ("request_uri", request_uri),
+            ("username", crate::user::DEMO_USERNAME),
+            ("password", crate::user::DEMO_PASSWORD),
+            ("action", "approve"),
+        ];
+        fields.extend(ticked.iter().map(|field| (field.as_str(), "1")));
+        let response = submit(harness, Some(&csrf), &fields).await;
         redirect_params(&response)
             .1
             .remove("code")
@@ -480,7 +618,9 @@ mod tests {
     use axum::http::{StatusCode, header};
     use serde_json::json;
 
-    use super::test_support::{approve, authorize_path, open_login, redirect_params, submit};
+    use super::test_support::{
+        approve, approve_declining, authorize_path, open_login, redirect_params, submit, ticked,
+    };
     use super::*;
     use crate::http::PATH_AUTHORIZE;
     use crate::http::test_support::{Harness, body_text};
@@ -507,7 +647,11 @@ mod tests {
                 "purpose": "Verify your <age> for checkout",
                 "claims": {"id_token": {
                     "given_name": null,
-                    "verified_claims": {"verification": {"trust_framework": null}, "claims": {"over18": null}},
+                    "nickname": null,
+                    "verified_claims": {
+                        "verification": {"trust_framework": {"value": "au_connectid"}},
+                        "claims": {"over18": null, "beneficiary_account_au": {"essential": true}},
+                    },
                 }},
             }))
             .await;
@@ -541,8 +685,17 @@ mod tests {
             html.contains("Verify your &lt;age&gt; for checkout"),
             "purpose is shown, escaped"
         );
-        assert!(html.contains("<li>given_name</li>"));
-        assert!(html.contains("<li>over18 (verified)</li>"));
+        assert!(html.contains("name=\"share_given_name\" value=\"1\" checked>Given name"));
+        assert!(html.contains("data-claim=\"over18\""));
+        assert!(
+            html.contains("<li data-claim=\"beneficiary_account_au\" data-essential=\"true\">")
+        );
+        assert_eq!(ticked(&html), ["share_given_name", "share_over18"]);
+        assert!(html.contains("Bank account (BSB and account number)"));
+        assert!(
+            !html.contains("nickname"),
+            "unsupported claims are not offered"
+        );
         assert!(html.contains("id=\"username\"") && html.contains("id=\"password\""));
     }
 
@@ -564,6 +717,112 @@ mod tests {
         assert!(params["code"].len() >= 43);
         assert!(!params.contains_key("error"));
         assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    }
+
+    #[tokio::test]
+    async fn decisions_are_recorded_with_their_purpose() {
+        let harness = Harness::new();
+        let pushed = json!({
+            "purpose": "Opening your savings account",
+            "claims": {"id_token": {"family_name": null, "nickname": null}},
+        });
+        let uri = harness.push(&pushed).await;
+        approve(&harness, &uri).await;
+
+        let history = harness.state.store.consent_history("demo-user-0001");
+        assert_eq!(history.len(), 1);
+        let record = &history[0];
+        assert_eq!(
+            record.purpose.as_deref(),
+            Some("Opening your savings account")
+        );
+        assert_eq!(record.client_id, "rp");
+        assert_eq!(record.claims, ["family_name"]);
+        assert_eq!(record.outcome, ConsentOutcome::Approved);
+        assert_eq!(record.decided_at, harness.state.now());
+        assert_eq!(record.txn.len(), 36);
+
+        // A cancelled request is recorded too, against no user.
+        let uri = harness.push(&pushed).await;
+        let csrf = open_login(&harness, &uri).await;
+        let fields = [
+            ("csrf", csrf.as_str()),
+            ("client_id", "rp"),
+            ("request_uri", &uri),
+            ("action", "deny"),
+        ];
+        submit(&harness, Some(&csrf), &fields).await;
+        assert_eq!(
+            harness.state.store.consent_history("demo-user-0001").len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn user_can_decline_voluntary_claims_but_not_essential_ones() {
+        let harness = Harness::new();
+        let pushed = json!({"claims": {"id_token": {
+            "given_name": {"essential": true},
+            "email": null,
+            "phone_number": {"essential": false},
+            "verified_claims": {
+                "verification": {"trust_framework": {"value": "au_connectid"}},
+                "claims": {"over18": {"essential": true}, "over21": null},
+            },
+        }}});
+        let uri = harness.push(&pushed).await;
+        let html = body_text(harness.get(None, &authorize_path(&uri)).await).await;
+        // Essential claims have no checkbox at all.
+        assert_eq!(
+            ticked(&html),
+            ["share_email", "share_over21", "share_phone_number"]
+        );
+        assert!(!html.contains("share_given_name") && !html.contains("share_over18"));
+        assert!(html.contains("id=\"optional-hint\"") && html.contains("id=\"required-hint\""));
+
+        approve_declining(&harness, &uri, &["email", "over21"]).await;
+        let record = &harness.state.store.consent_history("demo-user-0001")[0];
+        assert_eq!(record.claims, ["given_name", "over18", "phone_number"]);
+        assert_eq!(record.declined, ["email", "over21"]);
+
+        // Submitting nothing at all still shares the essential claims, and
+        // fields for claims that were never offered are ignored.
+        let uri = harness.push(&pushed).await;
+        let csrf = open_login(&harness, &uri).await;
+        let mut fields = login_fields(&csrf, &uri, DEMO_PASSWORD).to_vec();
+        fields.push(("share_birthdate", "1"));
+        fields.push(("share_name", "1"));
+        submit(&harness, Some(&csrf), &fields).await;
+        let record = &harness.state.store.consent_history("demo-user-0001")[0];
+        assert_eq!(record.claims, ["given_name", "over18"]);
+        assert_eq!(record.declined, ["email", "over21", "phone_number"]);
+    }
+
+    #[tokio::test]
+    async fn declined_claims_stay_unticked_after_a_wrong_password() {
+        let harness = Harness::new();
+        let uri = harness
+            .push(&json!({"claims": {"id_token": {"email": null, "given_name": null}}}))
+            .await;
+        let csrf = open_login(&harness, &uri).await;
+        let mut fields = login_fields(&csrf, &uri, "wrong").to_vec();
+        fields.push(("share_given_name", "1"));
+        let html = body_text(submit(&harness, Some(&csrf), &fields).await).await;
+        assert!(html.contains("username or password is incorrect"));
+        assert_eq!(ticked(&html), ["share_given_name"]);
+        assert!(
+            html.contains("name=\"share_email\""),
+            "still offered, unticked"
+        );
+    }
+
+    #[tokio::test]
+    async fn login_page_says_when_nothing_personal_is_shared() {
+        let harness = Harness::new();
+        let uri = harness.push(&json!({})).await;
+        let html = body_text(harness.get(None, &authorize_path(&uri)).await).await;
+        assert!(html.contains("id=\"requested-none\""));
+        assert!(!html.contains("id=\"purpose\""));
     }
 
     #[tokio::test]

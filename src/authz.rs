@@ -13,9 +13,21 @@ use crate::client::Client;
 use crate::error::{ErrorCode, OAuthError};
 use crate::pkce;
 
-/// ConnectID `purpose` length limits, in characters.
+/// `purpose` length limits, in characters (OAuth 2 Purpose §3).
 pub const PURPOSE_MIN_CHARS: usize = 3;
 pub const PURPOSE_MAX_CHARS: usize = 300;
+
+/// `error_description` for a `purpose` that breaks the rules.
+pub const INVALID_PURPOSE: &str = "invalid_purpose";
+
+/// Whether `purpose` is acceptable: human-readable text of 3 to 300
+/// characters. Control characters are refused as well, since the text is
+/// recorded and shown to the user (OAuth 2 Purpose §9.1).
+pub fn is_valid_purpose(purpose: &str) -> bool {
+    (PURPOSE_MIN_CHARS..=PURPOSE_MAX_CHARS).contains(&purpose.chars().count())
+        && !purpose.chars().any(char::is_control)
+        && !purpose.trim().is_empty()
+}
 
 /// Upper bounds on opaque client-supplied values, to bound stored state.
 /// FAPI 2.0 §5.3.2.2-14 requires supporting nonces of at least 64 characters.
@@ -35,7 +47,8 @@ pub struct AuthorizationRequest {
     /// S256 PKCE challenge.
     pub code_challenge: String,
     pub claims: ClaimsRequest,
-    /// ConnectID: why the RP is asking, shown to the user at consent.
+    /// Why the client is asking (OAuth 2 Purpose). Shown to the user at
+    /// consent and recorded with the transaction.
     pub purpose: Option<String>,
 }
 
@@ -152,14 +165,11 @@ impl AuthorizationRequest {
             Some(value) => ClaimsRequest::parse(value).map_err(OAuthError::invalid_request)?,
         };
 
+        // OAuth 2 Purpose §3: a violation fails the request with
+        // `invalid_request` and this exact description.
         let purpose = string("purpose")?;
-        if let Some(purpose) = purpose {
-            let chars = purpose.chars().count();
-            if !(PURPOSE_MIN_CHARS..=PURPOSE_MAX_CHARS).contains(&chars) {
-                return Err(OAuthError::invalid_request(format!(
-                    "purpose must be between {PURPOSE_MIN_CHARS} and {PURPOSE_MAX_CHARS} characters"
-                )));
-            }
+        if purpose.is_some_and(|p| !is_valid_purpose(p)) {
+            return Err(OAuthError::invalid_request(INVALID_PURPOSE));
         }
 
         // There is no session to reuse yet, so a silent request cannot succeed.
@@ -382,6 +392,43 @@ mod tests {
             code(&with("purpose", json!("ab"))),
             ErrorCode::InvalidRequest
         );
+    }
+
+    #[test]
+    fn invalid_purpose_is_reported_as_the_specification_requires() {
+        for bad in [
+            json!("ab"),
+            json!(""),
+            json!("x".repeat(301)),
+            json!("   "),
+            json!("line one\nline two"),
+            json!("bell\u{7}"),
+        ] {
+            let err = AuthorizationRequest::from_params(&client(), &with("purpose", bad.clone()))
+                .unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidRequest, "{bad}");
+            assert_eq!(err.description, INVALID_PURPOSE, "{bad}");
+        }
+        assert_eq!(
+            code(&with("purpose", json!(["a", "list"]))),
+            ErrorCode::InvalidRequest
+        );
+    }
+
+    #[test]
+    fn purpose_accepts_text_in_any_language() {
+        for ok in [
+            "abc",
+            "Verify your identity to open an account",
+            "Vérification d'identité — ouverture de compte",
+            "口座開設のための本人確認",
+            "<b>Markup is kept as text & escaped on display</b>",
+        ] {
+            let request =
+                AuthorizationRequest::from_params(&client(), &with("purpose", json!(ok))).unwrap();
+            assert_eq!(request.purpose.as_deref(), Some(ok));
+        }
+        assert!(is_valid_purpose(&"x".repeat(300)));
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{CLIENT_ID, Pkce, TestOp, oauth_error, redirect_params};
+use common::{ASSERTION_TYPE, CLIENT_ID, Pkce, TestOp, oauth_error, redirect_params};
 use oxid::user::{DEMO_PASSWORD, DEMO_USERNAME};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
@@ -103,56 +103,433 @@ async fn full_code_flow_issues_verifiable_bound_tokens() {
     op.stop().await;
 }
 
+/// A `claims` parameter asking for everything the ConnectID identity
+/// assurance profile defines, in the ID token.
+fn every_connectid_claim() -> Value {
+    json!({"id_token": {
+        "given_name": null,
+        "middle_name": {},
+        "family_name": {"essential": true},
+        "email": {"essential": false},
+        "birthdate": null,
+        "phone_number": {},
+        "address": {"essential": true},
+        "txn": {"essential": true},
+        "verified_claims": {
+            "verification": {"trust_framework": {"value": "au_connectid"}},
+            "claims": {
+                "over16": {"essential": true},
+                "over18": {"essential": true},
+                "over21": null,
+                "over25": null,
+                "over65": {"essential": true},
+                "beneficiary_account_au": {"essential": false},
+                "beneficiary_account_au_payid": null,
+                "beneficiary_account_international": {"essential": true},
+            },
+        },
+    }})
+}
+
 #[tokio::test]
 async fn connectid_identity_claims_are_returned_in_the_id_token() {
     let op = TestOp::start().await;
     let tokens = op
         .tokens(&json!({
             "purpose": "Verifying your identity to open an account",
-            "claims": {"id_token": {
-                "given_name": null,
-                "middle_name": {},
-                "family_name": {"essential": true},
-                "email": {"essential": false},
-                "birthdate": null,
-                "phone_number": {},
-                "address": {"essential": true},
-                "txn": {"essential": true},
-                "verified_claims": {
-                    "verification": {"trust_framework": {"value": "au_connectid"}},
-                    "claims": {
-                        "over16": {"essential": true},
-                        "over18": {"essential": true},
-                        "over65": {"essential": true},
-                        "beneficiary_account_au": {"essential": false},
-                    },
-                },
-            }},
+            "claims": every_connectid_claim(),
         }))
         .await;
     let claims = op
         .verify_id_token(tokens["id_token"].as_str().unwrap())
         .await;
 
-    for claim in [
-        "given_name",
-        "middle_name",
+    assert_eq!(claims["given_name"], "Alex");
+    assert_eq!(claims["middle_name"], "Jordan");
+    assert_eq!(claims["family_name"], "Citizen");
+    assert_eq!(claims["email"], "alex.citizen@example.com");
+    assert_eq!(claims["birthdate"], "1985-04-12");
+    assert_eq!(claims["phone_number"], "+61 400 000 000");
+    assert_eq!(
+        claims["address"],
+        json!({
+            "street_address": "1 Example Street",
+            "locality": "Sydney",
+            "region": "NSW",
+            "postal_code": "2000",
+            "country": "Australia",
+        })
+    );
+    assert_eq!(claims["txn"].as_str().unwrap().len(), 36);
+    assert!(!claims.contains_key("acr"), "ConnectID forbids acr");
+    assert_eq!(
+        claims["verified_claims"],
+        json!({
+            "verification": {"trust_framework": "au_connectid"},
+            "claims": {
+                "over16": true,
+                "over18": true,
+                "over21": true,
+                "over25": true,
+                "over65": false,
+                "beneficiary_account_au": {
+                    "beneficiary_name": "Alex Jordan Citizen",
+                    "account_bsb": "123456",
+                    "account_number": "12345678",
+                },
+                "beneficiary_account_au_payid": {
+                    "beneficiary_name": "Alex Jordan Citizen",
+                    "payid": "alex.citizen@example.com",
+                    "payid_type": "/EMAL",
+                },
+                "beneficiary_account_international": {
+                    "beneficiary_name": "Alex Jordan Citizen",
+                    "bic_swift_code": "OXIDAU2SXXX",
+                    "account_number_international": "12345612345678",
+                    "beneficiary_residential_address":
+                        "1 Example Street, Sydney, NSW 2000, Australia",
+                },
+            },
+        })
+    );
+    op.stop().await;
+}
+
+#[tokio::test]
+async fn verified_claims_without_the_connectid_trust_framework_are_ignored() {
+    let op = TestOp::start().await;
+    for verification in [
+        json!({"trust_framework": null}),
+        json!({"trust_framework": {"value": "uk_tfida"}}),
+        json!({}),
+    ] {
+        let tokens = op
+            .tokens(&json!({"claims": {"id_token": {
+                "given_name": null,
+                "verified_claims": {"verification": verification, "claims": {"over18": null}},
+            }}}))
+            .await;
+        let claims = op
+            .verify_id_token(tokens["id_token"].as_str().unwrap())
+            .await;
+        assert_eq!(claims["given_name"], "Alex");
+        assert!(!claims.contains_key("verified_claims"));
+    }
+    op.stop().await;
+}
+
+#[tokio::test]
+async fn clients_receive_only_the_claims_they_are_provisioned_for() {
+    let op = TestOp::start_with(|config| {
+        config.clients[0].claims = Some(vec![
+            "given_name".to_owned(),
+            "over18".to_owned(),
+            "beneficiary_account_au".to_owned(),
+        ]);
+    })
+    .await;
+    let pkce = Pkce::new();
+    let request_uri = op
+        .push(&pkce, &json!({"claims": every_connectid_claim()}))
+        .await;
+
+    // The consent page offers only what will be shared.
+    let page = op.open_login(&request_uri).await;
+    assert!(page.html.contains("data-claim=\"given_name\""));
+    assert!(page.html.contains("data-claim=\"beneficiary_account_au\""));
+    assert!(!page.html.contains("data-claim=\"email\""));
+    assert!(!page.html.contains("data-claim=\"over65\""));
+
+    let response = op
+        .decide(&page, &request_uri, DEMO_USERNAME, DEMO_PASSWORD, "approve")
+        .await;
+    let params = redirect_params(&response);
+    let tokens: Value = op
+        .exchange(&params["code"], &pkce)
+        .await
+        .json()
+        .await
+        .unwrap();
+    let claims = op
+        .verify_id_token(tokens["id_token"].as_str().unwrap())
+        .await;
+    for withheld in [
         "family_name",
         "email",
         "birthdate",
         "phone_number",
         "address",
-        "txn",
     ] {
-        assert!(claims.contains_key(claim), "missing {claim}");
+        assert!(!claims.contains_key(withheld), "{withheld}");
     }
+    assert_eq!(claims["given_name"], "Alex");
+    assert!(claims.contains_key("txn"), "txn is issued regardless");
+    let verified = claims["verified_claims"]["claims"].as_object().unwrap();
+    assert_eq!(verified.len(), 2, "{verified:?}");
+    assert_eq!(verified["over18"], true);
+    assert_eq!(verified["beneficiary_account_au"]["account_bsb"], "123456");
+    op.stop().await;
+}
+
+#[tokio::test]
+async fn oidc_profile_clients_get_standard_claims_by_scope_and_claims_parameter() {
+    let op = TestOp::start_with(|config| {
+        let client = &mut config.clients[0];
+        client.profile = oxid::client::Profile::Oidc;
+        client.scopes = ["openid", "profile", "email", "phone", "address"]
+            .map(str::to_owned)
+            .to_vec();
+    })
+    .await;
+    let tokens = op
+        .tokens(&json!({
+            "scope": "openid profile email",
+            "claims": {"id_token": {
+                "nickname": null,
+                "phone_number_verified": {"essential": true},
+                // ConnectID verified claims do not exist for this profile.
+                "verified_claims": {
+                    "verification": {"trust_framework": {"value": "au_connectid"}},
+                    "claims": {"over18": null},
+                },
+            }},
+        }))
+        .await;
+    assert_eq!(tokens["scope"], "openid profile email");
+
+    // With only an oidc client registered, discovery advertises that profile.
+    let metadata: Value = op
+        .browser
+        .get(op.url("/.well-known/openid-configuration"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert_eq!(
-        claims["verified_claims"],
-        json!({
-            "verification": {"trust_framework": "au_connectid"},
-            "claims": {"over16": true, "over18": true, "over65": false},
-        })
+        metadata["scopes_supported"],
+        json!(["openid", "profile", "email", "phone", "address"])
     );
+    let advertised = metadata["claims_supported"].as_array().unwrap();
+    for claim in ["name", "nickname", "email_verified", "updated_at", "txn"] {
+        assert!(advertised.contains(&json!(claim)), "{claim}");
+    }
+    assert!(metadata.get("verified_claims_supported").is_none());
+
+    let claims = op
+        .verify_id_token(tokens["id_token"].as_str().unwrap())
+        .await;
+    assert_eq!(claims["nickname"], "Al");
+    assert_eq!(claims["phone_number_verified"], true);
+    assert!(!claims.contains_key("verified_claims"));
+    assert!(!claims.contains_key("name"), "scope claims go to UserInfo");
+
+    let userinfo: Value = op
+        .rp
+        .get(op.mtls_url("/userinfo"))
+        .bearer_auth(tokens["access_token"].as_str().unwrap())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(userinfo["sub"], claims["sub"]);
+    for (claim, expected) in [
+        ("name", json!("Alex Jordan Citizen")),
+        ("given_name", json!("Alex")),
+        ("family_name", json!("Citizen")),
+        ("middle_name", json!("Jordan")),
+        ("nickname", json!("Al")),
+        ("preferred_username", json!("alex")),
+        ("profile", json!("https://example.com/people/alex")),
+        ("picture", json!("https://example.com/people/alex.jpg")),
+        ("website", json!("https://alex.example.com")),
+        ("gender", json!("non-binary")),
+        ("birthdate", json!("1985-04-12")),
+        ("zoneinfo", json!("Australia/Sydney")),
+        ("locale", json!("en-AU")),
+        ("updated_at", json!(1_767_225_600)),
+        ("email", json!("alex.citizen@example.com")),
+        ("email_verified", json!(true)),
+    ] {
+        assert_eq!(userinfo[claim], expected, "{claim}");
+    }
+    // The phone and address scopes were not requested.
+    assert!(userinfo.get("phone_number").is_none());
+    assert!(userinfo.get("address").is_none());
+    op.stop().await;
+}
+
+#[tokio::test]
+async fn users_choose_which_voluntary_claims_to_share() {
+    let op = TestOp::start().await;
+    let pkce = Pkce::new();
+    let request_uri = op
+        .push(
+            &pkce,
+            &json!({"claims": {
+                "id_token": {
+                    "given_name": {"essential": true},
+                    "family_name": null,
+                    "email": {"essential": false},
+                    "verified_claims": {
+                        "verification": {"trust_framework": {"value": "au_connectid"}},
+                        "claims": {
+                            "over18": {"essential": true},
+                            "beneficiary_account_au": null,
+                        },
+                    },
+                },
+                "userinfo": {"email": null, "phone_number": null},
+            }}),
+        )
+        .await;
+
+    let page = op.open_login(&request_uri).await;
+    // Voluntary claims are ticked checkboxes; essential ones have none.
+    assert_eq!(
+        page.ticked(),
+        [
+            "share_beneficiary_account_au",
+            "share_email",
+            "share_family_name",
+            "share_phone_number",
+        ]
+    );
+    assert!(
+        page.html
+            .contains("data-claim=\"given_name\" data-essential=\"true\"")
+    );
+    assert!(
+        page.html
+            .contains("data-claim=\"over18\" data-essential=\"true\"")
+    );
+
+    let response = op
+        .decide_declining(
+            &page,
+            &request_uri,
+            DEMO_USERNAME,
+            DEMO_PASSWORD,
+            "approve",
+            &["email", "beneficiary_account_au"],
+        )
+        .await;
+    let params = redirect_params(&response);
+    let tokens: Value = op
+        .exchange(&params["code"], &pkce)
+        .await
+        .json()
+        .await
+        .unwrap();
+    let claims = op
+        .verify_id_token(tokens["id_token"].as_str().unwrap())
+        .await;
+    assert_eq!(claims["given_name"], "Alex");
+    assert_eq!(claims["family_name"], "Citizen");
+    assert!(!claims.contains_key("email"));
+    assert_eq!(claims["verified_claims"]["claims"], json!({"over18": true}));
+
+    // The choice holds for UserInfo and across a refresh.
+    let userinfo: Value = op
+        .rp
+        .get(op.mtls_url("/userinfo"))
+        .bearer_auth(tokens["access_token"].as_str().unwrap())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(userinfo.get("email").is_none());
+    assert_eq!(userinfo["phone_number"], "+61 400 000 000");
+
+    let refreshed: Value = op
+        .rp
+        .post(op.mtls_url("/token"))
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", tokens["refresh_token"].as_str().unwrap()),
+            ("client_assertion_type", ASSERTION_TYPE),
+            ("client_assertion", &op.assertion()),
+        ])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let claims = op
+        .verify_id_token(refreshed["id_token"].as_str().unwrap())
+        .await;
+    assert!(!claims.contains_key("email"));
+    assert_eq!(claims["family_name"], "Citizen");
+
+    let record = op
+        .state()
+        .store
+        .consent(claims["txn"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(record.declined, ["beneficiary_account_au", "email"]);
+    assert_eq!(
+        record.claims,
+        ["family_name", "given_name", "over18", "phone_number"]
+    );
+    op.stop().await;
+}
+
+#[tokio::test]
+async fn purpose_is_shown_escaped_and_recorded_with_the_transaction() {
+    let op = TestOp::start().await;
+    let purpose = "Confirm you are over 18 for <Bottle & Co> — order #4521";
+    let pkce = Pkce::new();
+    let request_uri = op
+        .push(
+            &pkce,
+            &json!({
+                "purpose": purpose,
+                "claims": {"id_token": {"verified_claims": {
+                    "verification": {"trust_framework": {"value": "au_connectid"}},
+                    "claims": {"over18": {"essential": true}},
+                }}},
+            }),
+        )
+        .await;
+    let page = op.open_login(&request_uri).await;
+    assert!(
+        page.html
+            .contains("Confirm you are over 18 for &lt;Bottle &amp; Co&gt; — order #4521"),
+        "{}",
+        page.html
+    );
+    assert!(!page.html.contains("<Bottle"));
+
+    let response = op
+        .decide(&page, &request_uri, DEMO_USERNAME, DEMO_PASSWORD, "approve")
+        .await;
+    let params = redirect_params(&response);
+    let tokens: Value = op
+        .exchange(&params["code"], &pkce)
+        .await
+        .json()
+        .await
+        .unwrap();
+    let claims = op
+        .verify_id_token(tokens["id_token"].as_str().unwrap())
+        .await;
+
+    // The record is keyed by the txn the client received.
+    let record = op
+        .state()
+        .store
+        .consent(claims["txn"].as_str().unwrap())
+        .expect("transaction recorded");
+    assert_eq!(record.purpose.as_deref(), Some(purpose));
+    assert_eq!(record.client_id, CLIENT_ID);
+    assert_eq!(record.claims, ["over18"]);
+    assert_eq!(record.user_subject.as_deref(), Some("demo-user-0001"));
     op.stop().await;
 }
 
@@ -176,10 +553,14 @@ async fn subject_is_pairwise_and_stable() {
 }
 
 #[tokio::test]
-async fn scope_claims_are_served_from_userinfo() {
+async fn userinfo_returns_claims_requested_for_it_and_only_openid_is_a_scope() {
     let op = TestOp::start().await;
-    let tokens = op.tokens(&json!({"scope": "openid email"})).await;
-    assert_eq!(tokens["scope"], "openid email");
+    let tokens = op
+        .tokens(&json!({"claims": {
+            "userinfo": {"email": null},
+            "id_token": {"given_name": null},
+        }}))
+        .await;
     let userinfo: Value = op
         .rp
         .post(op.mtls_url("/userinfo"))
@@ -191,13 +572,19 @@ async fn scope_claims_are_served_from_userinfo() {
         .await
         .unwrap();
     assert_eq!(userinfo["email"], "alex.citizen@example.com");
-    assert_eq!(userinfo["email_verified"], true);
+    assert_eq!(userinfo.as_object().unwrap().len(), 2, "sub and email");
 
-    // Scope claims go to UserInfo, not the ID token (OIDC Core 5.4).
     let claims = op
         .verify_id_token(tokens["id_token"].as_str().unwrap())
         .await;
     assert!(!claims.contains_key("email"));
+    assert_eq!(claims["given_name"], "Alex");
+
+    // ConnectID defines no claim scopes: claims come from the claims parameter.
+    let response = op
+        .par(&op.request_object(&Pkce::new(), &json!({"scope": "openid email"})))
+        .await;
+    assert_eq!(oauth_error(response).await.1, "invalid_scope");
     op.stop().await;
 }
 
@@ -353,6 +740,7 @@ async fn configured_users_replace_the_demo_user() {
             password_hash: hash,
             subject: "user-sam".into(),
             claims: json!({"given_name": "Sam"}).as_object().unwrap().clone(),
+            bank_account: None,
         });
     })
     .await;

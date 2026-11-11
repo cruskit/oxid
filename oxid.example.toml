@@ -50,8 +50,25 @@ client_id = "example-rp"
 client_name = "Example Relying Party"
 redirect_uris = ["https://rp.example.com/callback"]
 jwks_file = "clients/example-rp.jwks.json"
-scopes = ["openid"]
 grant_types = ["authorization_code"]   # add "refresh_token" to issue refresh tokens
+# Which claims exist for this client:
+#   "connectid" (default)  the ConnectID Identity Assurance Profile: given_name,
+#                          middle_name, family_name, email, birthdate,
+#                          phone_number, address, and the verified claims
+#                          over16/18/21/25/65, beneficiary_account_au,
+#                          beneficiary_account_au_payid and
+#                          beneficiary_account_international. Claims are
+#                          requested with the claims parameter only.
+#   "oidc"                 every standard OpenID Connect claim, requested with
+#                          the claims parameter or the profile, email, phone
+#                          and address scopes. No verified claims.
+profile = "connectid"
+# For an "oidc" client that uses claim scopes, list them:
+# scopes = ["openid", "profile", "email", "phone", "address"]
+# The claims this client has been provisioned for, within its profile.
+# Requests for anything else are ignored. Leave unset to allow the whole
+# profile.
+# claims = ["given_name", "family_name", "over18"]
 # Needed only when redirect_uris span several hosts.
 # sector_identifier = "rp.example.com"
 
@@ -65,6 +82,10 @@ grant_types = ["authorization_code"]   # add "refresh_token" to issue refresh to
 # password_hash = "$argon2id$v=19$m=19456,t=2,p=1$..."
 # subject = "user-0001"
 #
+# Any standard OpenID Connect claim can be set here: name, given_name,
+# family_name, middle_name, nickname, preferred_username, profile, picture,
+# website, email, email_verified, gender, birthdate, zoneinfo, locale,
+# phone_number, phone_number_verified, address, updated_at.
 # [users.claims]
 # given_name = "Alex"
 # middle_name = "Jordan"
@@ -79,3 +100,14 @@ grant_types = ["authorization_code"]   # add "refresh_token" to issue refresh to
 # region = "NSW"
 # postal_code = "2000"
 # country = "Australia"
+#
+# The user's bank account, the source of the beneficiary_account_* verified
+# claims. Optional; without it those claims are simply not released.
+# [users.bank_account]
+# beneficiary_name = "Alex Jordan Citizen"
+# bsb = "123456"                     # six digits, no separator
+# account_number = "12345678"
+# payid = "alex.citizen@example.com" # optional, with payid_type
+# payid_type = "/EMAL"               # /EMAL, /TELI, /AUBN or /ORGN
+# bic_swift_code = "OXIDAU2SXXX"     # needed for beneficiary_account_international
+# account_number_international = "12345612345678"  # default: bsb + account_number

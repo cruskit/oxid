@@ -132,6 +132,14 @@ pub struct ClientConfig {
     /// Host used to derive pairwise subjects. Defaults to the host shared by
     /// all redirect URIs.
     pub sector_identifier: Option<String>,
+    /// Which claims exist for this client: `connectid` (the default) or
+    /// `oidc`.
+    #[serde(default)]
+    pub profile: crate::client::Profile,
+    /// Claims this client may receive, within its profile. Requests for
+    /// anything else are ignored. When unset, every claim of the profile is
+    /// allowed.
+    pub claims: Option<Vec<String>>,
 }
 
 fn default_scopes() -> Vec<String> {
@@ -153,6 +161,9 @@ pub struct UserConfig {
     pub subject: String,
     #[serde(default)]
     pub claims: serde_json::Map<String, serde_json::Value>,
+    /// The user's bank account, the source of the ConnectID
+    /// `beneficiary_account_*` verified claims.
+    pub bank_account: Option<crate::user::BankAccount>,
 }
 
 impl Config {
@@ -328,6 +339,78 @@ mod tests {
         assert!(config.validate().is_err());
         config.server.tls_key = Some("key.pem".into());
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn users_and_clients_carry_connectid_claim_settings() {
+        let config: Config = toml::from_str(
+            r#"
+            issuer = "https://op.example.com"
+            mtls_base_url = "https://mtls.op.example.com"
+
+            [[clients]]
+            client_id = "c"
+            redirect_uris = ["https://rp.example.com/cb"]
+            jwks_file = "c.jwks.json"
+            claims = ["given_name", "over18", "beneficiary_account_au"]
+
+            [[clients]]
+            client_id = "d"
+            redirect_uris = ["https://rp2.example.com/cb"]
+            jwks_file = "d.jwks.json"
+            profile = "oidc"
+            scopes = ["openid", "profile", "email"]
+
+            [[users]]
+            username = "alex"
+            password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHQ$aGFzaGhhc2hoYXNoaGFzaA"
+            subject = "user-0001"
+
+            [users.claims]
+            given_name = "Alex"
+
+            [users.claims.address]
+            locality = "Sydney"
+
+            [users.bank_account]
+            beneficiary_name = "Alex Jordan Citizen"
+            bsb = "123456"
+            account_number = "12345678"
+            payid = "0400000321"
+            payid_type = "/TELI"
+            bic_swift_code = "OXIDAU2SXXX"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.clients[0].claims.as_deref().unwrap(),
+            ["given_name", "over18", "beneficiary_account_au"]
+        );
+        assert_eq!(config.clients[0].profile, crate::client::Profile::Connectid);
+        assert_eq!(config.clients[1].profile, crate::client::Profile::Oidc);
+        let user = &config.users[0];
+        assert_eq!(user.claims["address"]["locality"], "Sydney");
+        let account = user.bank_account.as_ref().unwrap();
+        account.validate().unwrap();
+        assert_eq!(account.payid_type, Some(crate::user::PayIdType::Mobile));
+        assert_eq!(account.international_number(), "12345612345678");
+
+        let typo = toml::from_str::<Config>(
+            r#"
+            issuer = "https://op.example.com"
+            mtls_base_url = "https://mtls.op.example.com"
+            [[users]]
+            username = "alex"
+            password_hash = "x"
+            subject = "s"
+            [users.bank_account]
+            beneficiary_name = "A"
+            bsb = "123456"
+            account_number = "1"
+            payid_type = "/CARD"
+            "#,
+        );
+        assert!(typo.is_err(), "unknown PayID types are refused");
     }
 
     #[test]

@@ -4,6 +4,8 @@ An OpenID Provider written in Rust, implementing:
 
 - the [FAPI 2.0 Security Profile](https://openid.net/specs/fapi-security-profile-2_0-final.html)
 - the [ConnectID FAPI 2.0 Security Profile](https://cdn.connectid.com.au/specifications/connectid-fapi-security-profile-03.html)
+- the [ConnectID Identity Assurance Profile](https://cdn.connectid.com.au/specifications/connectid-identity-assurance-profile-08.html)
+- the [OAuth 2 Purpose request parameter](https://cdn.connectid.com.au/specifications/oauth2-purpose-01.html)
 
 All OAuth 2.0 and OpenID Connect logic lives in this repository; no third-party
 OIDC library is used. Cryptography is never implemented here: TLS comes from
@@ -20,12 +22,75 @@ numbers from `aws-lc-rs`, and password hashing from `argon2`.
 | PKCE | Required, `S256` only. |
 | Access tokens | Opaque, bound to the client's TLS certificate (RFC 8705), valid for at most 10 minutes. |
 | Refresh tokens | Optional per client, not rotated. |
-| ID tokens | PS256, pairwise `sub`, always carry `txn`. |
-| Claims | The `claims` request parameter, standard identity claims, and `verified_claims` under the `au_connectid` trust framework (`over16` to `over65`). |
+| ID tokens | PS256, pairwise `sub`, always carry `txn`, never carry `acr`. |
+| Claims | Set per client by its profile: the ConnectID identity assurance claims, or every standard OpenID Connect claim; see [Claims](#claims). |
+| Consent | The user chooses which voluntary claims to share. Essential claims can only be refused by cancelling; see [Consent](#consent). |
+| Purpose | The `purpose` parameter is validated, shown to the user at consent, and recorded with the transaction; see [Purpose](#purpose). |
 | Authorization response | Query mode, with the `iss` parameter (RFC 9207), sent with a 303 redirect. |
 | Discovery | OpenID Connect Discovery and RFC 8414 metadata, including `mtls_endpoint_aliases`. |
 | Transport | TLS 1.2 and 1.3 only, BCP 195 cipher suites, HSTS. |
 | Headers | `x-fapi-interaction-id` is echoed, or generated, on every response and logged. |
+
+### Claims
+
+Each client has a `profile` that decides which claims exist for it. The
+security profile (FAPI 2.0 with the ConnectID restrictions) is the same for
+every client.
+
+| Profile | Claims | Requested with |
+| --- | --- | --- |
+| `connectid` (default) | Exactly those of the ConnectID Identity Assurance Profile, below. | The `claims` parameter only. Claim scopes imply nothing. |
+| `oidc` | Every standard claim of OpenID Connect Core §5.1: `name`, `given_name`, `family_name`, `middle_name`, `nickname`, `preferred_username`, `profile`, `picture`, `website`, `email`, `email_verified`, `gender`, `birthdate`, `zoneinfo`, `locale`, `phone_number`, `phone_number_verified`, `address`, `updated_at`. No verified claims. | The `claims` parameter, or the `profile`, `email`, `phone` and `address` scopes (delivered from UserInfo). |
+
+The ConnectID claims:
+
+| Kind | Claims |
+| --- | --- |
+| Standard | `given_name`, `middle_name`, `family_name`, `email`, `birthdate`, `phone_number`, `address` (`street_address`, `locality`, `region`, `postal_code`, `country`), `txn` |
+| Verified: age | `over16`, `over18`, `over21`, `over25`, `over65`, derived from `birthdate` |
+| Verified: bank account | `beneficiary_account_au` (BSB and account number), `beneficiary_account_au_payid` (PayID, falling back to BSB and account number), `beneficiary_account_international` (BIC, account number, one-line address) |
+
+- Verified claims are released only when the request names the `au_connectid`
+  trust framework, as `{"trust_framework": {"value": "au_connectid"}}`. A
+  request whose trust framework is absent, null, malformed or different is
+  ignored, and the response always carries `"trust_framework": "au_connectid"`.
+- A client can be narrowed further, to the claims it is provisioned for, with
+  `claims` in its configuration. Requests for claims outside the client's
+  profile or provisioning are ignored rather than rejected.
+- A requested claim the user does not have is left out without an error, even
+  when it was requested as essential.
+- `txn` is in every ID token whether requested or not.
+- A user reaches each age at 00:00 UTC on their birthday.
+- Discovery is one document for the whole server. It advertises the claims
+  and scopes of the profiles that registered clients actually use, so a
+  server with only `connectid` clients advertises exactly the ConnectID
+  claims, as that profile requires. Registering an `oidc` client adds the
+  remaining standard claims and the claim scopes.
+
+### Consent
+
+The sign-in page lists every claim that would be released. Claims requested
+with `"essential": true` are marked as required and have no checkbox; the only
+way to refuse them is to cancel the request. Every other claim, including those
+implied by a scope, has a checkbox that starts ticked, and the user can untick
+any of them before continuing.
+
+The choice is stored with the grant, so a declined claim is left out of the ID
+token, of UserInfo, and of tokens issued later by refresh. The client receives
+no error for a declined claim; it is simply absent.
+
+### Purpose
+
+`purpose` must be 3 to 300 characters and free of control characters. A
+request that breaks this fails with `error=invalid_request` and
+`error_description=invalid_purpose`. Because requests arrive only through PAR,
+the client receives that error from the PAR endpoint.
+
+The purpose is shown, HTML-escaped, on the sign-in and consent page. Each
+decided transaction is recorded with its `txn`, client, user, purpose, the
+claims shared, the claims declined and the outcome, and is written to the log. The records are
+held in memory (the most recent 10,000) and there is no consent history page
+for users yet.
 
 ### Endpoints
 
@@ -54,7 +119,9 @@ This is an initial version. By design it does not yet have:
 - **Client registration.** Clients are a static list in the configuration file.
 - **Persistence.** Pushed requests, codes and tokens are held in memory, so they
   are lost on restart and a deployment is a single instance.
-- **Sessions.** Every authorization asks the user to sign in.
+- **Sessions.** Every authorization asks the user to sign in. For the same
+  reason there is no page where a user can review their consent history,
+  although the records are kept.
 
 Users and clients sit behind the `UserStore` and `ClientRegistry` traits, which
 is where registration and a database will plug in.
@@ -98,6 +165,23 @@ that would break compliance (for example a 20 minute access token) is refused.
 | `mise run test` | Unit tests for each component, and integration tests that start a real oxID instance on ephemeral ports and drive it over TLS and mutual TLS. |
 | `mise run conformance` | The OpenID Foundation conformance suite. |
 | `mise run build` | Everything: format, lint, tests, release build, then the conformance suite. |
+
+### Continuous integration and releases
+
+`.github/workflows/build.yml` runs on GitHub-hosted runners for every push to
+`main` and every pull request. It checks formatting, lints, runs the unit and
+integration tests, and runs the conformance suite, whose results are kept as
+the `conformance-results` artifact.
+
+Releases are made on demand:
+
+1. Set the new version in `Cargo.toml` and merge it to `main`.
+2. In GitHub, open **Actions > Build > Run workflow**, choose `main`, and tick
+   **Create a GitHub release**.
+
+Once the checks and the conformance suite pass, the workflow tags the commit
+`v<version>` and publishes a release with a Linux x86-64 binary archive and
+its SHA-256 checksum. It refuses to run if that version was already released.
 
 ### Conformance suite
 

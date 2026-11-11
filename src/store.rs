@@ -5,7 +5,7 @@
 //! which is acceptable for this version. Secrets (codes and tokens) are keyed
 //! by their SHA-256 digest so the bearer values themselves are never held.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::{Mutex, MutexGuard};
 
 use crate::authz::AuthorizationRequest;
@@ -20,6 +20,9 @@ pub const REQUEST_URI_PREFIX: &str = "urn:ietf:params:oauth:request_uri:";
 
 /// Failed password attempts allowed against one pushed request.
 pub const MAX_FAILED_LOGINS: u32 = 5;
+
+/// Consent records kept before the oldest are dropped.
+pub const MAX_CONSENT_RECORDS: usize = 10_000;
 
 /// A pushed authorization request awaiting the user.
 #[derive(Debug, Clone)]
@@ -39,9 +42,40 @@ pub struct Grant {
     pub user_subject: String,
     pub scope: Vec<String>,
     pub claims: ClaimsRequest,
+    /// The claims the user agreed to share. Nothing else is ever released
+    /// under this grant.
+    pub shared_claims: BTreeSet<String>,
     pub auth_time: i64,
     /// Transaction identifier returned as the `txn` claim (ConnectID).
     pub txn: String,
+    /// The purpose the client gave for this transaction, if any.
+    pub purpose: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsentOutcome {
+    Approved,
+    Denied,
+}
+
+/// The record of one decided transaction: who asked for what, why, and what
+/// the user decided. ConnectID identity assurance §5.1 requires the purpose
+/// to be recorded for each transaction and to be available for a consent
+/// history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsentRecord {
+    pub txn: String,
+    pub client_id: String,
+    /// The user's internal subject. `None` when the request was cancelled
+    /// before anyone signed in.
+    pub user_subject: Option<String>,
+    pub purpose: Option<String>,
+    /// Names of the claims the user agreed to share.
+    pub claims: Vec<String>,
+    /// Names of the voluntary claims the user declined to share.
+    pub declined: Vec<String>,
+    pub decided_at: i64,
+    pub outcome: ConsentOutcome,
 }
 
 #[derive(Debug, Clone)]
@@ -92,6 +126,8 @@ struct Inner {
     refresh_tokens: HashMap<String, RefreshToken>,
     /// (client id, jti) -> assertion expiry.
     jtis: HashMap<(String, String), i64>,
+    /// Decided transactions, oldest first.
+    consents: VecDeque<ConsentRecord>,
 }
 
 #[derive(Debug, Default)]
@@ -240,6 +276,37 @@ impl Store {
         true
     }
 
+    /// Record a decided transaction. Records do not expire, but only the
+    /// most recent [`MAX_CONSENT_RECORDS`] are kept.
+    pub fn record_consent(&self, record: ConsentRecord) {
+        let mut inner = self.lock();
+        if inner.consents.len() >= MAX_CONSENT_RECORDS {
+            inner.consents.pop_front();
+        }
+        inner.consents.push_back(record);
+    }
+
+    /// A user's decided transactions, most recent first.
+    pub fn consent_history(&self, user_subject: &str) -> Vec<ConsentRecord> {
+        self.lock()
+            .consents
+            .iter()
+            .rev()
+            .filter(|record| record.user_subject.as_deref() == Some(user_subject))
+            .cloned()
+            .collect()
+    }
+
+    /// The record of the transaction identified by `txn`.
+    pub fn consent(&self, txn: &str) -> Option<ConsentRecord> {
+        self.lock()
+            .consents
+            .iter()
+            .rev()
+            .find(|record| record.txn == txn)
+            .cloned()
+    }
+
     /// Drop everything that has expired. Called periodically.
     pub fn purge(&self, now: i64) {
         let mut inner = self.lock();
@@ -294,9 +361,61 @@ mod tests {
             user_subject: "u1".to_owned(),
             scope: vec!["openid".to_owned()],
             claims: ClaimsRequest::default(),
+            shared_claims: BTreeSet::new(),
             auth_time: NOW,
             txn: "txn-1".to_owned(),
+            purpose: None,
         }
+    }
+
+    fn consent(txn: &str, user: Option<&str>, decided_at: i64) -> ConsentRecord {
+        ConsentRecord {
+            txn: txn.to_owned(),
+            client_id: "rp".to_owned(),
+            user_subject: user.map(str::to_owned),
+            purpose: Some(format!("purpose of {txn}")),
+            claims: vec!["given_name".to_owned()],
+            declined: Vec::new(),
+            decided_at,
+            outcome: if user.is_some() {
+                ConsentOutcome::Approved
+            } else {
+                ConsentOutcome::Denied
+            },
+        }
+    }
+
+    #[test]
+    fn consent_history_is_per_user_and_newest_first() {
+        let store = Store::new();
+        store.record_consent(consent("t1", Some("u1"), NOW));
+        store.record_consent(consent("t2", Some("u2"), NOW + 1));
+        store.record_consent(consent("t3", None, NOW + 2));
+        store.record_consent(consent("t4", Some("u1"), NOW + 3));
+
+        let history = store.consent_history("u1");
+        let txns: Vec<&str> = history.iter().map(|r| r.txn.as_str()).collect();
+        assert_eq!(txns, ["t4", "t1"]);
+        assert_eq!(history[1].purpose.as_deref(), Some("purpose of t1"));
+        assert_eq!(store.consent_history("nobody").len(), 0);
+
+        assert_eq!(store.consent("t3").unwrap().outcome, ConsentOutcome::Denied);
+        assert!(store.consent("missing").is_none());
+
+        // Records are not transient state: purging leaves them alone.
+        store.purge(NOW + 1_000_000);
+        assert_eq!(store.consent_history("u1").len(), 2);
+    }
+
+    #[test]
+    fn consent_records_are_bounded() {
+        let store = Store::new();
+        for i in 0..=MAX_CONSENT_RECORDS {
+            store.record_consent(consent(&format!("t{i}"), Some("u1"), NOW));
+        }
+        assert_eq!(store.consent_history("u1").len(), MAX_CONSENT_RECORDS);
+        assert!(store.consent("t0").is_none(), "the oldest was dropped");
+        assert!(store.consent("t1").is_some());
     }
 
     fn code(grant_id: &str) -> AuthorizationCode {

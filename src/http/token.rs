@@ -333,6 +333,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn declined_claims_are_left_out_of_tokens_and_userinfo() {
+        use crate::http::authorize::test_support::approve_declining;
+        let harness = Harness::new();
+        let uri = harness
+            .push(&json!({"claims": {
+                "id_token": {
+                    "given_name": {"essential": true},
+                    "family_name": null,
+                    "email": null,
+                    "verified_claims": {
+                        "verification": {"trust_framework": {"value": "au_connectid"}},
+                        "claims": {"over18": null, "over21": null},
+                    },
+                },
+                "userinfo": {"email": null, "phone_number": null},
+            }}))
+            .await;
+        // given_name is essential, so trying to decline it changes nothing.
+        let code = approve_declining(&harness, &uri, &["email", "over21", "given_name"]).await;
+        let body = json_body(exchange(&harness, Some(CERT), &code).await).await;
+        let jws = Jws::parse(body["id_token"].as_str().unwrap(), &[SigningAlg::PS256]).unwrap();
+        assert_eq!(jws.str_claim("given_name"), Some("Alex"));
+        assert_eq!(jws.str_claim("family_name"), Some("Citizen"));
+        assert!(!jws.claims.contains_key("email"));
+        assert_eq!(
+            jws.claims["verified_claims"]["claims"],
+            json!({"over18": true})
+        );
+
+        let grant = harness
+            .state
+            .store
+            .access_token(body["access_token"].as_str().unwrap(), harness.state.now())
+            .unwrap()
+            .grant;
+        let client = harness.state.clients.get("rp").unwrap();
+        let user = harness
+            .state
+            .users
+            .find_by_subject(&grant.user_subject)
+            .unwrap();
+        let userinfo = crate::id_token::userinfo(&harness.state, &client, &user, &grant);
+        assert!(!userinfo.contains_key("email"), "declined everywhere");
+        assert_eq!(userinfo["phone_number"], "+61 400 000 000");
+    }
+
+    #[tokio::test]
     async fn token_request_without_a_client_certificate_is_refused() {
         let harness = Harness::new();
         let uri = harness.push(&json!({})).await;
