@@ -1,0 +1,27 @@
+[tools]
+rust = "stable"
+
+[tasks.fmt]
+description = "Check formatting"
+run = "cargo fmt --all -- --check"
+
+[tasks.lint]
+description = "Run clippy with warnings as errors"
+run = "cargo clippy --all-targets --locked -- -D warnings"
+
+[tasks.test]
+description = "Run unit and integration tests"
+run = "cargo test --locked"
+
+[tasks.conformance]
+description = "Run the OpenID conformance suite (FAPI2 Message Signing, ConnectID) against oxID"
+run = "scripts/conformance.sh"
+
+[tasks.check]
+description = "Fast local checks: format, lint, test"
+depends = ["fmt", "lint", "test"]
+
+[tasks.build]
+description = "Full local build: format, lint, test, release binary, then the conformance suite"
+depends = ["check"]
+run = ["cargo build --release --locked", "scripts/conformance.sh"]

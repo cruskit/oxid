@@ -1,0 +1,5 @@
+# Only the manifest and sources are needed to build the image.
+*
+!Cargo.toml
+!Cargo.lock
+!src/

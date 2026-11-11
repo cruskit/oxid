@@ -1,0 +1,50 @@
+# The OpenID Foundation conformance suite (prebuilt images) plus oxID, on one
+# private network. Driven by scripts/conformance.sh.
+#
+# oxID is reachable from the suite as https://oxid:9443 (public listener) and
+# https://oxid:9444 (mTLS listener). The suite's browser and callbacks use
+# https://localhost.emobix.co.uk:8443, which resolves to nginx inside the
+# network. Only loopback ports are published on the host.
+
+name: oxid-conformance
+
+services:
+  oxid:
+    build:
+      context: ..
+    volumes:
+      - ./:/etc/oxid:ro
+    ports:
+      - "127.0.0.1:${OXID_HOST_PORT:-9443}:9443"
+
+  mongodb:
+    image: ${MONGODB_IMAGE:-mongo:6.0.13}
+
+  server:
+    image: registry.gitlab.com/openid/conformance-suite:${SUITE_TAG:-release-v5.3.4}
+    environment:
+      BASE_URL: https://localhost.emobix.co.uk:8443
+      BASE_MTLS_URL: https://localhost.emobix.co.uk:8444
+      MONGODB_HOST: mongodb
+      # The dev profile disables login to the suite's own UI and API.
+      SPRING_PROFILES_ACTIVE: dev
+      OIDC_GOOGLE_CLIENTID: google-client
+      OIDC_GOOGLE_SECRET: google-secret
+      OIDC_GITLAB_CLIENTID: gitlab-client
+      OIDC_GITLAB_SECRET: gitlab-secret
+    depends_on:
+      - mongodb
+      - oxid
+
+  nginx:
+    image: registry.gitlab.com/openid/conformance-suite/nginx:${SUITE_TAG:-release-v5.3.4}
+    ports:
+      # Host ports 8443/8444 are commonly taken, so the suite UI and API are
+      # published elsewhere. Open https://localhost:8943/ to browse results.
+      - "127.0.0.1:${SUITE_HOST_PORT:-8943}:8443"
+    networks:
+      default:
+        aliases:
+          - localhost.emobix.co.uk
+    depends_on:
+      - server

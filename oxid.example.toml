@@ -1,0 +1,81 @@
+# Example oxID configuration. Copy to oxid.toml and edit.
+#
+# Relative paths are resolved against the directory containing this file.
+
+# The issuer identifier, and the base URL of the public listener.
+issuer = "https://localhost:9443"
+
+# The base URL of the mutual TLS listener, advertised to clients through
+# mtls_endpoint_aliases for the token, PAR and UserInfo endpoints.
+mtls_base_url = "https://localhost:9444"
+
+[server]
+listen = "127.0.0.1:9443"
+mtls_listen = "127.0.0.1:9444"
+
+# TLS certificate chain and key (PEM). If unset, an ephemeral self-signed
+# certificate is generated at startup. Development only.
+# tls_cert = "tls/server.crt"
+# tls_key = "tls/server.key"
+
+# CA bundle (PEM) that client certificates must chain to. If unset, any
+# certificate the client proves possession of is accepted and access tokens
+# are bound to its thumbprint (self-signed certificate mutual TLS, RFC 8705).
+# client_ca = "tls/client-ca.pem"
+
+[keys]
+# RSA private key (PEM) used to sign ID tokens with PS256. If unset, an
+# ephemeral key is generated at startup. Development only.
+# signing_key = "keys/signing.pem"
+
+# Secret mixed into pairwise subject identifiers, at least 16 characters.
+# If unset, a random value is used and every restart changes all subjects.
+# pairwise_salt = "change-me-to-a-long-random-string"
+
+# Lifetimes and tolerances, in seconds. These are the defaults. Values outside
+# the limits set by FAPI 2.0 and ConnectID are refused at startup.
+[security]
+access_token_ttl = 300              # at most 600
+refresh_token_ttl = 86400
+id_token_ttl = 300
+authorization_code_ttl = 60         # at most 60
+request_uri_ttl = 90                # below 600
+request_object_max_lifetime = 600   # exp - nbf, at most 600
+request_object_max_age = 600        # age of nbf, at most 600
+clock_skew = 10                     # between 10 and 60
+
+# Clients. Each needs its public keys, either in a JWK Set file or inline.
+[[clients]]
+client_id = "example-rp"
+client_name = "Example Relying Party"
+redirect_uris = ["https://rp.example.com/callback"]
+jwks_file = "clients/example-rp.jwks.json"
+scopes = ["openid"]
+grant_types = ["authorization_code"]   # add "refresh_token" to issue refresh tokens
+# Needed only when redirect_uris span several hosts.
+# sector_identifier = "rp.example.com"
+
+# Users. If this section is omitted entirely, a built-in demo user is used
+# (username "demo", password "demo-password"). Development only.
+#
+# Create password_hash with:  echo 'the-password' | oxid hash-password
+#
+# [[users]]
+# username = "alex"
+# password_hash = "$argon2id$v=19$m=19456,t=2,p=1$..."
+# subject = "user-0001"
+#
+# [users.claims]
+# given_name = "Alex"
+# middle_name = "Jordan"
+# family_name = "Citizen"
+# email = "alex.citizen@example.com"
+# birthdate = "1985-04-12"
+# phone_number = "+61 400 000 000"
+#
+# [users.claims.address]
+# street_address = "1 Example Street"
+# locality = "Sydney"
+# region = "NSW"
+# postal_code = "2000"
+# country = "Australia"

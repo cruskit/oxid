@@ -1,0 +1,2 @@
+# Product and specification names that are not code and need no backticks.
+doc-valid-idents = ["OpenID", "ConnectID", "oxID", "UserInfo", "OAuth", "mTLS", ".."]

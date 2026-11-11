@@ -1,0 +1,375 @@
+//! Configuration loading and validation.
+//!
+//! Configuration is a TOML file. Everything security-relevant has a default
+//! that satisfies the ConnectID profile, and [`Config::validate`] refuses
+//! values that would take the provider outside FAPI 2.0 / ConnectID limits.
+
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, bail, ensure};
+use serde::Deserialize;
+use url::Url;
+
+/// ConnectID §4.2-3.2: access tokens expire at most 10 minutes after issue.
+pub const MAX_ACCESS_TOKEN_TTL: i64 = 600;
+/// FAPI 2.0 §5.3.2.1-11: authorization codes live at most 60 seconds.
+pub const MAX_AUTHORIZATION_CODE_TTL: i64 = 60;
+/// FAPI 2.0 §5.3.2.2-12: `request_uri` `expires_in` is below 600 seconds.
+pub const MAX_REQUEST_URI_TTL: i64 = 599;
+/// ConnectID §4.2-3.10/11: request object `exp - nbf` and `nbf` age limits.
+pub const MAX_REQUEST_OBJECT_WINDOW: i64 = 600;
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Config {
+    /// The issuer identifier, e.g. `https://op.example.com`. Also the base URL
+    /// of the public (non-mTLS) listener.
+    pub issuer: String,
+    /// Base URL of the mTLS listener, advertised via `mtls_endpoint_aliases`.
+    pub mtls_base_url: String,
+    #[serde(default)]
+    pub server: ServerConfig,
+    #[serde(default)]
+    pub keys: KeysConfig,
+    #[serde(default)]
+    pub security: SecurityConfig,
+    #[serde(default)]
+    pub clients: Vec<ClientConfig>,
+    /// Users. When empty, the built-in demo user is used.
+    #[serde(default)]
+    pub users: Vec<UserConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ServerConfig {
+    /// Address of the public listener (browser-facing endpoints, discovery).
+    pub listen: SocketAddr,
+    /// Address of the listener that requests a TLS client certificate.
+    pub mtls_listen: SocketAddr,
+    /// PEM certificate chain. When unset, an ephemeral self-signed
+    /// certificate is generated (development only).
+    pub tls_cert: Option<PathBuf>,
+    /// PEM private key matching `tls_cert`.
+    pub tls_key: Option<PathBuf>,
+    /// PEM bundle of CAs that client certificates must chain to. When unset,
+    /// any certificate the client proves possession of is accepted, which is
+    /// what RFC 8705 calls self-signed certificate mutual TLS.
+    pub client_ca: Option<PathBuf>,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            listen: SocketAddr::from(([127, 0, 0, 1], 9443)),
+            mtls_listen: SocketAddr::from(([127, 0, 0, 1], 9444)),
+            tls_cert: None,
+            tls_key: None,
+            client_ca: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct KeysConfig {
+    /// PEM RSA private key used to sign ID tokens. When unset, an ephemeral
+    /// key is generated at startup (development only).
+    pub signing_key: Option<PathBuf>,
+    /// Secret mixed into pairwise subject identifiers. When unset, a random
+    /// value is generated at startup, so subjects change across restarts.
+    pub pairwise_salt: Option<String>,
+}
+
+/// Lifetimes and tolerances, in seconds.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SecurityConfig {
+    pub access_token_ttl: i64,
+    pub refresh_token_ttl: i64,
+    pub id_token_ttl: i64,
+    pub authorization_code_ttl: i64,
+    pub request_uri_ttl: i64,
+    /// Maximum `exp - nbf` of a request object.
+    pub request_object_max_lifetime: i64,
+    /// Maximum age of a request object's `nbf`.
+    pub request_object_max_age: i64,
+    /// How far in the future `iat`/`nbf` may be. FAPI 2.0 §5.3.2.1-13 requires
+    /// accepting 10 seconds and rejecting more than 60.
+    pub clock_skew: i64,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            access_token_ttl: 300,
+            refresh_token_ttl: 24 * 60 * 60,
+            id_token_ttl: 300,
+            authorization_code_ttl: 60,
+            request_uri_ttl: 90,
+            request_object_max_lifetime: MAX_REQUEST_OBJECT_WINDOW,
+            request_object_max_age: MAX_REQUEST_OBJECT_WINDOW,
+            clock_skew: 10,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClientConfig {
+    pub client_id: String,
+    pub client_name: Option<String>,
+    pub redirect_uris: Vec<String>,
+    /// Path to a JSON JWK Set holding the client's public keys.
+    pub jwks_file: Option<PathBuf>,
+    /// The client's public keys, inline. Mutually exclusive with `jwks_file`.
+    pub jwks: Option<jsonwebtoken::jwk::JwkSet>,
+    #[serde(default = "default_scopes")]
+    pub scopes: Vec<String>,
+    #[serde(default = "default_grant_types")]
+    pub grant_types: Vec<String>,
+    /// Host used to derive pairwise subjects. Defaults to the host shared by
+    /// all redirect URIs.
+    pub sector_identifier: Option<String>,
+}
+
+fn default_scopes() -> Vec<String> {
+    vec!["openid".to_owned()]
+}
+
+fn default_grant_types() -> Vec<String> {
+    vec!["authorization_code".to_owned()]
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UserConfig {
+    pub username: String,
+    /// Argon2 PHC string, as produced by `oxid hash-password`.
+    pub password_hash: String,
+    /// Stable internal identifier. Never sent to clients directly; clients
+    /// receive a pairwise identifier derived from it.
+    pub subject: String,
+    #[serde(default)]
+    pub claims: serde_json::Map<String, serde_json::Value>,
+}
+
+impl Config {
+    /// Load, resolve relative paths against the file's directory, and validate.
+    pub fn load(path: &Path) -> Result<Self> {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("reading config {}", path.display()))?;
+        let mut config: Self =
+            toml::from_str(&text).with_context(|| format!("parsing config {}", path.display()))?;
+        let base = path.parent().unwrap_or_else(|| Path::new("."));
+        config.resolve_paths(base);
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn resolve_paths(&mut self, base: &Path) {
+        let fix = |p: &mut Option<PathBuf>| {
+            if let Some(path) = p
+                && path.is_relative()
+            {
+                *path = base.join(&*path);
+            }
+        };
+        fix(&mut self.server.tls_cert);
+        fix(&mut self.server.tls_key);
+        fix(&mut self.server.client_ca);
+        fix(&mut self.keys.signing_key);
+        for client in &mut self.clients {
+            fix(&mut client.jwks_file);
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        validate_base_url(&self.issuer).context("issuer")?;
+        validate_base_url(&self.mtls_base_url).context("mtls_base_url")?;
+
+        ensure!(
+            self.server.tls_cert.is_some() == self.server.tls_key.is_some(),
+            "server.tls_cert and server.tls_key must be set together"
+        );
+
+        let s = &self.security;
+        ensure!(
+            (1..=MAX_ACCESS_TOKEN_TTL).contains(&s.access_token_ttl),
+            "security.access_token_ttl must be between 1 and {MAX_ACCESS_TOKEN_TTL} seconds"
+        );
+        ensure!(
+            (1..=MAX_AUTHORIZATION_CODE_TTL).contains(&s.authorization_code_ttl),
+            "security.authorization_code_ttl must be between 1 and {MAX_AUTHORIZATION_CODE_TTL} seconds"
+        );
+        ensure!(
+            (1..=MAX_REQUEST_URI_TTL).contains(&s.request_uri_ttl),
+            "security.request_uri_ttl must be between 1 and {MAX_REQUEST_URI_TTL} seconds"
+        );
+        ensure!(
+            (1..=MAX_REQUEST_OBJECT_WINDOW).contains(&s.request_object_max_lifetime),
+            "security.request_object_max_lifetime must be between 1 and {MAX_REQUEST_OBJECT_WINDOW} seconds"
+        );
+        ensure!(
+            (1..=MAX_REQUEST_OBJECT_WINDOW).contains(&s.request_object_max_age),
+            "security.request_object_max_age must be between 1 and {MAX_REQUEST_OBJECT_WINDOW} seconds"
+        );
+        ensure!(
+            (10..=60).contains(&s.clock_skew),
+            "security.clock_skew must be between 10 and 60 seconds"
+        );
+        ensure!(
+            s.refresh_token_ttl > 0,
+            "security.refresh_token_ttl must be positive"
+        );
+        ensure!(s.id_token_ttl > 0, "security.id_token_ttl must be positive");
+
+        if let Some(salt) = &self.keys.pairwise_salt {
+            ensure!(
+                salt.len() >= 16,
+                "keys.pairwise_salt must be at least 16 characters"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Issuer-style URLs: https, a host, and no query, fragment or trailing slash.
+fn validate_base_url(value: &str) -> Result<()> {
+    let url = Url::parse(value).with_context(|| format!("'{value}' is not a URL"))?;
+    ensure!(url.scheme() == "https", "'{value}' must use https");
+    ensure!(url.host_str().is_some(), "'{value}' must have a host");
+    if url.query().is_some() || url.fragment().is_some() {
+        bail!("'{value}' must not have a query or fragment");
+    }
+    ensure!(!value.ends_with('/'), "'{value}' must not end with '/'");
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn minimal() -> Config {
+        toml::from_str(
+            r#"
+            issuer = "https://op.example.com"
+            mtls_base_url = "https://mtls.op.example.com"
+            "#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn minimal_config_gets_compliant_defaults() {
+        let config = minimal();
+        config.validate().unwrap();
+        assert_eq!(config.security.access_token_ttl, 300);
+        assert_eq!(config.security.authorization_code_ttl, 60);
+        assert_eq!(config.security.request_object_max_lifetime, 600);
+        assert!(config.clients.is_empty());
+        assert!(config.users.is_empty());
+    }
+
+    #[test]
+    fn unknown_fields_are_rejected() {
+        let err = toml::from_str::<Config>(
+            r#"
+            issuer = "https://op.example.com"
+            mtls_base_url = "https://mtls.op.example.com"
+            isuer = "typo"
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("isuer"), "{err}");
+    }
+
+    #[test]
+    fn issuer_must_be_a_clean_https_url() {
+        for bad in [
+            "http://op.example.com",
+            "https://op.example.com/",
+            "https://op.example.com?x=1",
+            "https://op.example.com#frag",
+            "not a url",
+        ] {
+            let mut config = minimal();
+            config.issuer = bad.to_owned();
+            assert!(config.validate().is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn lifetimes_cannot_exceed_profile_limits() {
+        type Setter = fn(&mut SecurityConfig);
+        let cases: [(&str, Setter); 7] = [
+            ("access token over 10 minutes", |s| s.access_token_ttl = 601),
+            ("code over 60 seconds", |s| s.authorization_code_ttl = 61),
+            ("request_uri at 600 seconds", |s| s.request_uri_ttl = 600),
+            ("request object lifetime", |s| {
+                s.request_object_max_lifetime = 601;
+            }),
+            ("request object age", |s| s.request_object_max_age = 601),
+            ("skew below 10", |s| s.clock_skew = 9),
+            ("skew above 60", |s| s.clock_skew = 61),
+        ];
+        for (name, set) in cases {
+            let mut config = minimal();
+            set(&mut config.security);
+            assert!(config.validate().is_err(), "{name}");
+        }
+    }
+
+    #[test]
+    fn tls_cert_and_key_must_come_as_a_pair() {
+        let mut config = minimal();
+        config.server.tls_cert = Some("cert.pem".into());
+        assert!(config.validate().is_err());
+        config.server.tls_key = Some("key.pem".into());
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn short_pairwise_salt_is_rejected() {
+        let mut config = minimal();
+        config.keys.pairwise_salt = Some("short".into());
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn relative_paths_resolve_against_the_config_directory() {
+        let mut config: Config = toml::from_str(
+            r#"
+            issuer = "https://op.example.com"
+            mtls_base_url = "https://mtls.op.example.com"
+            [keys]
+            signing_key = "keys/signing.pem"
+            [server]
+            tls_cert = "/abs/cert.pem"
+            tls_key = "tls/key.pem"
+            [[clients]]
+            client_id = "c"
+            redirect_uris = ["https://rp.example.com/cb"]
+            jwks_file = "c.jwks.json"
+            "#,
+        )
+        .unwrap();
+        config.resolve_paths(Path::new("/etc/oxid"));
+        assert_eq!(
+            config.keys.signing_key.unwrap(),
+            Path::new("/etc/oxid/keys/signing.pem")
+        );
+        assert_eq!(config.server.tls_cert.unwrap(), Path::new("/abs/cert.pem"));
+        assert_eq!(
+            config.server.tls_key.unwrap(),
+            Path::new("/etc/oxid/tls/key.pem")
+        );
+        assert_eq!(
+            config.clients[0].jwks_file.as_deref().unwrap(),
+            Path::new("/etc/oxid/c.jwks.json")
+        );
+        assert_eq!(config.clients[0].scopes, ["openid"]);
+        assert_eq!(config.clients[0].grant_types, ["authorization_code"]);
+    }
+}
