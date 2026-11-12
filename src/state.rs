@@ -7,10 +7,10 @@ use anyhow::{Context, Result};
 use url::Url;
 
 use crate::client::{ClientRegistry, StaticClientRegistry};
-use crate::config::{Config, SecurityConfig};
+use crate::config::{Config, SecurityConfig, StoreBackend};
 use crate::experience::{self, Experience, Kind};
 use crate::keys::SigningKey;
-use crate::store::Store;
+use crate::store::{MemoryBackend, Store};
 use crate::user::{StaticUserStore, UserStore};
 use crate::util::{Clock, SystemClock, random_token};
 
@@ -42,31 +42,59 @@ impl Deref for AppState {
 }
 
 impl AppState {
-    pub fn from_config(config: &Config) -> Result<Self> {
-        Self::from_config_with_clock(config, Arc::new(SystemClock))
+    pub async fn from_config(config: &Config) -> Result<Self> {
+        Self::build(config, Arc::new(SystemClock), Vec::new()).await
     }
 
-    pub fn from_config_with_clock(config: &Config, clock: Arc<dyn Clock>) -> Result<Self> {
-        Self::build(config, clock, Vec::new())
+    /// Everything that happens before the first request: validate the
+    /// configuration, load clients from the registry if that is enabled,
+    /// and open the store.
+    pub async fn start(config: &Config, clock: Option<Arc<dyn Clock>>) -> Result<Self> {
+        config.validate()?;
+        // Load clients from the registry before accepting any request, so
+        // the provider never runs with a partial list.
+        let synced_clients = match &config.client_sync {
+            Some(sync) if sync.enabled => crate::client_sync::fetch(sync)
+                .await
+                .context("synchronising clients from the registry")?,
+            _ => Vec::new(),
+        };
+        let clock = clock.unwrap_or_else(|| Arc::new(SystemClock));
+        Self::build(config, clock, synced_clients).await
     }
 
     /// Build the state. `synced_clients` are clients loaded from outside the
     /// configuration file (see [`crate::client_sync`]); they are added to
     /// the configured ones, which win if a client id appears in both.
-    pub fn build(
+    pub async fn build(
         config: &Config,
         clock: Arc<dyn Clock>,
         synced_clients: Vec<crate::client::Client>,
     ) -> Result<Self> {
         config.validate()?;
 
+        let store = open_store(config)
+            .await?
+            .grant_lifetime(config.security.refresh_token_ttl + config.security.access_token_ttl);
+        let shared = config.store.backend != StoreBackend::Memory;
+
+        // Without a configured key, one is generated and kept in the store:
+        // every instance sharing the store then signs with the same key.
         let signing_key = if let Some(path) = &config.keys.signing_key {
             SigningKey::from_pem_file(path)?
         } else {
-            tracing::warn!(
-                "keys.signing_key is not set: using an ephemeral signing key (development only)"
-            );
-            SigningKey::generate()?
+            if shared {
+                tracing::info!("keys.signing_key is not set: using the signing key in the store");
+            } else {
+                tracing::warn!(
+                    "keys.signing_key is not set: using an ephemeral signing key (development only)"
+                );
+            }
+            let pem = store
+                .secret("signing-key", SigningKey::generate_pem)
+                .await
+                .context("signing key")?;
+            SigningKey::from_pem(pem.as_bytes()).context("signing key held in the store")?
         };
 
         let mut clients = config
@@ -109,10 +137,18 @@ impl AppState {
         let pairwise_salt = if let Some(salt) = &config.keys.pairwise_salt {
             salt.clone().into_bytes()
         } else {
-            tracing::warn!(
-                "keys.pairwise_salt is not set: subject identifiers will change on restart"
-            );
-            random_token(32).into_bytes()
+            if shared {
+                tracing::info!("keys.pairwise_salt is not set: using the salt in the store");
+            } else {
+                tracing::warn!(
+                    "keys.pairwise_salt is not set: subject identifiers will change on restart"
+                );
+            }
+            store
+                .secret("pairwise-salt", || Ok(random_token(32)))
+                .await
+                .context("pairwise salt")?
+                .into_bytes()
         };
 
         let users: Arc<dyn UserStore> = Arc::new(users);
@@ -133,7 +169,7 @@ impl AppState {
             clients: Arc::new(clients),
             users,
             experience,
-            store: Store::new(),
+            store,
             clock,
             pairwise_salt,
         })))
@@ -151,6 +187,32 @@ impl AppState {
     /// URL of an endpoint on the mTLS listener.
     pub fn mtls_url(&self, path: &str) -> String {
         format!("{}{path}", self.mtls_base_url)
+    }
+}
+
+#[cfg_attr(not(feature = "aws"), allow(clippy::unused_async))]
+async fn open_store(config: &Config) -> Result<Store> {
+    match config.store.backend {
+        StoreBackend::Memory => Ok(Store::new(Arc::new(MemoryBackend::new()))),
+        StoreBackend::Dynamodb => {
+            #[cfg(feature = "aws")]
+            {
+                let backend = crate::store::dynamodb::DynamoBackend::connect(&config.store)
+                    .await
+                    .context("store")?;
+                tracing::info!(
+                    table = config.store.table.as_deref().unwrap_or_default(),
+                    "state is kept in DynamoDB"
+                );
+                Ok(Store::new(Arc::new(backend)))
+            }
+            #[cfg(not(feature = "aws"))]
+            {
+                anyhow::bail!(
+                    "store.backend = \"dynamodb\" needs oxID built with the 'aws' feature"
+                )
+            }
+        }
     }
 }
 
@@ -220,7 +282,7 @@ pub(crate) mod test_support {
             clients: Arc::new(clients),
             experience: experience::build(kind, Arc::clone(&users)),
             users,
-            store: Store::new(),
+            store: Store::default(),
             clock: Arc::clone(&clock) as Arc<dyn Clock>,
             pairwise_salt: b"unit-test-pairwise-salt".to_vec(),
         }));
@@ -239,9 +301,9 @@ mod tests {
         .unwrap()
     }
 
-    #[test]
-    fn builds_from_minimal_config_with_development_fallbacks() {
-        let state = AppState::from_config(&config("")).unwrap();
+    #[tokio::test]
+    async fn builds_from_minimal_config_with_development_fallbacks() {
+        let state = AppState::from_config(&config("")).await.unwrap();
         assert_eq!(state.url("/token"), "https://op.example.com:9443/token");
         assert_eq!(
             state.mtls_url("/token"),
@@ -257,21 +319,22 @@ mod tests {
         assert!(state.now() > 1_704_067_200);
     }
 
-    #[test]
-    fn configured_salt_is_used_verbatim() {
-        let state =
-            AppState::from_config(&config("[keys]\npairwise_salt = \"0123456789abcdef\"")).unwrap();
+    #[tokio::test]
+    async fn configured_salt_is_used_verbatim() {
+        let state = AppState::from_config(&config("[keys]\npairwise_salt = \"0123456789abcdef\""))
+            .await
+            .unwrap();
         assert_eq!(state.pairwise_salt, b"0123456789abcdef");
     }
 
-    #[test]
-    fn invalid_config_is_rejected() {
+    #[tokio::test]
+    async fn invalid_config_is_rejected() {
         let mut bad = config("");
         bad.security.access_token_ttl = 3600;
-        assert!(AppState::from_config(&bad).is_err());
+        assert!(AppState::from_config(&bad).await.is_err());
 
         let missing_key = config("[keys]\nsigning_key = \"/nonexistent/key.pem\"");
-        assert!(AppState::from_config(&missing_key).is_err());
+        assert!(AppState::from_config(&missing_key).await.is_err());
     }
 
     #[test]

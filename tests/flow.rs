@@ -471,6 +471,8 @@ async fn users_choose_which_voluntary_claims_to_share() {
         .state()
         .store
         .consent(claims["txn"].as_str().unwrap())
+        .await
+        .unwrap()
         .unwrap();
     assert_eq!(record.declined, ["beneficiary_account_au", "email"]);
     assert_eq!(
@@ -525,6 +527,8 @@ async fn purpose_is_shown_escaped_and_recorded_with_the_transaction() {
         .state()
         .store
         .consent(claims["txn"].as_str().unwrap())
+        .await
+        .unwrap()
         .expect("transaction recorded");
     assert_eq!(record.purpose.as_deref(), Some(purpose));
     assert_eq!(record.client_id, CLIENT_ID);

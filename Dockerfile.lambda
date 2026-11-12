@@ -1,0 +1,30 @@
+# syntax=docker/dockerfile:1
+
+# Builds the AWS Lambda deployment package: a zip holding the `oxid-lambda`
+# binary under the name `bootstrap`, for the provided.al2023 runtime.
+#
+# The build runs on Amazon Linux 2023 so the binary links against the glibc
+# that the runtime provides. Use scripts/build-lambda.sh rather than calling
+# this directly.
+
+FROM public.ecr.aws/amazonlinux/amazonlinux:2023 AS build
+RUN dnf install --assumeyes gcc gcc-c++ cmake make perl zip \
+    && dnf clean all
+ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 --silent --show-error --fail https://sh.rustup.rs \
+    | sh -s -- -y --profile minimal --default-toolchain stable
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+RUN --mount=type=cache,target=/opt/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release --locked --features aws --bin oxid-lambda \
+    && mkdir /out \
+    && cp target/release/oxid-lambda /out/bootstrap \
+    && strip /out/bootstrap \
+    # A fixed timestamp, so the same source gives the same zip.
+    && touch --date=2000-01-01T00:00:00Z /out/bootstrap \
+    && (cd /out && TZ=UTC zip -X oxid-lambda.zip bootstrap)
+
+FROM scratch
+COPY --from=build /out/oxid-lambda.zip /

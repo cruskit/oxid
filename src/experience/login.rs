@@ -74,11 +74,23 @@ impl Login {
 
         let (shared, declined) = user_selection(interaction, form);
         let Some(user) = user else {
-            if interaction
+            let may_retry = match interaction
                 .state
                 .store
                 .record_failed_login(interaction.request_uri)
+                .await
             {
+                Ok(may_retry) => may_retry,
+                Err(error) => {
+                    tracing::error!(%error, "could not record a failed sign-in");
+                    return Decision::Deny {
+                        code: ErrorCode::ServerError,
+                        description: "internal server error".to_owned(),
+                    }
+                    .into();
+                }
+            };
+            if may_retry {
                 return login_page(
                     interaction,
                     Some("The username or password is incorrect."),

@@ -216,14 +216,52 @@ This is an initial version. By design it does not yet have:
 - **Client registration.** Clients come from the configuration file and,
   optionally, the ConnectID registry at startup. There is no dynamic
   registration and no refresh while running.
-- **Persistence.** Pushed requests, codes and tokens are held in memory, so they
-  are lost on restart and a deployment is a single instance.
+- **Users and clients in a database.** Server-side state can be kept in
+  DynamoDB (see [State and AWS Lambda](#state-and-aws-lambda)), but users and
+  clients are still loaded from the configuration at startup.
 - **Sessions.** Every authorization asks the user to sign in. For the same
   reason there is no page where a user can review their consent history,
   although the records are kept.
 
 Users and clients sit behind the `UserStore` and `ClientRegistry` traits, which
 is where registration and a database will plug in.
+
+## State and AWS Lambda
+
+Pushed requests, authorization codes, tokens, the client assertion replay
+cache and consent records are kept in a store with two backends, chosen in
+`[store]`:
+
+| `backend` | Where | Use |
+| --- | --- | --- |
+| `memory` (default) | This process. Lost on restart, not shared. | A single local instance. |
+| `dynamodb` | An Amazon DynamoDB table. | Several instances, or AWS Lambda, where consecutive requests may reach different instances. |
+
+Both go through the same rules for expiry, single use and replay detection,
+and the same tests run against each (the DynamoDB ones against DynamoDB
+Local). With `dynamodb`, the signing key and pairwise salt are generated once
+and kept in the table unless they are configured, so that every instance
+issues tokens under the same key.
+
+DynamoDB and Lambda support is behind the `aws` cargo feature, which the
+default build leaves out:
+
+```sh
+cargo build --release --features aws    # oxid with the DynamoDB store, and oxid-lambda
+mise run lambda                         # dist/lambda/oxid-lambda.zip, built on Amazon Linux 2023
+```
+
+`oxid-lambda` serves the same endpoints from a Lambda function behind an API
+Gateway HTTP API. API Gateway terminates TLS; oxID takes the caller's client
+certificate from the request context that API Gateway sets on a custom domain
+name with mutual TLS enabled.
+
+What the function needs from AWS (the table's key schema and TTL attribute,
+the IAM actions, the runtime) is recorded in
+[`deploy/aws/requirements.json`](deploy/aws/requirements.json) and published
+with each release, so infrastructure code can be written against a release
+rather than against this source tree. See
+[`deploy/aws/README.md`](deploy/aws/README.md).
 
 ## Getting started
 
@@ -261,7 +299,7 @@ that would break compliance (for example a 20 minute access token) is refused.
 
 | Command | What it runs |
 | --- | --- |
-| `mise run test` | Unit tests for each component, and integration tests that start a real oxID instance on ephemeral ports and drive it over TLS and mutual TLS. |
+| `mise run test` | Unit tests for each component, and integration tests that start a real oxID instance on ephemeral ports and drive it over TLS and mutual TLS. Set `OXID_TEST_DYNAMODB_ENDPOINT` to the URL of a DynamoDB Local instance to include the DynamoDB store. |
 | `mise run conformance` | The OpenID Foundation conformance suite. |
 | `mise run build` | Everything: format, lint, tests, release build, then the conformance suite. |
 
@@ -269,7 +307,8 @@ that would break compliance (for example a 20 minute access token) is refused.
 
 `.github/workflows/build.yml` runs on GitHub-hosted runners for every push to
 `main` and every pull request. It checks formatting, lints, runs the unit and
-integration tests, and runs the conformance suite once per user experience
+integration tests (with DynamoDB Local for the DynamoDB store), builds the
+Lambda package, and runs the conformance suite once per user experience
 module, in parallel jobs, whose results are kept as the
 `conformance-results-<experience>` artifacts.
 
@@ -280,8 +319,14 @@ Releases are made on demand:
    **Create a GitHub release**.
 
 Once the checks and the conformance suite pass, the workflow tags the commit
-`v<version>` and publishes a release with a Linux x86-64 binary archive and
-its SHA-256 checksum. It refuses to run if that version was already released.
+`v<version>` and publishes a release. It refuses to run if that version was
+already released. The release has, each with a SHA-256 checksum:
+
+| Asset | Contents |
+| --- | --- |
+| `oxid-v<version>-x86_64-unknown-linux-gnu.tar.gz` | The `oxid` server binary, this README, the example configuration and `deploy/`. |
+| `oxid-lambda-v<version>-x86_64.zip` | The AWS Lambda deployment package. |
+| `oxid-aws-requirements-v<version>.json` | What that package needs from AWS. |
 
 ### Conformance suite
 
@@ -336,6 +381,8 @@ recorded with their reasons in `conformance/expected-failures.json` and
 ```
 src/
   main.rs            command line
+  bin/oxid-lambda.rs the AWS Lambda entry point (feature `aws`)
+  lambda.rs          serving API Gateway events (feature `aws`)
   server.rs          TLS listeners, connection handling, shutdown
   tls.rs             TLS versions, cipher suites, client certificate policy
   config.rs          configuration file and its validation
@@ -354,8 +401,10 @@ src/
   subject.rs         pairwise subject identifiers
   client.rs          clients and the ClientRegistry trait
   user.rs            users and the UserStore trait
-  store.rs           in-memory requests, codes, tokens, replay cache
+  store/             requests, codes, tokens, replay cache, consent records;
+                     memory and DynamoDB backends
 tests/               integration tests against a running instance
 conformance/         conformance suite configuration
-scripts/             conformance runner
+deploy/aws/          what a deployment on AWS Lambda needs
+scripts/             conformance runner, Lambda package build
 ```

@@ -13,6 +13,8 @@ pub mod http;
 pub mod id_token;
 pub mod jose;
 pub mod keys;
+#[cfg(feature = "aws")]
+pub mod lambda;
 pub mod pkce;
 pub mod request_object;
 pub mod server;

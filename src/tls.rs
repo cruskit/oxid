@@ -242,6 +242,14 @@ impl ClientCert {
             thumbprint: b64url(sha256(der)),
         }
     }
+
+    /// From a PEM certificate, as handed over by a TLS-terminating proxy.
+    /// If there are several, the first is the client's own.
+    pub fn from_pem(pem: &str) -> Option<Self> {
+        CertificateDer::from_pem_slice(pem.as_bytes())
+            .ok()
+            .map(|cert| Self::from_der(cert.as_ref()))
+    }
 }
 
 #[cfg(test)]

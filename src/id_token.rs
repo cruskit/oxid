@@ -36,7 +36,7 @@ pub const AT_HASH_PLACEHOLDER: &str = "(set when the access token is issued)";
 /// Edits are kept as a difference from what the user was shown, not as a
 /// replacement, so that claims they left alone (`iat`, `exp`, `at_hash`)
 /// still get their real values when the token is issued.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ClaimEdits {
     pub set: Map<String, Value>,
     pub remove: BTreeSet<String>,

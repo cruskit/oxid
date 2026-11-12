@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "description": "What oxID needs from AWS when it runs on Lambda with the DynamoDB store. Published with every release so that infrastructure code can be generated from it, or checked against it.",
+  "dynamodb": {
+    "table": {
+      "hash_key": { "name": "pk", "type": "S" },
+      "range_key": { "name": "sk", "type": "S" },
+      "ttl_attribute": "expires_at",
+      "global_secondary_indexes": [],
+      "local_secondary_indexes": [],
+      "streams": false
+    },
+    "iam_actions": [
+      "dynamodb:GetItem",
+      "dynamodb:PutItem",
+      "dynamodb:UpdateItem",
+      "dynamodb:DeleteItem",
+      "dynamodb:Query"
+    ],
+    "notes": [
+      "One table per oxID instance. Instances that share a table share their signing key, sessions and tokens.",
+      "The table holds the provider's signing key and pairwise salt when they are not configured as files. Encrypt it at rest and restrict read access.",
+      "Records carry their expiry in the TTL attribute. oxID checks expiry itself, so TTL only reclaims space.",
+      "Consent records have no TTL and are kept until deleted.",
+      "On-demand (PAY_PER_REQUEST) billing suits the access pattern: a handful of small reads and writes per sign-in."
+    ]
+  },
+  "lambda": {
+    "runtime": "provided.al2023",
+    "architecture": "x86_64",
+    "handler": "bootstrap",
+    "package": "A zip with the single executable 'bootstrap' at its root.",
+    "event_source": "API Gateway HTTP API, payload format version 2.0",
+    "environment": {
+      "OXID_CONFIG": "Path of the TOML configuration file. Defaults to 'oxid.toml' in the working directory (/var/task). A file shipped in a layer is under /opt."
+    },
+    "recommended_memory_mb": 512,
+    "recommended_timeout_seconds": 15,
+    "mutual_tls": "The token, PAR and UserInfo endpoints need the caller's TLS client certificate. oxID reads it from requestContext.authentication.clientCert.clientCertPem, which API Gateway sets on custom domain names that have mutual TLS enabled. Serve mtls_base_url from such a domain name and issuer from one without."
+  }
+}

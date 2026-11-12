@@ -57,8 +57,10 @@ pub async fn userinfo(
     let Some(token) = bearer_token(&headers) else {
         return bearer_error(StatusCode::UNAUTHORIZED, None);
     };
-    let Some(access) = state.store.access_token(token, state.now()) else {
-        return invalid_token("the access token is invalid or has expired");
+    let access = match state.store.access_token(token, state.now()).await {
+        Ok(Some(access)) => access,
+        Ok(None) => return invalid_token("the access token is invalid or has expired"),
+        Err(error) => return crate::error::OAuthError::from(error).into_response(),
     };
 
     // Proof of possession: the caller must hold the certificate the token

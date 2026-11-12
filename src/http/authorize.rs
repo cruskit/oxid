@@ -26,7 +26,9 @@ use crate::client::Client;
 use crate::error::ErrorCode;
 use crate::experience::{Approval, Decision, Interaction, Page, Step, cookie};
 use crate::state::AppState;
-use crate::store::{AuthorizationCode, ConsentOutcome, ConsentRecord, Grant, PushedRequest};
+use crate::store::{
+    AuthorizationCode, ConsentOutcome, ConsentRecord, Grant, PushedRequest, StoreError, StoreResult,
+};
 use crate::util::{ct_eq, html_escape, random_token};
 
 /// Double-submit CSRF cookie. The `__Host-` prefix pins it to this origin,
@@ -82,6 +84,16 @@ fn page(
 }
 
 /// An error shown to the user because it is not safe to redirect.
+/// The page shown when the store cannot be reached. The detail is logged,
+/// never shown.
+fn store_unavailable(error: &StoreError) -> Response {
+    tracing::error!(%error, "authorization endpoint could not use the store");
+    error_page(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "The server could not complete the request. Please try again from the application.",
+    )
+}
+
 fn error_page(status: StatusCode, message: &str) -> Response {
     tracing::info!(message, "authorization request rejected with an error page");
     page(
@@ -168,7 +180,7 @@ fn experience_page(experience_page: &Page, csrf: &str, cookies: &[String]) -> Re
 
 /// The pushed request named by the browser's parameters, or the error page
 /// explaining why there is none.
-fn load_request(
+async fn load_request(
     state: &AppState,
     client_id: Option<&str>,
     request_uri: Option<&str>,
@@ -186,6 +198,8 @@ fn load_request(
     let pushed = state
         .store
         .peek_request(request_uri, state.now())
+        .await
+        .map_err(|error| Box::new(store_unavailable(&error)))?
         .ok_or_else(|| bad("The request_uri is invalid, has expired, or has already been used."))?;
     // RFC 9126 §4: a request_uri is only usable by the client that pushed it.
     if pushed.request.client_id != client.id {
@@ -224,7 +238,7 @@ pub async fn authorize(
     }
 
     let (client, request_uri, pushed) =
-        match load_request(&state, params.get("client_id"), params.get("request_uri")) {
+        match load_request(&state, params.get("client_id"), params.get("request_uri")).await {
             Ok(found) => found,
             Err(response) => return *response,
         };
@@ -241,7 +255,7 @@ pub async fn authorize(
         headers: &headers,
     };
     let step = state.experience.start(&interaction).await;
-    conclude(&interaction, step)
+    conclude(&interaction, step).await
 }
 
 /// `POST /authorize/decision`: a form submitted from an experience's page.
@@ -268,7 +282,7 @@ pub async fn decision(State(state): State<AppState>, headers: HeaderMap, body: B
     let csrf = params.get("csrf").unwrap_or_default();
 
     let (client, request_uri, pushed) =
-        match load_request(&state, params.get("client_id"), params.get("request_uri")) {
+        match load_request(&state, params.get("client_id"), params.get("request_uri")).await {
             Ok(found) => found,
             Err(response) => return *response,
         };
@@ -281,24 +295,34 @@ pub async fn decision(State(state): State<AppState>, headers: HeaderMap, body: B
         headers: &headers,
     };
     let step = state.experience.submit(&interaction, &params).await;
-    conclude(&interaction, step)
+    conclude(&interaction, step).await
 }
 
 /// Turn an experience's step into the HTTP response, completing the
 /// protocol side of a final decision.
-fn conclude(interaction: &Interaction<'_>, step: Step) -> Response {
+async fn conclude(interaction: &Interaction<'_>, step: Step) -> Response {
+    match try_conclude(interaction, step).await {
+        Ok(response) => response,
+        Err(error) => store_unavailable(&error),
+    }
+}
+
+async fn try_conclude(interaction: &Interaction<'_>, step: Step) -> StoreResult<Response> {
     let state = interaction.state;
     let request = interaction.request();
     let now = state.now();
     let mut response = match step.decision {
         Decision::Page(page) => {
-            return experience_page(&page, interaction.csrf, &step.set_cookies);
+            return Ok(experience_page(&page, interaction.csrf, &step.set_cookies));
         }
         Decision::Deny { code, description } => {
             // The experience may already have discarded the request (after
             // too many failed sign-ins), so its absence is not an error.
-            state.store.take_request(interaction.request_uri, now);
-            record_decision(interaction, None, now, ConsentOutcome::Denied);
+            state
+                .store
+                .take_request(interaction.request_uri, now)
+                .await?;
+            record_decision(interaction, None, now, ConsentOutcome::Denied).await?;
             redirect_error(
                 state,
                 &request.redirect_uri,
@@ -309,15 +333,20 @@ fn conclude(interaction: &Interaction<'_>, step: Step) -> Response {
         }
         Decision::Approve(approval) => {
             // One-time use is enforced here, at the point of authorization.
-            let Some(pushed) = state.store.take_request(interaction.request_uri, now) else {
-                return error_page(
+            let Some(pushed) = state
+                .store
+                .take_request(interaction.request_uri, now)
+                .await?
+            else {
+                return Ok(error_page(
                     StatusCode::BAD_REQUEST,
                     "The request_uri is invalid, has expired, or has already been used.",
-                );
+                ));
             };
             let request = pushed.request;
-            let txn = record_decision(interaction, Some(&approval), now, ConsentOutcome::Approved);
-            let code = state.store.create_code(AuthorizationCode {
+            let txn = record_decision(interaction, Some(&approval), now, ConsentOutcome::Approved)
+                .await?;
+            let code = AuthorizationCode {
                 grant: Grant {
                     id: random_token(16),
                     client_id: interaction.client.id.clone(),
@@ -334,7 +363,8 @@ fn conclude(interaction: &Interaction<'_>, step: Step) -> Response {
                 code_challenge: request.code_challenge,
                 nonce: request.nonce,
                 expires_at: now + state.security.authorization_code_ttl,
-            });
+            };
+            let code = state.store.create_code(code).await?;
             let mut out = vec![("code", code.as_str())];
             if let Some(client_state) = &request.state {
                 out.push(("state", client_state));
@@ -343,17 +373,17 @@ fn conclude(interaction: &Interaction<'_>, step: Step) -> Response {
         }
     };
     add_cookies(&mut response, &step.set_cookies);
-    response
+    Ok(response)
 }
 
 /// Record the outcome of a transaction, with the purpose the client gave
 /// (OAuth 2 Purpose §5), and return the transaction's identifier.
-fn record_decision(
+async fn record_decision(
     interaction: &Interaction<'_>,
     approval: Option<&Approval>,
     now: i64,
     outcome: ConsentOutcome,
-) -> String {
+) -> StoreResult<String> {
     let state = interaction.state;
     let client = interaction.client;
     let purpose = interaction.request().purpose.as_deref();
@@ -374,17 +404,20 @@ fn record_decision(
         ?outcome,
         "authorization request decided"
     );
-    state.store.record_consent(ConsentRecord {
-        txn: txn.clone(),
-        client_id: client.id.clone(),
-        user_subject: approval.map(|a| a.user_subject.clone()),
-        purpose: purpose.map(str::to_owned),
-        claims,
-        declined,
-        decided_at: now,
-        outcome,
-    });
-    txn
+    state
+        .store
+        .record_consent(ConsentRecord {
+            txn: txn.clone(),
+            client_id: client.id.clone(),
+            user_subject: approval.map(|a| a.user_subject.clone()),
+            purpose: purpose.map(str::to_owned),
+            claims,
+            declined,
+            decided_at: now,
+            outcome,
+        })
+        .await?;
+    Ok(txn)
 }
 
 #[cfg(test)]
@@ -612,7 +645,12 @@ mod tests {
         let uri = harness.push(&pushed).await;
         approve(&harness, &uri).await;
 
-        let history = harness.state.store.consent_history("demo-user-0001");
+        let history = harness
+            .state
+            .store
+            .consent_history("demo-user-0001")
+            .await
+            .unwrap();
         assert_eq!(history.len(), 1);
         let record = &history[0];
         assert_eq!(
@@ -636,7 +674,13 @@ mod tests {
         ];
         submit(&harness, Some(&csrf), &fields).await;
         assert_eq!(
-            harness.state.store.consent_history("demo-user-0001").len(),
+            harness
+                .state
+                .store
+                .consent_history("demo-user-0001")
+                .await
+                .unwrap()
+                .len(),
             1
         );
     }
@@ -664,7 +708,12 @@ mod tests {
         assert!(html.contains("id=\"optional-hint\"") && html.contains("id=\"required-hint\""));
 
         approve_declining(&harness, &uri, &["email", "over21"]).await;
-        let record = &harness.state.store.consent_history("demo-user-0001")[0];
+        let record = &harness
+            .state
+            .store
+            .consent_history("demo-user-0001")
+            .await
+            .unwrap()[0];
         assert_eq!(record.claims, ["given_name", "over18", "phone_number"]);
         assert_eq!(record.declined, ["email", "over21"]);
 
@@ -676,7 +725,12 @@ mod tests {
         fields.push(("share_birthdate", "1"));
         fields.push(("share_name", "1"));
         submit(&harness, Some(&csrf), &fields).await;
-        let record = &harness.state.store.consent_history("demo-user-0001")[0];
+        let record = &harness
+            .state
+            .store
+            .consent_history("demo-user-0001")
+            .await
+            .unwrap()[0];
         assert_eq!(record.claims, ["given_name", "over18"]);
         assert_eq!(record.declined, ["email", "over21", "phone_number"]);
     }
