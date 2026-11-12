@@ -80,6 +80,34 @@ profile = "connectid"
 # Needed only when redirect_uris span several hosts.
 # sector_identifier = "rp.example.com"
 
+# Load further clients from the ConnectID registry at startup. They are added
+# to the clients above; a client id defined in both uses the definition above.
+# If this is enabled and the registry cannot be used, oxID does not start.
+#
+# [client_sync]
+# enabled = true
+# # The registry authorization server's metadata. The mutual TLS token
+# # endpoint and the assertion audience are taken from it. Alternatively set
+# # token_endpoint (and optionally audience) directly.
+# The URLs below are placeholders: use the ones the registry gives you.
+# discovery_url = "https://auth.registry.example/.well-known/openid-configuration"
+# clients_url = "https://matls-api.registry.example/clients"
+# # This provider's client id at the registry, and the scope to request.
+# client_id = "00000000-0000-0000-0000-000000000000"
+# scope = "directory:software"
+# # Transport certificate and key (PEM) for mutual TLS.
+# transport_cert = "registry/transport.pem"
+# transport_key = "registry/transport.key"
+# # Signing key (PEM, RSA) for the private_key_jwt assertion, and the key id
+# # the registry knows it by.
+# signing_key = "registry/signing.key"
+# signing_key_id = "the-kid-from-the-registry"
+# # Extra certificate authorities to trust for the registry (PEM bundle).
+# # ca = "registry/ca.pem"
+# page_size = 100
+# # Claims profile given to these clients.
+# profile = "connectid"
+
 # Users (the customers offered by the technical experience). If this section
 # is omitted entirely, four built-in demo customers are used: demo, riley,
 # margaret and sam, all with the password "demo-password". Development only.

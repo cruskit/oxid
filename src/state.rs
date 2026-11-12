@@ -47,6 +47,17 @@ impl AppState {
     }
 
     pub fn from_config_with_clock(config: &Config, clock: Arc<dyn Clock>) -> Result<Self> {
+        Self::build(config, clock, Vec::new())
+    }
+
+    /// Build the state. `synced_clients` are clients loaded from outside the
+    /// configuration file (see [`crate::client_sync`]); they are added to
+    /// the configured ones, which win if a client id appears in both.
+    pub fn build(
+        config: &Config,
+        clock: Arc<dyn Clock>,
+        synced_clients: Vec<crate::client::Client>,
+    ) -> Result<Self> {
         config.validate()?;
 
         let signing_key = if let Some(path) = &config.keys.signing_key {
@@ -58,7 +69,30 @@ impl AppState {
             SigningKey::generate()?
         };
 
-        let clients = StaticClientRegistry::from_config(&config.clients).context("clients")?;
+        let mut clients = config
+            .clients
+            .iter()
+            .map(crate::client::Client::from_config)
+            .collect::<Result<Vec<_>>>()
+            .context("clients")?;
+        let configured = clients.len();
+        for client in synced_clients {
+            if clients.iter().any(|existing| existing.id == client.id) {
+                tracing::warn!(
+                    client_id = %client.id,
+                    "client from the registry is also in the configuration file; \
+                     the configured one is used"
+                );
+            } else {
+                clients.push(client);
+            }
+        }
+        tracing::info!(
+            configured,
+            synced = clients.len() - configured,
+            "clients registered"
+        );
+        let clients = StaticClientRegistry::new(clients).context("clients")?;
         if clients.is_empty() {
             tracing::warn!("no clients are configured; no client will be able to authenticate");
         }

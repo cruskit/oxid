@@ -161,6 +161,9 @@ pub struct Page {
     pub body: String,
     /// Extra CSS for this page, appended to the shared styles.
     pub style: &'static str,
+    /// JavaScript for this page, if it has any. It is served inline under a
+    /// per-response nonce; nothing else on the page can run script.
+    pub script: Option<&'static str>,
 }
 
 /// The user's approval of a request.

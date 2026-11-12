@@ -96,6 +96,62 @@ async fn id_token_claims(
         .await
 }
 
+/// The page's data block, which its script reads.
+fn page_data(html: &str) -> Value {
+    let block = html
+        .split("<script type=\"application/json\" id=\"oxid-data\">")
+        .nth(1)
+        .expect("data block");
+    serde_json::from_str(&block[..block.find("</script>").unwrap()]).unwrap()
+}
+
+/// Send a success for `customer` using the claims on `html`, which must be
+/// the page as rendered for that customer. `claims` replaces the editor's
+/// text when given.
+async fn send_success(
+    op: &TestOp,
+    page: &LoginPage,
+    request_uri: &str,
+    html: &str,
+    customer: &str,
+    claims: Option<&str>,
+) -> Response {
+    let shown = text_of(html, "id_token");
+    submit(
+        op,
+        page,
+        request_uri,
+        &[
+            ("customer", customer),
+            ("outcome", "success"),
+            ("txn", &field(html, "txn")),
+            ("base", &field(html, "base")),
+            ("base_customer", &field(html, "base_customer")),
+            ("id_token", claims.unwrap_or(&shown)),
+            ("action", "send"),
+        ],
+    )
+    .await
+}
+
+/// The page as rendered for `customer`: what a browser without the script
+/// gets after choosing them and pressing send.
+async fn page_for(op: &TestOp, page: &LoginPage, request_uri: &str, customer: &str) -> String {
+    let response = submit(
+        op,
+        page,
+        request_uri,
+        &[
+            ("customer", customer),
+            ("outcome", "success"),
+            ("action", "send"),
+        ],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    response.text().await.unwrap()
+}
+
 fn identity_request() -> Value {
     json!({
         "purpose": "Checking <your> identity & age",
@@ -112,19 +168,44 @@ fn identity_request() -> Value {
 }
 
 #[tokio::test]
-async fn request_page_shows_the_request_decoded_and_in_its_original_form() {
+async fn one_page_shows_the_request_and_the_response_controls() {
     let op = start().await;
     let pkce = Pkce::new();
     let request_object = op.request_object(&pkce, &identity_request());
     let body: Value = op.par(&request_object).await.json().await.unwrap();
     let request_uri = body["request_uri"].as_str().unwrap();
 
-    let page = op.open_login(request_uri).await;
+    let response = op
+        .browser
+        .get(op.authorize_url(request_uri))
+        .send()
+        .await
+        .unwrap();
+    // The page's script runs under a nonce; nothing else may.
+    let csp = response.headers()["content-security-policy"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        csp.contains("default-src 'none'") && csp.contains("script-src 'nonce-"),
+        "{csp}"
+    );
+    assert!(!csp.contains("unsafe-inline' 'nonce") && !csp.contains("script-src 'unsafe"));
+    let page = LoginPage::from_response(response).await;
     let html = &page.html;
+    let nonce = csp
+        .split("'nonce-")
+        .nth(1)
+        .unwrap()
+        .split('\'')
+        .next()
+        .unwrap();
+    assert!(html.contains(&format!("<script nonce=\"{nonce}\">")));
     assert!(html.contains("id=\"technical-banner\""));
     assert!(!html.contains("id=\"password\""), "there is no sign-in");
 
-    // Decoded by default: header and payload as readable JSON.
+    // Request, decoded by default: header and payload as readable JSON.
+    assert!(html.contains("id=\"view-decoded\" checked"));
     let header: Value = serde_json::from_str(&text_of(html, "request-header")).unwrap();
     assert_eq!(header["alg"], "PS256");
     let payload: Value = serde_json::from_str(&text_of(html, "request-payload")).unwrap();
@@ -136,16 +217,14 @@ async fn request_page_shows_the_request_decoded_and_in_its_original_form() {
         payload["claims"]["id_token"]["given_name"]["essential"],
         true
     );
-
-    // The original JWT is available on demand, byte for byte.
-    assert!(html.contains("<details id=\"request-original\">"));
+    // The original JWT is one click away, byte for byte.
+    assert!(html.contains("id=\"view-original\""));
     assert_eq!(text_of(html, "request-encoded"), request_object);
-
     // Purpose is escaped wherever it is shown.
     assert_eq!(text_of(html, "purpose"), "Checking <your> identity & age");
     assert!(!html.contains("<your>"));
 
-    // Every predefined customer is offered, with their attributes.
+    // Response: every predefined customer, with their attributes.
     for (subject, label) in [
         ("demo-user-0001", "Alex Jordan Citizen (demo)"),
         (RILEY, "Riley Young (riley)"),
@@ -169,8 +248,16 @@ async fn request_page_shows_the_request_decoded_and_in_its_original_form() {
         "attributes are shown"
     );
 
-    // Success and each predefined error can be chosen.
-    assert!(html.contains("<option value=\"success\" selected>"));
+    // The anticipated ID token payload for the selected customer is already
+    // there to edit, and success is the default outcome.
+    assert!(html.contains("id=\"outcome-success\" value=\"success\" checked"));
+    assert!(!html.contains("id=\"outcome-error\" value=\"error\" checked"));
+    let preview: Value = serde_json::from_str(&text_of(html, "id_token")).unwrap();
+    assert_eq!(preview["given_name"], "Alex");
+    assert_eq!(preview["at_hash"], "(set when the access token is issued)");
+    assert_eq!(field(html, "base_customer"), "demo-user-0001");
+
+    // Each predefined error can be chosen.
     for code in [
         "access_denied",
         "login_required",
@@ -188,15 +275,55 @@ async fn request_page_shows_the_request_decoded_and_in_its_original_form() {
             "{code}"
         );
     }
+
+    // The script's data: every customer's claims, so switching customer
+    // needs no round trip, all under one transaction identifier.
+    let data = page_data(html);
+    let previews = data["previews"].as_object().unwrap();
+    assert_eq!(previews.len(), 4);
+    let margaret: Value = serde_json::from_str(previews[MARGARET].as_str().unwrap()).unwrap();
+    assert_eq!(margaret["given_name"], "Margaret");
+    assert_eq!(margaret["txn"], preview["txn"]);
+    assert_eq!(previews["demo-user-0001"], text_of(html, "id_token"));
+    assert_eq!(
+        data["errors"]["access_denied"],
+        "the user denied the request"
+    );
+    assert_eq!(data["redirect_uri"], REDIRECT_URI);
+    assert_eq!(data["issuer"], op.issuer);
+    assert_eq!(data["remembered"], Value::Null);
     op.stop().await;
 }
 
 #[tokio::test]
-async fn success_can_be_sent_immediately_for_the_selected_customer() {
+async fn data_block_cannot_be_broken_out_of() {
+    let op = start().await;
+    let request_uri = op
+        .push(
+            &Pkce::new(),
+            &json!({"state": "</script><script>alert(1)</script>", "nonce": "<!--"}),
+        )
+        .await;
+    let page = op.open_login(&request_uri).await;
+    assert!(!page.html.contains("</script><script>alert(1)"));
+    assert!(!page.html.contains("<!--"));
+    assert_eq!(
+        page_data(&page.html)["state"],
+        "</script><script>alert(1)</script>"
+    );
+    op.stop().await;
+}
+
+#[tokio::test]
+async fn unedited_success_is_sent_for_the_selected_customer() {
     let op = start().await;
     let pkce = Pkce::new();
     let request_uri = op.push(&pkce, &identity_request()).await;
     let page = op.open_login(&request_uri).await;
+
+    // As the script does it: take that customer's claims from the page data.
+    let data = page_data(&page.html);
+    let riley = data["previews"][RILEY].as_str().unwrap();
     let response = submit(
         &op,
         &page,
@@ -204,7 +331,11 @@ async fn success_can_be_sent_immediately_for_the_selected_customer() {
         &[
             ("customer", RILEY),
             ("outcome", "success"),
-            ("action", "approve"),
+            ("txn", &field(&page.html, "txn")),
+            ("base", riley),
+            ("base_customer", RILEY),
+            ("id_token", riley),
+            ("action", "send"),
         ],
     )
     .await;
@@ -219,6 +350,8 @@ async fn success_can_be_sent_immediately_for_the_selected_customer() {
         claims["verified_claims"]["claims"],
         json!({"over18": false, "over65": false})
     );
+    assert_eq!(claims["txn"], field(&page.html, "txn"));
+    assert_eq!(claims["at_hash"].as_str().unwrap().len(), 22);
     // The transaction is recorded like any other.
     let record = op
         .state()
@@ -234,32 +367,44 @@ async fn success_can_be_sent_immediately_for_the_selected_customer() {
 }
 
 #[tokio::test]
-async fn response_is_previewed_and_can_be_edited_before_it_is_sent() {
+async fn changing_customer_without_script_regenerates_the_claims_first() {
     let op = start().await;
     let pkce = Pkce::new();
     let request_uri = op.push(&pkce, &identity_request()).await;
     let page = op.open_login(&request_uri).await;
 
-    let response = submit(
-        &op,
-        &page,
-        &request_uri,
-        &[
-            ("customer", MARGARET),
-            ("outcome", "success"),
-            ("action", "preview"),
-        ],
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
+    // The page was rendered for the first customer; a browser without the
+    // script submits Margaret with the first customer's claims.
+    let response = send_success(&op, &page, &request_uri, &page.html, MARGARET, None).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "nothing mismatched is sent"
+    );
     let html = response.text().await.unwrap();
-    assert_eq!(text_of(&html, "customer-name"), "Margaret Elder (margaret)");
-    assert_eq!(text_of(&html, "redirect-uri"), REDIRECT_URI);
-    assert_eq!(text_of(&html, "iss"), op.issuer);
+    assert!(text_of(&html, "notice").contains("regenerated for Margaret Elder"));
+    assert_eq!(selected_customer(&html), MARGARET);
+    assert_eq!(field(&html, "base_customer"), MARGARET);
+    let preview: Value = serde_json::from_str(&text_of(&html, "id_token")).unwrap();
+    assert_eq!(preview["given_name"], "Margaret");
+
+    // Sending that page completes the flow for Margaret.
+    let response = send_success(&op, &page, &request_uri, &html, MARGARET, None).await;
+    let claims = id_token_claims(&op, &redirect_params(&response), &pkce).await;
+    assert_eq!(claims["given_name"], "Margaret");
+    op.stop().await;
+}
+
+#[tokio::test]
+async fn response_can_be_edited_before_it_is_sent() {
+    let op = start().await;
+    let pkce = Pkce::new();
+    let request_uri = op.push(&pkce, &identity_request()).await;
+    let page = op.open_login(&request_uri).await;
+    let html = page_for(&op, &page, &request_uri, MARGARET).await;
 
     // The anticipated ID token payload, as JSON, before signing.
-    let shown = text_of(&html, "id_token");
-    let preview: Value = serde_json::from_str(&shown).unwrap();
+    let preview: Value = serde_json::from_str(&text_of(&html, "id_token")).unwrap();
     assert_eq!(preview["iss"], op.issuer);
     assert_eq!(preview["aud"], CLIENT_ID);
     assert_eq!(preview["given_name"], "Margaret");
@@ -284,18 +429,13 @@ async fn response_is_previewed_and_can_be_edited_before_it_is_sent() {
     let edited_text = serde_json::to_string_pretty(&edited).unwrap();
 
     op.clock.advance(5);
-    let response = submit(
+    let response = send_success(
         &op,
         &page,
         &request_uri,
-        &[
-            ("customer", &field(&html, "customer")),
-            ("outcome", "success"),
-            ("txn", &field(&html, "txn")),
-            ("base", &field(&html, "base")),
-            ("id_token", &edited_text),
-            ("action", "send"),
-        ],
+        &html,
+        MARGARET,
+        Some(&edited_text),
     )
     .await;
     let params = redirect_params(&response);
@@ -332,37 +472,20 @@ async fn protocol_claims_can_be_overridden_for_negative_testing() {
     let pkce = Pkce::new();
     let request_uri = op.push(&pkce, &json!({})).await;
     let page = op.open_login(&request_uri).await;
-    let html = submit(
-        &op,
-        &page,
-        &request_uri,
-        &[
-            ("customer", SAM),
-            ("outcome", "success"),
-            ("action", "preview"),
-        ],
-    )
-    .await
-    .text()
-    .await
-    .unwrap();
+    let html = page_for(&op, &page, &request_uri, SAM).await;
     let mut edited: Value = serde_json::from_str(&text_of(&html, "id_token")).unwrap();
     edited["iss"] = json!("https://wrong-issuer.example.com");
     edited["exp"] = json!(1);
     edited["at_hash"] = json!("deliberately-wrong");
     edited.as_object_mut().unwrap().remove("nonce");
 
-    let response = submit(
+    let response = send_success(
         &op,
         &page,
         &request_uri,
-        &[
-            ("customer", SAM),
-            ("txn", &field(&html, "txn")),
-            ("base", &field(&html, "base")),
-            ("id_token", &edited.to_string()),
-            ("action", "send"),
-        ],
+        &html,
+        SAM,
+        Some(&edited.to_string()),
     )
     .await;
     let params = redirect_params(&response);
@@ -404,37 +527,16 @@ async fn invalid_json_is_reported_and_the_text_is_kept() {
     let pkce = Pkce::new();
     let request_uri = op.push(&pkce, &json!({})).await;
     let page = op.open_login(&request_uri).await;
-    let html = submit(
-        &op,
-        &page,
-        &request_uri,
-        &[("customer", SAM), ("action", "preview")],
-    )
-    .await
-    .text()
-    .await
-    .unwrap();
-    let txn = field(&html, "txn");
-    let base = field(&html, "base");
+    let first = page_for(&op, &page, &request_uri, SAM).await;
+    let txn = field(&first, "txn");
+    let base = field(&first, "base");
 
     for (bad, message) in [
         ("{\"sub\": <oops>", "not valid JSON"),
         ("[1, 2]", "must be a JSON object"),
         ("", "not valid JSON"),
     ] {
-        let response = submit(
-            &op,
-            &page,
-            &request_uri,
-            &[
-                ("customer", SAM),
-                ("txn", &txn),
-                ("base", &base),
-                ("id_token", bad),
-                ("action", "send"),
-            ],
-        )
-        .await;
+        let response = send_success(&op, &page, &request_uri, &first, SAM, Some(bad)).await;
         assert_eq!(response.status(), StatusCode::OK, "{bad}");
         let html = response.text().await.unwrap();
         assert!(text_of(&html, "error").contains(message), "{bad}");
@@ -444,22 +546,16 @@ async fn invalid_json_is_reported_and_the_text_is_kept() {
             "the text is kept for fixing"
         );
         assert_eq!(field(&html, "txn"), txn);
+        assert_eq!(
+            field(&html, "base"),
+            base,
+            "edits are still measured from the original"
+        );
+        assert_eq!(selected_customer(&html), SAM);
     }
 
     // Nothing was consumed: the corrected response can still be sent.
-    let response = submit(
-        &op,
-        &page,
-        &request_uri,
-        &[
-            ("customer", SAM),
-            ("txn", &txn),
-            ("base", &base),
-            ("id_token", &base),
-            ("action", "send"),
-        ],
-    )
-    .await;
+    let response = send_success(&op, &page, &request_uri, &first, SAM, None).await;
     let claims = id_token_claims(&op, &redirect_params(&response), &pkce).await;
     assert_eq!(claims["txn"], txn);
     op.stop().await;
@@ -470,13 +566,9 @@ async fn last_customer_used_is_preselected_on_the_next_flow() {
     let op = start().await;
     let request_uri = op.push(&Pkce::new(), &json!({})).await;
     let page = op.open_login(&request_uri).await;
-    let response = submit(
-        &op,
-        &page,
-        &request_uri,
-        &[("customer", MARGARET), ("action", "approve")],
-    )
-    .await;
+    assert!(page.html.contains("id=\"remembered\" hidden"));
+    let html = page_for(&op, &page, &request_uri, MARGARET).await;
+    let response = send_success(&op, &page, &request_uri, &html, MARGARET, None).await;
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
     let remembered = response
         .headers()
@@ -489,7 +581,7 @@ async fn last_customer_used_is_preselected_on_the_next_flow() {
     assert!(remembered.contains("Max-Age="));
     let cookie = remembered.split(';').next().unwrap().to_owned();
 
-    // A later flow from the same browser.
+    // A later flow from the same browser: Margaret and her claims are ready.
     let request_uri = op.push(&Pkce::new(), &json!({})).await;
     let html = op
         .browser
@@ -502,6 +594,11 @@ async fn last_customer_used_is_preselected_on_the_next_flow() {
         .await
         .unwrap();
     assert_eq!(selected_customer(&html), MARGARET);
+    assert_eq!(field(&html, "base_customer"), MARGARET);
+    assert!(html.contains("id=\"remembered\">Used on your last flow"));
+    assert_eq!(page_data(&html)["remembered"], MARGARET);
+    let preview: Value = serde_json::from_str(&text_of(&html, "id_token")).unwrap();
+    assert_eq!(preview["sub"].as_str().unwrap().len(), 43);
 
     // A browser without the cookie, or with a stale one, gets the first.
     let page = op.open_login(&request_uri).await;
@@ -541,24 +638,12 @@ async fn predefined_errors_can_be_returned_instead_of_a_code() {
             &op,
             &page,
             &request_uri,
-            &[("customer", SAM), ("outcome", code), ("action", "preview")],
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::OK, "{code}");
-        let html = response.text().await.unwrap();
-        assert_eq!(text_of(&html, "error-code"), code);
-        assert_eq!(text_of(&html, "state"), "state-123");
-        let default_description = field(&html, "error_description");
-        assert_ne!(default_description, "");
-
-        let response = submit(
-            &op,
-            &page,
-            &request_uri,
             &[
-                ("outcome", code),
+                ("customer", SAM),
+                ("outcome", "error"),
+                ("error", code),
                 ("error_description", "simulated for testing"),
-                ("action", "send_error"),
+                ("action", "send"),
             ],
         )
         .await;
@@ -568,85 +653,105 @@ async fn predefined_errors_can_be_returned_instead_of_a_code() {
         assert_eq!(params["state"], "state-123");
         assert_eq!(params["iss"], op.issuer);
         assert!(!params.contains_key("code"), "{code}");
+        assert!(
+            response.headers().get(SET_COOKIE).is_none(),
+            "no customer was used, so none is remembered"
+        );
 
         // The request is spent: it cannot be turned into a success after.
-        let again = submit(
-            &op,
-            &page,
-            &request_uri,
-            &[("customer", SAM), ("action", "approve")],
-        )
-        .await;
+        let again =
+            send_success(&op, &page, &request_uri, &page.html, "demo-user-0001", None).await;
         assert_eq!(again.status(), StatusCode::BAD_REQUEST, "{code}");
     }
     op.stop().await;
 }
 
 #[tokio::test]
-async fn access_denied_can_be_sent_immediately() {
+async fn error_defaults_are_access_denied_with_its_description() {
     let op = start().await;
+    // What the page posts if only the Error outcome is chosen.
     let request_uri = op.push(&Pkce::new(), &json!({})).await;
     let page = op.open_login(&request_uri).await;
-    let response = submit(&op, &page, &request_uri, &[("action", "deny")]).await;
+    assert_eq!(
+        field(&page.html, "error_description"),
+        "the user denied the request"
+    );
+    let response = submit(
+        &op,
+        &page,
+        &request_uri,
+        &[
+            ("outcome", "error"),
+            ("error", "access_denied"),
+            ("error_description", ""),
+            ("action", "send"),
+        ],
+    )
+    .await;
     let params = redirect_params(&response);
     assert_eq!(params["error"], "access_denied");
     assert_eq!(params["error_description"], "the user denied the request");
-    assert!(
-        response.headers().get(SET_COOKIE).is_none(),
-        "no customer was used, so none is remembered"
-    );
     op.stop().await;
 }
 
 #[tokio::test]
-async fn bad_selections_return_to_the_request_page() {
+async fn bad_submissions_show_the_page_again() {
     let op = start().await;
     let request_uri = op.push(&Pkce::new(), &json!({})).await;
     let page = op.open_login(&request_uri).await;
+    let base = field(&page.html, "base");
     for fields in [
-        vec![("customer", "nobody"), ("action", "approve")],
-        vec![("customer", "nobody"), ("action", "preview")],
+        vec![("customer", "nobody"), ("action", "send")],
         vec![
-            ("customer", SAM),
-            ("outcome", "made_up"),
-            ("action", "preview"),
-        ],
-        vec![("outcome", "made_up"), ("action", "send_error")],
-        vec![
-            ("customer", SAM),
-            ("txn", "x"),
-            ("base", "{}"),
+            ("outcome", "error"),
+            ("error", "made_up"),
             ("action", "send"),
         ],
-        vec![("customer", SAM), ("action", "send")],
+        vec![("outcome", "error"), ("action", "send")],
+        vec![("customer", SAM), ("action", "something-else")],
+        vec![
+            ("customer", SAM),
+            ("base_customer", SAM),
+            ("txn", "not-a-uuid"),
+            ("base", &base),
+            ("id_token", &base),
+            ("action", "send"),
+        ],
+        vec![
+            ("customer", SAM),
+            ("base_customer", SAM),
+            ("txn", "9f00df0c-ce59-4b91-a2b5-e22913c41432"),
+            ("base", "not json"),
+            ("id_token", "{}"),
+            ("action", "send"),
+        ],
     ] {
         let response = submit(&op, &page, &request_uri, &fields).await;
         assert_eq!(response.status(), StatusCode::OK, "{fields:?}");
         let html = response.text().await.unwrap();
         assert!(html.contains("id=\"error\""), "{fields:?}");
         assert!(html.contains("id=\"request-payload\""), "{fields:?}");
+        assert!(html.contains("id=\"id_token\""), "{fields:?}");
     }
-    // "Back" returns to the request page keeping the selections.
+    // The error outcome stays selected when the page comes back.
     let response = submit(
         &op,
         &page,
         &request_uri,
         &[
-            ("customer", RILEY),
-            ("outcome", "login_required"),
-            ("action", "back"),
+            ("outcome", "error"),
+            ("error", "made_up"),
+            ("action", "send"),
         ],
     )
     .await;
     let html = response.text().await.unwrap();
-    assert_eq!(selected_customer(&html), RILEY);
-    assert!(html.contains("<option value=\"login_required\" selected>"));
-    assert!(!html.contains("id=\"error\""));
+    assert!(html.contains("id=\"outcome-error\" value=\"error\" checked"));
     op.stop().await;
 }
 
 #[tokio::test]
-async fn csrf_protection_applies_to_the_technical_forms() {
+async fn csrf_protection_applies_to_the_technical_form() {
     let op = start().await;
     let request_uri = op.push(&Pkce::new(), &json!({})).await;
     let page = op.open_login(&request_uri).await;
@@ -657,8 +762,9 @@ async fn csrf_protection_applies_to_the_technical_forms() {
             ("csrf", page.csrf.as_str()),
             ("client_id", CLIENT_ID),
             ("request_uri", &request_uri),
-            ("customer", SAM),
-            ("action", "approve"),
+            ("outcome", "error"),
+            ("error", "access_denied"),
+            ("action", "send"),
         ])
         .send()
         .await

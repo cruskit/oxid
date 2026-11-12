@@ -70,6 +70,12 @@ impl TestOp {
 
     /// Start a provider, letting the test adjust the configuration first.
     pub async fn start_with(adjust: impl FnOnce(&mut Config)) -> Self {
+        Self::try_start_with(adjust).await.expect("server starts")
+    }
+
+    /// As [`Self::start_with`], for tests of configurations that must not
+    /// start.
+    pub async fn try_start_with(adjust: impl FnOnce(&mut Config)) -> anyhow::Result<Self> {
         let public = TcpListener::bind("127.0.0.1:0").unwrap();
         let mtls = TcpListener::bind("127.0.0.1:0").unwrap();
         let issuer = format!("https://localhost:{}", public.local_addr().unwrap().port());
@@ -105,8 +111,7 @@ impl TestOp {
             .clock(Arc::clone(&clock) as Arc<dyn Clock>)
             .listeners(public, mtls)
             .start()
-            .await
-            .expect("server starts");
+            .await?;
 
         let trust = Certificate::from_der(server.certificate().as_ref()).unwrap();
         let base = || {
@@ -118,7 +123,7 @@ impl TestOp {
         let (rp_identity, rp_cert_thumbprint) = client_identity();
         let (other_identity, _) = client_identity();
 
-        Self {
+        Ok(Self {
             server: Some(server),
             issuer,
             mtls: mtls_base,
@@ -128,7 +133,7 @@ impl TestOp {
             rp: base().identity(rp_identity).build().unwrap(),
             rp_other_cert: base().identity(other_identity).build().unwrap(),
             rp_cert_thumbprint,
-        }
+        })
     }
 
     pub async fn stop(mut self) {
