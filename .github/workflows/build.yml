@@ -58,9 +58,16 @@ jobs:
         run: mise run test
 
   conformance:
-    name: OpenID conformance suite
+    name: OpenID conformance suite (${{ matrix.experience }})
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # One full run per user experience module.
+        experience: [technical, login]
+    env:
+      OXID_EXPERIENCE: ${{ matrix.experience }}
     steps:
       - uses: actions/checkout@v4
 
@@ -74,7 +81,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: conformance-results
+          name: conformance-results-${{ matrix.experience }}
           path: conformance/results/
           if-no-files-found: warn
           retention-days: 30

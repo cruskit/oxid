@@ -5,9 +5,15 @@
 # suite images, and drives the suite's own run-test-plan.py with the
 # FAPI2 Message Signing (Final) plan in its ConnectID variant.
 #
+# The user experience at the authorization endpoint is pluggable, and what it
+# does decides what ends up in the tokens, so the whole plan is run once per
+# experience, each with browser automation written for it.
+#
 # Usage: scripts/conformance.sh [extra run-test-plan.py arguments]
 #
 # Environment:
+#   OXID_EXPERIENCE  run for this experience only (technical or login);
+#                    unset runs each in turn
 #   SUITE_TAG        conformance suite release (image tag and git tag)
 #   SUITE_HOST_PORT  loopback port for the suite UI/API       (default 8943)
 #   OXID_HOST_PORT   loopback port for oxID's public listener  (default 9443)
@@ -18,7 +24,31 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONF="$ROOT/conformance"
 CACHE="$CONF/.cache"
-RESULTS="$CONF/results"
+
+EXPERIENCES=(technical login)
+
+# With no experience chosen, run this script once for each.
+if [[ -z "${OXID_EXPERIENCE:-}" ]]; then
+  failed=()
+  for experience in "${EXPERIENCES[@]}"; do
+    printf '\n######## Conformance suite: %s experience ########\n' "$experience"
+    OXID_EXPERIENCE="$experience" "${BASH_SOURCE[0]}" "$@" || failed+=("$experience")
+  done
+  if ((${#failed[@]})); then
+    printf '\nConformance suite FAILED for: %s\n' "${failed[*]}" >&2
+    exit 1
+  fi
+  printf '\nConformance suite passed for: %s\n' "${EXPERIENCES[*]}"
+  exit 0
+fi
+
+if [[ ! " ${EXPERIENCES[*]} " == *" $OXID_EXPERIENCE "* ]]; then
+  echo "Unknown OXID_EXPERIENCE '$OXID_EXPERIENCE' (expected one of: ${EXPERIENCES[*]})" >&2
+  exit 2
+fi
+export OXID_EXPERIENCE
+RESULTS="$CONF/results/$OXID_EXPERIENCE"
+SUITE_CONFIG="$CONF/.generated/suite-config-$OXID_EXPERIENCE.json"
 
 export SUITE_TAG="${SUITE_TAG:-release-v5.3.4}"
 export SUITE_HOST_PORT="${SUITE_HOST_PORT:-8943}"
@@ -58,7 +88,7 @@ if [[ ! -x "$VENV/bin/python" ]]; then
   "$VENV/bin/pip" install --quiet -r "$SUITE_SRC/scripts/requirements.txt" cryptography
 fi
 
-if [[ ! -f "$CONF/.generated/suite-config.json" ]]; then
+if [[ ! -f "$SUITE_CONFIG" ]]; then
   log "Generating client keys and suite configuration"
   "$VENV/bin/python" "$CONF/generate.py"
 fi
@@ -96,7 +126,7 @@ wait_for() {
 wait_for "oxID" "https://localhost:$OXID_HOST_PORT/healthz" 60
 wait_for "conformance suite" "${SUITE_URL}api/runner/available" 150
 
-log "Running $PLAN"
+log "Running $PLAN ($OXID_EXPERIENCE experience)"
 cd "$SUITE_SRC/scripts"
 # CONFORMANCE_DEV_MODE: the local suite has no API authentication and a
 # self-signed certificate.
@@ -108,4 +138,4 @@ CONFORMANCE_DEV_MODE=1 \
   --expected-skips-file "$CONF/expected-skips.json" \
   --verbose \
   "$@" \
-  "$PLAN" "$CONF/.generated/suite-config.json"
+  "$PLAN" "$SUITE_CONFIG"

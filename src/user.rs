@@ -126,7 +126,9 @@ pub struct User {
     /// derived from it.
     pub subject: String,
     pub username: String,
-    password_hash: String,
+    /// `None` for a user who cannot sign in with a password. Such users can
+    /// still be selected in the technical experience.
+    password_hash: Option<String>,
     /// Identity claims, keyed by OpenID Connect claim name.
     pub claims: Map<String, Value>,
     /// Source of the beneficiary account verified claims.
@@ -137,20 +139,22 @@ impl User {
     pub fn new(
         subject: impl Into<String>,
         username: impl Into<String>,
-        password_hash: impl Into<String>,
+        password_hash: Option<String>,
         claims: Map<String, Value>,
     ) -> Result<Self> {
         let user = Self {
             subject: subject.into(),
             username: username.into(),
-            password_hash: password_hash.into(),
+            password_hash,
             claims,
             bank_account: None,
         };
         ensure!(!user.subject.is_empty(), "user subject must not be empty");
         ensure!(!user.username.is_empty(), "username must not be empty");
-        PasswordHash::new(&user.password_hash)
-            .map_err(|e| anyhow!("user '{}': invalid password_hash: {e}", user.username))?;
+        if let Some(hash) = &user.password_hash {
+            PasswordHash::new(hash)
+                .map_err(|e| anyhow!("user '{}': invalid password_hash: {e}", user.username))?;
+        }
         Ok(user)
     }
 
@@ -167,7 +171,7 @@ impl User {
         let user = Self::new(
             &config.subject,
             &config.username,
-            &config.password_hash,
+            config.password_hash.clone(),
             config.claims.clone(),
         )?;
         match &config.bank_account {
@@ -176,8 +180,29 @@ impl User {
         }
     }
 
+    /// A name to show for this user: their `name` claim, else given and
+    /// family names, else the username.
+    pub fn display_name(&self) -> String {
+        let claim = |name: &str| self.claims.get(name).and_then(Value::as_str);
+        if let Some(name) = claim("name") {
+            return name.to_owned();
+        }
+        let parts: Vec<&str> = [claim("given_name"), claim("family_name")]
+            .into_iter()
+            .flatten()
+            .collect();
+        if parts.is_empty() {
+            self.username.clone()
+        } else {
+            parts.join(" ")
+        }
+    }
+
     fn password_matches(&self, password: &str) -> bool {
-        PasswordHash::new(&self.password_hash).is_ok_and(|hash| {
+        let Some(hash) = &self.password_hash else {
+            return false;
+        };
+        PasswordHash::new(hash).is_ok_and(|hash| {
             Argon2::default()
                 .verify_password(password.as_bytes(), &hash)
                 .is_ok()
@@ -200,12 +225,18 @@ pub trait UserStore: Send + Sync + Debug {
     fn authenticate(&self, username: &str, password: &str) -> Option<Arc<User>>;
 
     fn find_by_subject(&self, subject: &str) -> Option<Arc<User>>;
+
+    /// Every user, in a stable order. Used by experiences that let a user be
+    /// picked from a list.
+    fn list(&self) -> Vec<Arc<User>>;
 }
 
 /// A fixed set of users held in memory.
 #[derive(Debug)]
 pub struct StaticUserStore {
     by_username: HashMap<String, Arc<User>>,
+    /// Users in the order they were defined.
+    ordered: Vec<Arc<User>>,
     /// Verified against when the username is unknown, so that response time
     /// does not reveal which usernames exist.
     decoy_hash: String,
@@ -214,6 +245,7 @@ pub struct StaticUserStore {
 impl StaticUserStore {
     pub fn new(users: impl IntoIterator<Item = User>) -> Result<Self> {
         let mut by_username = HashMap::new();
+        let mut ordered = Vec::new();
         let mut subjects = std::collections::HashSet::new();
         for user in users {
             ensure!(
@@ -222,15 +254,16 @@ impl StaticUserStore {
                 user.subject
             );
             let username = user.username.clone();
+            let user = Arc::new(user);
+            ordered.push(Arc::clone(&user));
             ensure!(
-                by_username
-                    .insert(username.clone(), Arc::new(user))
-                    .is_none(),
+                by_username.insert(username.clone(), user).is_none(),
                 "duplicate username '{username}'"
             );
         }
         Ok(Self {
             by_username,
+            ordered,
             decoy_hash: hash_password("oxid-decoy-password")?,
         })
     }
@@ -244,9 +277,10 @@ impl StaticUserStore {
         )
     }
 
-    /// The hard-coded user this version ships with.
+    /// The built-in customers, used when none are configured. They all
+    /// share [`DEMO_PASSWORD`].
     pub fn demo() -> Result<Self> {
-        Self::new([demo_user()?])
+        Self::new(demo_users()?)
     }
 
     pub fn len(&self) -> usize {
@@ -271,16 +305,111 @@ impl UserStore for StaticUserStore {
     }
 
     fn find_by_subject(&self, subject: &str) -> Option<Arc<User>> {
-        self.by_username
-            .values()
+        self.ordered
+            .iter()
             .find(|user| user.subject == subject)
             .cloned()
     }
+
+    fn list(&self) -> Vec<Arc<User>> {
+        self.ordered.clone()
+    }
 }
 
-/// The built-in user: a fictional person carrying every standard `OpenID`
-/// Connect claim, and so every claim the ConnectID profile defines.
-fn demo_user() -> Result<User> {
+/// The built-in customers: fictional people chosen to exercise different
+/// outcomes. All of them sign in with [`DEMO_PASSWORD`].
+///
+/// - `demo`: an adult with every claim, a `PayID` and a BIC.
+/// - `riley`: under 18, with a bank account but no `PayID` or BIC.
+/// - `margaret`: over 65, no middle name, `PayID` by mobile number.
+/// - `sam`: sparse data: no birthdate, phone, address or bank account.
+fn demo_users() -> Result<Vec<User>> {
+    let hash = hash_password(DEMO_PASSWORD)?;
+    let object = |value: Value| match value {
+        Value::Object(map) => map,
+        _ => Map::new(),
+    };
+    let riley = User::new(
+        "demo-user-0002",
+        "riley",
+        Some(hash.clone()),
+        object(json!({
+            "name": "Riley Young",
+            "given_name": "Riley",
+            "family_name": "Young",
+            "email": "riley.young@example.com",
+            "email_verified": true,
+            "birthdate": "2010-06-15",
+            "phone_number": "+61 400 000 002",
+            "phone_number_verified": false,
+            "locale": "en-AU",
+            "address": {
+                "street_address": "2 Sample Avenue",
+                "locality": "Melbourne",
+                "region": "VIC",
+                "postal_code": "3000",
+                "country": "Australia"
+            }
+        })),
+    )?
+    .with_bank_account(BankAccount {
+        beneficiary_name: "Riley Young".to_owned(),
+        bsb: "234567".to_owned(),
+        account_number: "23456789".to_owned(),
+        payid: None,
+        payid_type: None,
+        bic_swift_code: None,
+        account_number_international: None,
+    })?;
+    let margaret = User::new(
+        "demo-user-0003",
+        "margaret",
+        Some(hash.clone()),
+        object(json!({
+            "name": "Margaret Elder",
+            "given_name": "Margaret",
+            "family_name": "Elder",
+            "email": "margaret.elder@example.com",
+            "email_verified": true,
+            "birthdate": "1950-02-03",
+            "phone_number": "+61 400 000 003",
+            "phone_number_verified": true,
+            "locale": "en-AU",
+            "address": {
+                "street_address": "Unit 3\n30 Placeholder Road",
+                "locality": "Brisbane",
+                "region": "QLD",
+                "postal_code": "4000",
+                "country": "Australia"
+            }
+        })),
+    )?
+    .with_bank_account(BankAccount {
+        beneficiary_name: "Margaret Elder".to_owned(),
+        bsb: "345678".to_owned(),
+        account_number: "345678901".to_owned(),
+        payid: Some("0400000003".to_owned()),
+        payid_type: Some(PayIdType::Mobile),
+        bic_swift_code: Some("OXIDAU2S".to_owned()),
+        account_number_international: None,
+    })?;
+    let sam = User::new(
+        "demo-user-0004",
+        "sam",
+        Some(hash.clone()),
+        object(json!({
+            "given_name": "Sam",
+            "family_name": "Lee",
+            "email": "sam.lee@example.com",
+            "email_verified": false
+        })),
+    )?;
+    Ok(vec![demo_user(hash)?, riley, margaret, sam])
+}
+
+/// The first built-in customer: a fictional person carrying every standard
+/// `OpenID` Connect claim, and so every claim the ConnectID profile defines.
+fn demo_user(password_hash: String) -> Result<User> {
     let Value::Object(claims) = json!({
         "name": "Alex Jordan Citizen",
         "nickname": "Al",
@@ -311,21 +440,17 @@ fn demo_user() -> Result<User> {
     }) else {
         unreachable!("literal is an object");
     };
-    User::new(
-        "demo-user-0001",
-        DEMO_USERNAME,
-        hash_password(DEMO_PASSWORD)?,
-        claims,
-    )?
-    .with_bank_account(BankAccount {
-        beneficiary_name: "Alex Jordan Citizen".to_owned(),
-        bsb: "123456".to_owned(),
-        account_number: "12345678".to_owned(),
-        payid: Some("alex.citizen@example.com".to_owned()),
-        payid_type: Some(PayIdType::Email),
-        bic_swift_code: Some("OXIDAU2SXXX".to_owned()),
-        account_number_international: None,
-    })
+    User::new("demo-user-0001", DEMO_USERNAME, Some(password_hash), claims)?.with_bank_account(
+        BankAccount {
+            beneficiary_name: "Alex Jordan Citizen".to_owned(),
+            bsb: "123456".to_owned(),
+            account_number: "12345678".to_owned(),
+            payid: Some("alex.citizen@example.com".to_owned()),
+            payid_type: Some(PayIdType::Email),
+            bic_swift_code: Some("OXIDAU2SXXX".to_owned()),
+            account_number_international: None,
+        },
+    )
 }
 
 #[cfg(test)]
@@ -387,6 +512,40 @@ mod tests {
     }
 
     #[test]
+    fn built_in_customers_cover_different_situations() {
+        let users = demo_store().list();
+        let usernames: Vec<&str> = users.iter().map(|u| u.username.as_str()).collect();
+        assert_eq!(usernames, [DEMO_USERNAME, "riley", "margaret", "sam"]);
+        for user in &users {
+            assert!(
+                demo_store()
+                    .authenticate(&user.username, DEMO_PASSWORD)
+                    .is_some(),
+                "{}",
+                user.username
+            );
+        }
+        assert_eq!(users[0].display_name(), "Alex Jordan Citizen");
+        assert_eq!(users[3].display_name(), "Sam Lee", "built from name parts");
+        assert!(users[1].bank_account.as_ref().unwrap().payid.is_none());
+        assert!(users[3].bank_account.is_none());
+        assert!(!users[3].claims.contains_key("birthdate"));
+    }
+
+    #[test]
+    fn users_without_a_password_cannot_sign_in_but_are_listed() {
+        let claims = json!({"given_name": "No"}).as_object().unwrap().clone();
+        let user = User::new("s", "nopass", None, claims).unwrap();
+        assert_eq!(user.display_name(), "No");
+        let store = StaticUserStore::new([user]).unwrap();
+        assert!(store.authenticate("nopass", "").is_none());
+        assert!(store.authenticate("nopass", "anything").is_none());
+        assert_eq!(store.list().len(), 1);
+        let bare = User::new("s2", "bare", None, Map::new()).unwrap();
+        assert_eq!(bare.display_name(), "bare");
+    }
+
+    #[test]
     fn hashes_are_salted_phc_strings() {
         let a = hash_password("secret").unwrap();
         let b = hash_password("secret").unwrap();
@@ -407,15 +566,18 @@ mod tests {
     #[test]
     fn rejects_invalid_users() {
         let hash = hash_password("x").unwrap();
-        assert!(User::new("", "u", &hash, Map::new()).is_err());
-        assert!(User::new("s", "", &hash, Map::new()).is_err());
-        assert!(User::new("s", "u", "plaintext-is-not-a-hash", Map::new()).is_err());
+        let hash = Some(hash);
+        assert!(User::new("", "u", hash.clone(), Map::new()).is_err());
+        assert!(User::new("s", "", hash, Map::new()).is_err());
+        let plaintext = Some("plaintext-is-not-a-hash".to_owned());
+        assert!(User::new("s", "u", plaintext, Map::new()).is_err());
     }
 
     #[test]
     fn store_rejects_duplicates() {
         let hash = hash_password("x").unwrap();
-        let user = |sub: &str, name: &str| User::new(sub, name, &hash, Map::new()).unwrap();
+        let user =
+            |sub: &str, name: &str| User::new(sub, name, Some(hash.clone()), Map::new()).unwrap();
         assert!(StaticUserStore::new([user("1", "a"), user("2", "a")]).is_err());
         assert!(StaticUserStore::new([user("1", "a"), user("1", "b")]).is_err());
         assert_eq!(
@@ -430,7 +592,7 @@ mod tests {
     fn loads_users_from_config() {
         let config = UserConfig {
             username: "sam".into(),
-            password_hash: hash_password("pw").unwrap(),
+            password_hash: Some(hash_password("pw").unwrap()),
             subject: "u-9".into(),
             claims: Map::new(),
             bank_account: None,

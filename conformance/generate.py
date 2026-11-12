@@ -99,19 +99,6 @@ def verify_complete() -> dict:
     }
 
 
-def sign_in(button: str) -> dict:
-    """Fill in the oxID login form and press `button`."""
-    return {
-        "task": "Sign in",
-        "match": AUTHORIZE,
-        "commands": [
-            ["text", "id", "username", USERNAME],
-            ["text", "id", "password", PASSWORD],
-            ["click", "id", button],
-        ],
-    }
-
-
 def entry(tasks: list, limit: int | None = None) -> dict:
     """One browser automation entry for visits to the authorization endpoint.
 
@@ -125,27 +112,108 @@ def entry(tasks: list, limit: int | None = None) -> dict:
     return out
 
 
-def login_and(button: str, limit: int | None = None) -> dict:
-    """Sign in, press `button`, and land back on the suite's callback."""
-    return entry([sign_in(button), verify_complete()], limit)
+def step(name: str, commands: list) -> dict:
+    """One page of interaction at the authorization endpoint."""
+    return {"task": name, "match": AUTHORIZE, "commands": commands}
 
 
-def redirect_with_error() -> dict:
-    """oxID redirects straight back to the suite with an error."""
-    return entry([verify_complete()])
+class Login:
+    """The `login` experience: sign in as the demo user, then decide."""
+
+    name = "login"
+    # An element that shows the first page has loaded.
+    landmark = "username"
+
+    @staticmethod
+    def decide(button: str) -> list:
+        return [
+            step(
+                "Sign in",
+                [
+                    ["text", "id", "username", USERNAME],
+                    ["text", "id", "password", PASSWORD],
+                    ["click", "id", button],
+                ],
+            )
+        ]
+
+    @classmethod
+    def approve(cls) -> list:
+        return cls.decide("approve")
+
+    @classmethod
+    def deny(cls) -> list:
+        return cls.decide("deny")
 
 
-def error_page() -> dict:
-    """oxID shows an error page instead of redirecting; capture it for the
-    screenshot the test asks for."""
-    capture = ["wait", "id", "error-message", 10, ".*", "update-image-placeholder"]
-    return entry([{"task": "Expect error page", "match": AUTHORIZE, "commands": [capture]}])
+class Technical:
+    """The `technical` experience: no sign-in; the first customer is
+    preselected. Approval goes through the response preview page, so the
+    suite exercises the same path a person editing a response would."""
+
+    name = "technical"
+    landmark = "preview"
+
+    @staticmethod
+    def approve() -> list:
+        return [
+            step("Review response", [["click", "id", "preview"]]),
+            step("Send response", [["click", "id", "send"]]),
+        ]
+
+    @staticmethod
+    def deny() -> list:
+        return [step("Send access_denied", [["click", "id", "deny"]])]
 
 
-def look_only(limit: int) -> dict:
-    """Load the login page and do nothing."""
-    wait = ["wait", "id", "username", 10]
-    return entry([{"task": "Load login page", "match": AUTHORIZE, "commands": [wait]}], limit)
+EXPERIENCES = {cls.name: cls for cls in (Technical, Login)}
+
+
+def browser(experience) -> tuple[list, dict]:
+    """The default browser automation and per-test overrides for an
+    experience."""
+
+    def approve(limit: int | None = None) -> dict:
+        return entry([*experience.approve(), verify_complete()], limit)
+
+    def deny() -> dict:
+        return entry([*experience.deny(), verify_complete()])
+
+    def redirect_with_error() -> dict:
+        # oxID redirects straight back to the suite with an error.
+        return entry([verify_complete()])
+
+    def error_page() -> dict:
+        # oxID shows an error page instead of redirecting; capture it for
+        # the screenshot the test asks for.
+        capture = ["wait", "id", "error-message", 10, ".*", "update-image-placeholder"]
+        return entry([step("Expect error page", [capture])])
+
+    def look_only(limit: int) -> dict:
+        # Load the first page and do nothing.
+        return entry([step("Load first page", [["wait", "id", experience.landmark, 10]])], limit)
+
+    prefix = "fapi2-security-profile-final-"
+    overrides = {
+        prefix + "user-rejects-authentication": {"browser": [deny()]},
+        # First visit only loads the page; the second completes the flow.
+        prefix + "par-ensure-reused-request-uri-prior-to-auth-completion-succeeds": {
+            "browser": [look_only(limit=1), approve()]
+        },
+        # request_uri problems cannot be reported by redirect: without a
+        # usable request there is no redirect URI that can be trusted.
+        prefix + "par-attempt-reuse-request_uri": {"browser": [approve(limit=1), error_page()]},
+        prefix + "par-attempt-to-use-expired-request_uri": {"browser": [error_page()]},
+        prefix + "par-attempt-to-use-request_uri-for-different-client": {
+            "browser": [error_page()]
+        },
+        # Not sent via PAR, but naming a registered redirect URI, so the
+        # error can go back to the client.
+        prefix + "ensure-unsigned-authorization-request-without-using-par-fails": {
+            "browser": [redirect_with_error()]
+        },
+    }
+    return [approve()], overrides
 
 
 def main() -> int:
@@ -155,10 +223,8 @@ def main() -> int:
     (OUT / "client1.jwks.json").write_text(json.dumps({"keys": [public1]}, indent=2))
     (OUT / "client2.jwks.json").write_text(json.dumps({"keys": [public2]}, indent=2))
 
-    prefix = "fapi2-security-profile-final-"
-    config = {
+    base = {
         "alias": ALIAS,
-        "description": "oxID - FAPI2 Message Signing Final, ConnectID profile",
         "server": {
             "discoveryUrl": f"{ISSUER}/.well-known/openid-configuration",
             # Defined by OpenID Connect for Identity Assurance, which the
@@ -169,31 +235,18 @@ def main() -> int:
         "client2": {"client_id": "oxid-conformance-2", "jwks": {"keys": [private2]}},
         "mtls": tls_client("oxid-conformance-1"),
         "mtls2": tls_client("oxid-conformance-2"),
-        # Default browser behaviour: sign in as the demo user and approve.
-        "browser": [login_and("approve")],
-        "override": {
-            prefix + "user-rejects-authentication": {"browser": [login_and("deny")]},
-            # First visit only loads the login page; the second signs in.
-            prefix + "par-ensure-reused-request-uri-prior-to-auth-completion-succeeds": {
-                "browser": [look_only(limit=1), login_and("approve")]
-            },
-            # request_uri problems cannot be reported by redirect: without a
-            # usable request there is no redirect URI that can be trusted.
-            prefix + "par-attempt-reuse-request_uri": {
-                "browser": [login_and("approve", limit=1), error_page()]
-            },
-            prefix + "par-attempt-to-use-expired-request_uri": {"browser": [error_page()]},
-            prefix + "par-attempt-to-use-request_uri-for-different-client": {
-                "browser": [error_page()]
-            },
-            # Not sent via PAR, but naming a registered redirect URI, so the
-            # error can go back to the client.
-            prefix + "ensure-unsigned-authorization-request-without-using-par-fails": {
-                "browser": [redirect_with_error()]
-            },
-        },
     }
-    (OUT / "suite-config.json").write_text(json.dumps(config, indent=2))
+    # One suite configuration per user experience: the protocol settings are
+    # the same, only the browser automation differs.
+    for name, experience in EXPERIENCES.items():
+        default, overrides = browser(experience)
+        config = {
+            **base,
+            "description": f"oxID ({name} experience) - FAPI2 Message Signing Final, ConnectID",
+            "browser": default,
+            "override": overrides,
+        }
+        (OUT / f"suite-config-{name}.json").write_text(json.dumps(config, indent=2))
     print(f"wrote {OUT}")
     return 0
 

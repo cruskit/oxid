@@ -28,6 +28,10 @@ pub struct Config {
     pub issuer: String,
     /// Base URL of the mTLS listener, advertised via `mtls_endpoint_aliases`.
     pub mtls_base_url: String,
+    /// The user experience at the authorization endpoint: `technical` (the
+    /// default) or `login`.
+    #[serde(default)]
+    pub experience: crate::experience::Kind,
     #[serde(default)]
     pub server: ServerConfig,
     #[serde(default)]
@@ -154,8 +158,10 @@ fn default_grant_types() -> Vec<String> {
 #[serde(deny_unknown_fields)]
 pub struct UserConfig {
     pub username: String,
-    /// Argon2 PHC string, as produced by `oxid hash-password`.
-    pub password_hash: String,
+    /// Argon2 PHC string, as produced by `oxid hash-password`. A user
+    /// without one cannot sign in under the `login` experience, but can be
+    /// selected in the `technical` one.
+    pub password_hash: Option<String>,
     /// Stable internal identifier. Never sent to clients directly; clients
     /// receive a pairwise identifier derived from it.
     pub subject: String,
@@ -281,6 +287,21 @@ mod tests {
         assert_eq!(config.security.request_object_max_lifetime, 600);
         assert!(config.clients.is_empty());
         assert!(config.users.is_empty());
+        assert_eq!(config.experience, crate::experience::Kind::Technical);
+
+        let login: Config = toml::from_str(
+            "issuer = \"https://op.example.com\"\nmtls_base_url = \"https://m.example.com\"\n\
+             experience = \"login\"",
+        )
+        .unwrap();
+        assert_eq!(login.experience, crate::experience::Kind::Login);
+        assert!(
+            toml::from_str::<Config>(
+                "issuer = \"https://op.example.com\"\nmtls_base_url = \"https://m.example.com\"\n\
+                 experience = \"wizard\"",
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -401,7 +422,6 @@ mod tests {
             mtls_base_url = "https://mtls.op.example.com"
             [[users]]
             username = "alex"
-            password_hash = "x"
             subject = "s"
             [users.bank_account]
             beneficiary_name = "A"

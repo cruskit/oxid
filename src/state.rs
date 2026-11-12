@@ -8,6 +8,7 @@ use url::Url;
 
 use crate::client::{ClientRegistry, StaticClientRegistry};
 use crate::config::{Config, SecurityConfig};
+use crate::experience::{self, Experience, Kind};
 use crate::keys::SigningKey;
 use crate::store::Store;
 use crate::user::{StaticUserStore, UserStore};
@@ -21,6 +22,8 @@ pub struct Inner {
     pub signing_key: SigningKey,
     pub clients: Arc<dyn ClientRegistry>,
     pub users: Arc<dyn UserStore>,
+    /// The user experience at the authorization endpoint.
+    pub experience: Arc<dyn Experience>,
     pub store: Store,
     pub clock: Arc<dyn Clock>,
     pub pairwise_salt: Vec<u8>,
@@ -62,7 +65,7 @@ impl AppState {
 
         let users = if config.users.is_empty() {
             tracing::warn!(
-                "no users are configured: using the built-in demo user (development only)"
+                "no users are configured: using the built-in demo customers (development only)"
             );
             StaticUserStore::demo()?
         } else {
@@ -78,13 +81,24 @@ impl AppState {
             random_token(32).into_bytes()
         };
 
+        let users: Arc<dyn UserStore> = Arc::new(users);
+        if config.experience == Kind::Technical {
+            tracing::warn!(
+                "experience is 'technical': anyone who can reach the authorization endpoint \
+                 can act as any customer and edit responses (development and testing only)"
+            );
+        }
+        tracing::info!(experience = %config.experience, "user experience selected");
+        let experience = experience::build(config.experience, Arc::clone(&users));
+
         Ok(Self(Arc::new(Inner {
             issuer: config.issuer.clone(),
             mtls_base_url: config.mtls_base_url.clone(),
             security: config.security.clone(),
             signing_key,
             clients: Arc::new(clients),
-            users: Arc::new(users),
+            users,
+            experience,
             store: Store::new(),
             clock,
             pairwise_salt,
@@ -146,13 +160,23 @@ pub(crate) mod test_support {
         fn find_by_subject(&self, subject: &str) -> Option<Arc<crate::user::User>> {
             demo_store().find_by_subject(subject)
         }
+
+        fn list(&self) -> Vec<Arc<crate::user::User>> {
+            demo_store().list()
+        }
     }
 
     /// State with client `rp` (keyed by the shared test key), the demo user
     /// and a manual clock at [`NOW`]. The client and the provider share one
     /// key purely to keep tests fast.
     pub fn state() -> (AppState, Arc<ManualClock>) {
+        state_with(Kind::Login)
+    }
+
+    /// As [`state`], with the given user experience.
+    pub fn state_with(kind: Kind) -> (AppState, Arc<ManualClock>) {
         let clock = Arc::new(ManualClock::new(NOW));
+        let users: Arc<dyn UserStore> = Arc::new(SharedUsers);
         let clients = StaticClientRegistry::new([client_with_key("rp", shared_key())]).unwrap();
         let state = AppState(Arc::new(Inner {
             issuer: ISSUER.to_owned(),
@@ -160,7 +184,8 @@ pub(crate) mod test_support {
             security: SecurityConfig::default(),
             signing_key: SigningKey::generate().unwrap(),
             clients: Arc::new(clients),
-            users: Arc::new(SharedUsers),
+            experience: experience::build(kind, Arc::clone(&users)),
+            users,
             store: Store::new(),
             clock: Arc::clone(&clock) as Arc<dyn Clock>,
             pairwise_salt: b"unit-test-pairwise-salt".to_vec(),

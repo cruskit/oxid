@@ -737,7 +737,7 @@ async fn configured_users_replace_the_demo_user() {
     let op = TestOp::start_with(|config| {
         config.users.push(oxid::config::UserConfig {
             username: "sam".into(),
-            password_hash: hash,
+            password_hash: Some(hash),
             subject: "user-sam".into(),
             claims: json!({"given_name": "Sam"}).as_object().unwrap().clone(),
             bank_account: None,

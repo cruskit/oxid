@@ -12,6 +12,9 @@ services:
   oxid:
     build:
       context: ..
+    environment:
+      # The user experience under test; see scripts/conformance.sh.
+      OXID_EXPERIENCE: ${OXID_EXPERIENCE:-technical}
     volumes:
       - ./:/etc/oxid:ro
     ports:

@@ -93,6 +93,9 @@ impl TestOp {
             profile: oxid::client::Profile::Connectid,
             claims: None,
         });
+        // Most tests drive the sign-in and consent page; tests of another
+        // experience select it in `adjust`.
+        config.experience = oxid::experience::Kind::Login;
         adjust(&mut config);
 
         // A manual clock started at the real time: flows behave normally and

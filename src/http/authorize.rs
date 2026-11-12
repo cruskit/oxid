@@ -1,17 +1,18 @@
 //! Authorization endpoint: the browser-facing half of the code flow.
 //!
+//! This module does the protocol work that is the same for every user
+//! experience, and hands the interaction itself to the configured
+//! [`Experience`](crate::experience::Experience).
+//!
 //! Only `request_uri` values issued by the PAR endpoint are accepted
-//! (FAPI 2.0 §5.3.2.2-3). A `request_uri` is consumed when the user makes a
-//! decision, not when the page is loaded, so a reload does not strand the
-//! user (§5.3.2.2 note 3).
+//! (FAPI 2.0 §5.3.2.2-3). A `request_uri` is consumed when the interaction
+//! reaches a decision, not when the page is loaded, so a reload does not
+//! strand the user (§5.3.2.2 note 3).
 //!
 //! Failures are reported in one of two ways. When the request cannot be tied
 //! to a registered redirect URI the user sees an error page and is *not*
 //! redirected (the provider must not be an open redirector, §5.3.2.1-7).
 //! Otherwise the error goes back to the client's redirect URI.
-
-use std::collections::BTreeSet;
-use std::fmt::Write as _;
 
 use axum::body::Bytes;
 use axum::extract::{RawQuery, State};
@@ -20,17 +21,13 @@ use axum::response::{Html, IntoResponse, Response};
 use url::Url;
 use uuid::Uuid;
 
-use super::{PATH_DECISION, Params, no_store};
-use crate::authz::AuthorizationRequest;
-use crate::claims::{self, ConsentItem};
+use super::{Params, no_store};
 use crate::client::Client;
 use crate::error::ErrorCode;
+use crate::experience::{Approval, Decision, Interaction, Page, Step, cookie};
 use crate::state::AppState;
 use crate::store::{AuthorizationCode, ConsentOutcome, ConsentRecord, Grant, PushedRequest};
 use crate::util::{ct_eq, html_escape, random_token};
-
-/// Prefix of the consent form's per-claim checkboxes: `share_<claim>`.
-const SHARE_FIELD_PREFIX: &str = "share_";
 
 /// Double-submit CSRF cookie. The `__Host-` prefix pins it to this origin,
 /// `Secure` and path `/` (RFC 6265bis §4.1.3.2).
@@ -39,18 +36,18 @@ const CSRF_COOKIE: &str = "__Host-oxid-csrf";
 const CONTENT_SECURITY_POLICY: &str =
     "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'";
 
+/// Styles shared by every experience; a page may add its own.
 const STYLE: &str = "body{font-family:system-ui,sans-serif;max-width:32rem;margin:3rem auto;\
 padding:0 1rem;color:#1a1a1a}h1{font-size:1.4rem}label{display:block;margin:.8rem 0 .2rem}\
 input{width:100%;padding:.5rem;box-sizing:border-box}\
-input[type=checkbox]{width:auto;margin-right:.5rem}ul.claims{list-style:none;padding:0}\
-ul.claims li{margin:.4rem 0}ul.claims label{display:inline;margin:0}.required{color:#555;font-size:.85em}button{padding:.6rem 1.2rem;margin:1rem .5rem 0 0}\
+input[type=checkbox]{width:auto;margin-right:.5rem}button{padding:.6rem 1.2rem;margin:1rem .5rem 0 0}\
 .error{color:#b00020}.box{background:#f4f4f4;padding:.8rem;border-radius:.3rem}";
 
-fn page(status: StatusCode, title: &str, body: &str) -> Response {
+fn page(status: StatusCode, title: &str, body: &str, style: &str) -> Response {
     let html = format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-         <title>{title} - oxID</title><style>{STYLE}</style></head><body>{body}</body></html>",
+         <title>{title} - oxID</title><style>{STYLE}{style}</style></head><body>{body}</body></html>",
         title = html_escape(title),
     );
     let mut response = no_store((status, Html(html)).into_response());
@@ -73,6 +70,7 @@ fn error_page(status: StatusCode, message: &str) -> Response {
              <p>Please return to the application and try again.</p>",
             html_escape(message)
         ),
+        "",
     )
 }
 
@@ -114,21 +112,33 @@ fn redirect_error(
     redirect_to_client(state, redirect_uri, &params)
 }
 
-fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
-    headers
-        .get_all(header::COOKIE)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(';'))
-        .filter_map(|pair| pair.trim().split_once('='))
-        .find_map(|(key, value)| (key == name).then_some(value))
-}
-
 fn is_csrf_token(value: &str) -> bool {
     value.len() == 43
         && value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+}
+
+fn add_cookies(response: &mut Response, cookies: &[String]) {
+    for cookie in cookies {
+        if let Ok(value) = HeaderValue::from_str(cookie) {
+            response.headers_mut().append(header::SET_COOKIE, value);
+        }
+    }
+}
+
+/// Render an experience's page, setting the CSRF cookie its form relies on.
+fn experience_page(experience_page: &Page, csrf: &str, cookies: &[String]) -> Response {
+    let mut response = page(
+        StatusCode::OK,
+        &experience_page.title,
+        &experience_page.body,
+        experience_page.style,
+    );
+    let csrf_cookie = format!("{CSRF_COOKIE}={csrf}; Path=/; Secure; HttpOnly; SameSite=Strict");
+    add_cookies(&mut response, &[csrf_cookie]);
+    add_cookies(&mut response, cookies);
+    response
 }
 
 /// The pushed request named by the browser's parameters, or the error page
@@ -197,179 +207,19 @@ pub async fn authorize(
     let csrf = cookie(&headers, CSRF_COOKIE)
         .filter(|v| is_csrf_token(v))
         .map_or_else(|| random_token(32), str::to_owned);
-    login_page(
-        &client,
-        &request_uri,
-        &pushed.request,
-        &csrf,
-        None,
-        &BTreeSet::new(),
-    )
+    let interaction = Interaction {
+        state: &state,
+        client: &client,
+        request_uri: &request_uri,
+        pushed: &pushed,
+        csrf: &csrf,
+        headers: &headers,
+    };
+    let step = state.experience.start(&interaction).await;
+    conclude(&interaction, step)
 }
 
-fn login_page(
-    client: &Client,
-    request_uri: &str,
-    request: &AuthorizationRequest,
-    csrf: &str,
-    error: Option<&str>,
-    // Voluntary claims to show unticked, when the page is shown again.
-    declined: &BTreeSet<String>,
-) -> Response {
-    let mut body = String::new();
-    let _ = write!(
-        body,
-        "<h1>Sign in to continue to <span id=\"client-name\">{}</span></h1>",
-        html_escape(&client.name)
-    );
-    if let Some(error) = error {
-        let _ = write!(
-            body,
-            "<p id=\"error\" class=\"error\">{}</p>",
-            html_escape(error)
-        );
-    }
-    if let Some(purpose) = &request.purpose {
-        let _ = write!(
-            body,
-            "<p>Why this is being requested:</p><p id=\"purpose\" class=\"box\">{}</p>",
-            html_escape(purpose)
-        );
-    }
-
-    let _ = write!(body, "<form method=\"post\" action=\"{PATH_DECISION}\">");
-
-    // Only what can actually be released is listed. `txn` is technical and
-    // is not shown (ConnectID identity assurance §5.3.2). Essential claims
-    // have no checkbox: they can only be refused by cancelling.
-    let requested = request.claims.consentable(client, &request.scope);
-    if requested.is_empty() {
-        body.push_str(
-            "<p id=\"requested-none\">This application will confirm that you signed in. \
-             No personal details will be shared.</p>",
-        );
-    } else {
-        body.push_str(
-            "<p>If you continue, this will be shared:</p><ul id=\"requested\" class=\"claims\">",
-        );
-        for item in &requested {
-            let name = html_escape(&item.name);
-            let label = html_escape(&item.label);
-            if item.essential {
-                let _ = write!(
-                    body,
-                    "<li data-claim=\"{name}\" data-essential=\"true\">{label} \
-                     <span class=\"required\">(required)</span></li>"
-                );
-            } else {
-                let checked = if declined.contains(&item.name) {
-                    ""
-                } else {
-                    " checked"
-                };
-                let _ = write!(
-                    body,
-                    "<li data-claim=\"{name}\"><label>\
-                     <input type=\"checkbox\" id=\"share-{name}\" \
-                     name=\"{SHARE_FIELD_PREFIX}{name}\" value=\"1\"{checked}>{label}</label></li>"
-                );
-            }
-        }
-        body.push_str("</ul>");
-        if requested.iter().any(|item| !item.essential) {
-            body.push_str(
-                "<p id=\"optional-hint\">Untick anything optional that you do not want to share.</p>",
-            );
-        }
-        if requested.iter().any(|item| item.essential) {
-            body.push_str(
-                "<p id=\"required-hint\">Required items are needed by the application. \
-                 If you do not want to share them, cancel.</p>",
-            );
-        }
-    }
-
-    let _ = write!(
-        body,
-        "<input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
-         <input type=\"hidden\" name=\"client_id\" value=\"{client_id}\">\
-         <input type=\"hidden\" name=\"request_uri\" value=\"{request_uri}\">\
-         <label for=\"username\">Username</label>\
-         <input id=\"username\" name=\"username\" autocomplete=\"username\" autofocus>\
-         <label for=\"password\">Password</label>\
-         <input id=\"password\" name=\"password\" type=\"password\" autocomplete=\"current-password\">\
-         <button id=\"approve\" type=\"submit\" name=\"action\" value=\"approve\">Sign in and allow</button>\
-         <button id=\"deny\" type=\"submit\" name=\"action\" value=\"deny\" formnovalidate>Cancel</button>\
-         </form>",
-        csrf = html_escape(csrf),
-        client_id = html_escape(&client.id),
-        request_uri = html_escape(request_uri),
-    );
-
-    let mut response = page(StatusCode::OK, "Sign in", &body);
-    let set_cookie = format!("{CSRF_COOKIE}={csrf}; Path=/; Secure; HttpOnly; SameSite=Strict");
-    if let Ok(value) = HeaderValue::from_str(&set_cookie) {
-        response.headers_mut().insert(header::SET_COOKIE, value);
-    }
-    response
-}
-
-/// What the user chose on the consent form: the claims they agreed to share
-/// and the voluntary ones they unticked. Essential claims are always shared,
-/// whatever was submitted, and only claims that were offered count.
-fn user_selection(
-    client: &Client,
-    request: &AuthorizationRequest,
-    params: &Params,
-) -> (BTreeSet<String>, Vec<String>) {
-    let items: Vec<ConsentItem> = request.claims.consentable(client, &request.scope);
-    let shared = claims::shared_claims(&items, |name| {
-        params.get(&format!("{SHARE_FIELD_PREFIX}{name}")).is_some()
-    });
-    let declined = items
-        .into_iter()
-        .map(|item| item.name)
-        .filter(|name| !shared.contains(name))
-        .collect();
-    (shared, declined)
-}
-
-/// Record the outcome of a transaction, with the purpose the client gave
-/// (OAuth 2 Purpose §5), and return the transaction's identifier.
-fn record_decision(
-    state: &AppState,
-    client: &Client,
-    user_subject: Option<&str>,
-    purpose: Option<&str>,
-    (shared, declined): (&BTreeSet<String>, &[String]),
-    now: i64,
-    outcome: ConsentOutcome,
-) -> String {
-    let txn = Uuid::new_v4().to_string();
-    let claims: Vec<String> = shared.iter().cloned().collect();
-    tracing::info!(
-        %txn,
-        client_id = %client.id,
-        purpose = purpose.unwrap_or_default(),
-        shared = %claims.join(" "),
-        declined = %declined.join(" "),
-        ?outcome,
-        "authorization request decided"
-    );
-    state.store.record_consent(ConsentRecord {
-        txn: txn.clone(),
-        client_id: client.id.clone(),
-        user_subject: user_subject.map(str::to_owned),
-        purpose: purpose.map(str::to_owned),
-        claims,
-        declined: declined.to_vec(),
-        decided_at: now,
-        outcome,
-    });
-    txn
-}
-
-/// `POST /authorize/decision`: the user's sign-in and consent.
+/// `POST /authorize/decision`: a form submitted from an experience's page.
 pub async fn decision(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
     let Ok(params) = Params::parse(&body) else {
         return error_page(
@@ -397,97 +247,63 @@ pub async fn decision(State(state): State<AppState>, headers: HeaderMap, body: B
             Ok(found) => found,
             Err(response) => return *response,
         };
-    let request = &pushed.request;
-    let used = || {
-        error_page(
-            StatusCode::BAD_REQUEST,
-            "The request_uri is invalid, has expired, or has already been used.",
-        )
+    let interaction = Interaction {
+        state: &state,
+        client: &client,
+        request_uri: &request_uri,
+        pushed: &pushed,
+        csrf,
+        headers: &headers,
     };
+    let step = state.experience.submit(&interaction, &params).await;
+    conclude(&interaction, step)
+}
 
-    match params.get("action") {
-        Some("deny") => {
-            let now = state.now();
-            if state.store.take_request(&request_uri, now).is_none() {
-                return used();
-            }
-            record_decision(
-                &state,
-                &client,
-                None,
-                request.purpose.as_deref(),
-                (&BTreeSet::new(), &[]),
-                now,
-                ConsentOutcome::Denied,
-            );
+/// Turn an experience's step into the HTTP response, completing the
+/// protocol side of a final decision.
+fn conclude(interaction: &Interaction<'_>, step: Step) -> Response {
+    let state = interaction.state;
+    let request = interaction.request();
+    let now = state.now();
+    let mut response = match step.decision {
+        Decision::Page(page) => {
+            return experience_page(&page, interaction.csrf, &step.set_cookies);
+        }
+        Decision::Deny { code, description } => {
+            // The experience may already have discarded the request (after
+            // too many failed sign-ins), so its absence is not an error.
+            state.store.take_request(interaction.request_uri, now);
+            record_decision(interaction, None, now, ConsentOutcome::Denied);
             redirect_error(
-                &state,
+                state,
                 &request.redirect_uri,
                 request.state.as_deref(),
-                ErrorCode::AccessDenied,
-                "the user denied the request",
+                code,
+                &description,
             )
         }
-        Some("approve") => {
-            let username = params.get("username").unwrap_or_default().to_owned();
-            let password = params.get("password").unwrap_or_default().to_owned();
-            let users = std::sync::Arc::clone(&state.users);
-            // Password hashing is CPU-bound; keep it off the async workers.
-            let user =
-                tokio::task::spawn_blocking(move || users.authenticate(&username, &password))
-                    .await
-                    .ok()
-                    .flatten();
-
-            let Some(user) = user else {
-                if state.store.record_failed_login(&request_uri) {
-                    let (_, declined) = user_selection(&client, request, &params);
-                    return login_page(
-                        &client,
-                        &request_uri,
-                        request,
-                        csrf,
-                        Some("The username or password is incorrect."),
-                        &declined.into_iter().collect(),
-                    );
-                }
-                tracing::warn!(client_id = %client.id, "too many failed sign-in attempts");
-                return redirect_error(
-                    &state,
-                    &request.redirect_uri,
-                    request.state.as_deref(),
-                    ErrorCode::AccessDenied,
-                    "too many failed sign-in attempts",
+        Decision::Approve(approval) => {
+            // One-time use is enforced here, at the point of authorization.
+            let Some(pushed) = state.store.take_request(interaction.request_uri, now) else {
+                return error_page(
+                    StatusCode::BAD_REQUEST,
+                    "The request_uri is invalid, has expired, or has already been used.",
                 );
             };
-
-            // One-time use is enforced here, at the point of authorization.
-            let now = state.now();
-            let Some(pushed) = state.store.take_request(&request_uri, now) else {
-                return used();
-            };
             let request = pushed.request;
-            let (shared, declined) = user_selection(&client, &request, &params);
-            let txn = record_decision(
-                &state,
-                &client,
-                Some(&user.subject),
-                request.purpose.as_deref(),
-                (&shared, &declined),
-                now,
-                ConsentOutcome::Approved,
-            );
+            let txn = record_decision(interaction, Some(&approval), now, ConsentOutcome::Approved);
             let code = state.store.create_code(AuthorizationCode {
                 grant: Grant {
                     id: random_token(16),
-                    client_id: client.id.clone(),
-                    user_subject: user.subject.clone(),
+                    client_id: interaction.client.id.clone(),
+                    user_subject: approval.user_subject,
                     scope: request.scope,
                     claims: request.claims,
-                    shared_claims: shared,
+                    shared_claims: approval.shared_claims,
                     auth_time: now,
                     txn,
                     purpose: request.purpose,
+                    id_token_edits: approval.id_token_edits,
                 },
                 redirect_uri: request.redirect_uri.clone(),
                 code_challenge: request.code_challenge,
@@ -498,10 +314,52 @@ pub async fn decision(State(state): State<AppState>, headers: HeaderMap, body: B
             if let Some(client_state) = &request.state {
                 out.push(("state", client_state));
             }
-            redirect_to_client(&state, &request.redirect_uri, &out)
+            redirect_to_client(state, &request.redirect_uri, &out)
         }
-        _ => error_page(StatusCode::BAD_REQUEST, "No decision was submitted."),
-    }
+    };
+    add_cookies(&mut response, &step.set_cookies);
+    response
+}
+
+/// Record the outcome of a transaction, with the purpose the client gave
+/// (OAuth 2 Purpose §5), and return the transaction's identifier.
+fn record_decision(
+    interaction: &Interaction<'_>,
+    approval: Option<&Approval>,
+    now: i64,
+    outcome: ConsentOutcome,
+) -> String {
+    let state = interaction.state;
+    let client = interaction.client;
+    let purpose = interaction.request().purpose.as_deref();
+    let txn = approval
+        .and_then(|a| a.txn.clone())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let claims: Vec<String> = approval
+        .map(|a| a.shared_claims.iter().cloned().collect())
+        .unwrap_or_default();
+    let declined: Vec<String> = approval.map(|a| a.declined.clone()).unwrap_or_default();
+    tracing::info!(
+        %txn,
+        client_id = %client.id,
+        experience = %state.experience.kind(),
+        purpose = purpose.unwrap_or_default(),
+        shared = %claims.join(" "),
+        declined = %declined.join(" "),
+        ?outcome,
+        "authorization request decided"
+    );
+    state.store.record_consent(ConsentRecord {
+        txn: txn.clone(),
+        client_id: client.id.clone(),
+        user_subject: approval.map(|a| a.user_subject.clone()),
+        purpose: purpose.map(str::to_owned),
+        claims,
+        declined,
+        decided_at: now,
+        outcome,
+    });
+    txn
 }
 
 #[cfg(test)]
@@ -995,17 +853,5 @@ mod tests {
                 .unwrap()
                 .contains(&first)
         );
-    }
-
-    #[test]
-    fn cookie_parsing_finds_the_named_cookie() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::COOKIE,
-            HeaderValue::from_static("a=1; __Host-oxid-csrf=tok; b=2"),
-        );
-        assert_eq!(cookie(&headers, CSRF_COOKIE), Some("tok"));
-        assert_eq!(cookie(&headers, "a"), Some("1"));
-        assert_eq!(cookie(&headers, "missing"), None);
     }
 }
