@@ -39,6 +39,14 @@ jobs:
     name: Format, lint and test
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    services:
+      # DynamoDB Local, so the DynamoDB store is tested against the real API.
+      dynamodb:
+        image: amazon/dynamodb-local:latest
+        ports:
+          - 8000:8000
+    env:
+      OXID_TEST_DYNAMODB_ENDPOINT: http://localhost:8000
     steps:
       - uses: actions/checkout@v4
 
@@ -86,10 +94,29 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+  lambda:
+    name: AWS Lambda package
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # Built on Amazon Linux 2023, the Lambda runtime's own distribution.
+      - name: Build the Lambda package
+        run: scripts/build-lambda.sh
+
+      - name: Upload the Lambda package
+        uses: actions/upload-artifact@v4
+        with:
+          name: oxid-lambda
+          path: dist/lambda/
+          if-no-files-found: error
+          retention-days: 30
+
   release:
     name: Publish release
     if: github.event_name == 'workflow_dispatch' && inputs.release
-    needs: [check, conformance]
+    needs: [check, conformance, lambda]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -136,15 +163,44 @@ jobs:
           name="oxid-$TAG-$TARGET"
           mkdir -p "dist/$name"
           cp target/release/oxid README.md oxid.example.toml "dist/$name/"
+          cp -r deploy "dist/$name/deploy"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           (cd dist && sha256sum "$name.tar.gz" >"$name.tar.gz.sha256")
           echo "archive=dist/$name.tar.gz" >>"$GITHUB_OUTPUT"
+
+      # The package the lambda job built and uploaded for this commit.
+      - name: Fetch the Lambda package
+        uses: actions/download-artifact@v4
+        with:
+          name: oxid-lambda
+          path: dist/lambda
+
+      # Versioned names, so infrastructure code can pin a release:
+      #   oxid-lambda-<tag>-x86_64.zip        the function's deployment package
+      #   oxid-aws-requirements-<tag>.json    the DynamoDB table and IAM actions it needs
+      - name: Name the Lambda assets
+        id: lambda
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          cd dist/lambda
+          sha256sum --check SHA256SUMS
+          zip="oxid-lambda-$TAG-x86_64.zip"
+          requirements="oxid-aws-requirements-$TAG.json"
+          mv oxid-lambda.zip "$zip"
+          mv oxid-aws-requirements.json "$requirements"
+          sha256sum "$zip" >"$zip.sha256"
+          sha256sum "$requirements" >"$requirements.sha256"
+          echo "zip=dist/lambda/$zip" >>"$GITHUB_OUTPUT"
+          echo "requirements=dist/lambda/$requirements" >>"$GITHUB_OUTPUT"
 
       - name: Create the GitHub release
         env:
           TAG: ${{ steps.version.outputs.tag }}
           VERSION: ${{ steps.version.outputs.version }}
           ARCHIVE: ${{ steps.package.outputs.archive }}
+          LAMBDA_ZIP: ${{ steps.lambda.outputs.zip }}
+          REQUIREMENTS: ${{ steps.lambda.outputs.requirements }}
           PRERELEASE: ${{ inputs.prerelease }}
         run: |
           flags=()
@@ -156,4 +212,6 @@ jobs:
             --title "oxID $VERSION" \
             --generate-notes \
             "${flags[@]}" \
-            "$ARCHIVE" "$ARCHIVE.sha256"
+            "$ARCHIVE" "$ARCHIVE.sha256" \
+            "$LAMBDA_ZIP" "$LAMBDA_ZIP.sha256" \
+            "$REQUIREMENTS" "$REQUIREMENTS.sha256"

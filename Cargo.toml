@@ -1,6 +1,6 @@
 [package]
 name = "oxid"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 description = "oxID - an OpenID Provider implementing the FAPI 2.0 and ConnectID security profiles"
@@ -32,6 +32,24 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
+
+# AWS support, behind the `aws` feature.
+aws-config = { version = "1", optional = true, default-features = false, features = ["rt-tokio", "default-https-client", "credentials-process", "sso"] }
+aws-sdk-dynamodb = { version = "1", optional = true, default-features = false, features = ["rt-tokio", "default-https-client"] }
+lambda_http = { version = "1", optional = true, default-features = false, features = ["apigw_http"] }
+
+[features]
+# Amazon DynamoDB as the store, and the `oxid-lambda` binary for AWS Lambda.
+aws = ["dep:aws-config", "dep:aws-sdk-dynamodb", "dep:lambda_http"]
+
+[[bin]]
+name = "oxid"
+path = "src/main.rs"
+
+[[bin]]
+name = "oxid-lambda"
+path = "src/bin/oxid-lambda.rs"
+required-features = ["aws"]
 
 [dev-dependencies]
 toml = "1"

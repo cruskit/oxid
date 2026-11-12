@@ -17,7 +17,7 @@ pub async fn pushed_authorization_request(
     OAuthForm(params): OAuthForm,
 ) -> Result<Response, OAuthError> {
     // FAPI 2.0 §5.3.2.2-4: unauthenticated pushed requests are rejected.
-    let client = authenticate_client(&state, &params)?;
+    let client = authenticate_client(&state, &params).await?;
 
     // RFC 9126 §2.1: request_uri must not be provided here.
     if params.get("request_uri").is_some() {
@@ -38,10 +38,10 @@ pub async fn pushed_authorization_request(
     let request = AuthorizationRequest::from_params(&client, &claims)?;
 
     let expires_in = state.security.request_uri_ttl;
-    let request_uri =
-        state
-            .store
-            .push_request(request, request_object.to_owned(), now + expires_in);
+    let request_uri = state
+        .store
+        .push_request(request, request_object.to_owned(), now + expires_in)
+        .await?;
     tracing::info!(client_id = %client.id, "pushed authorization request accepted");
 
     let body = Json(json!({ "request_uri": request_uri, "expires_in": expires_in }));
@@ -199,6 +199,8 @@ mod tests {
             .state
             .store
             .peek_request(&uri, harness.state.now())
+            .await
+            .unwrap()
             .unwrap();
         assert_eq!(
             pushed.request.state, None,

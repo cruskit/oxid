@@ -23,7 +23,7 @@ pub async fn token(
     Extension(conn): Extension<ConnInfo>,
     OAuthForm(params): OAuthForm,
 ) -> Result<Response, OAuthError> {
-    let client = authenticate_client(&state, &params)?;
+    let client = authenticate_client(&state, &params).await?;
 
     let thumbprint = conn.client_cert.map(|cert| cert.thumbprint).ok_or_else(|| {
         OAuthError::invalid_request(
@@ -32,8 +32,8 @@ pub async fn token(
     })?;
 
     let body = match params.get("grant_type") {
-        Some(GRANT_AUTHORIZATION_CODE) => code_grant(&state, &client, &params, &thumbprint)?,
-        Some(GRANT_REFRESH_TOKEN) => refresh_grant(&state, &client, &params, &thumbprint)?,
+        Some(GRANT_AUTHORIZATION_CODE) => code_grant(&state, &client, &params, &thumbprint).await?,
+        Some(GRANT_REFRESH_TOKEN) => refresh_grant(&state, &client, &params, &thumbprint).await?,
         Some(_) => {
             return Err(OAuthError::new(
                 ErrorCode::UnsupportedGrantType,
@@ -45,7 +45,7 @@ pub async fn token(
     Ok(no_store(Json(Value::Object(body)).into_response()))
 }
 
-fn code_grant(
+async fn code_grant(
     state: &AppState,
     client: &Client,
     params: &Params,
@@ -64,7 +64,11 @@ fn code_grant(
         .get("redirect_uri")
         .ok_or_else(|| OAuthError::invalid_request("redirect_uri is required"))?;
 
-    let code = match state.store.redeem_code(code, &client.id, state.now()) {
+    let code = match state
+        .store
+        .redeem_code(code, &client.id, state.now())
+        .await?
+    {
         CodeRedemption::Valid(code) => code,
         CodeRedemption::Replayed => {
             tracing::warn!(client_id = %client.id, "authorization code replayed; grant revoked");
@@ -95,18 +99,22 @@ fn code_grant(
         &code.grant,
         code.nonce.as_deref(),
         thumbprint,
-    )?;
+    )
+    .await?;
     if client.allows_refresh_tokens() {
-        let refresh = state.store.issue_refresh_token(RefreshToken {
-            grant: code.grant.clone(),
-            expires_at: state.now() + state.security.refresh_token_ttl,
-        });
+        let refresh = state
+            .store
+            .issue_refresh_token(RefreshToken {
+                grant: code.grant.clone(),
+                expires_at: state.now() + state.security.refresh_token_ttl,
+            })
+            .await?;
         body.insert("refresh_token".to_owned(), refresh.into());
     }
     Ok(body)
 }
 
-fn refresh_grant(
+async fn refresh_grant(
     state: &AppState,
     client: &Client,
     params: &Params,
@@ -125,6 +133,7 @@ fn refresh_grant(
     let refresh = state
         .store
         .refresh_token(presented, state.now())
+        .await?
         .ok_or_else(invalid)?;
     if refresh.grant.client_id != client.id {
         return Err(invalid());
@@ -149,12 +158,12 @@ fn refresh_grant(
 
     // The refresh token is not rotated (FAPI 2.0 §5.3.2.1-9); the client
     // keeps using the one it has.
-    issue_tokens(state, client, &grant, None, thumbprint)
+    issue_tokens(state, client, &grant, None, thumbprint).await
 }
 
 /// Issue a certificate-bound access token and, for `OpenID` requests, an ID
 /// token.
-fn issue_tokens(
+async fn issue_tokens(
     state: &AppState,
     client: &Client,
     grant: &Grant,
@@ -162,11 +171,14 @@ fn issue_tokens(
     thumbprint: &str,
 ) -> Result<Map<String, Value>, OAuthError> {
     let expires_in = state.security.access_token_ttl;
-    let access_token = state.store.issue_access_token(AccessToken {
-        grant: grant.clone(),
-        cert_thumbprint: thumbprint.to_owned(),
-        expires_at: state.now() + expires_in,
-    });
+    let access_token = state
+        .store
+        .issue_access_token(AccessToken {
+            grant: grant.clone(),
+            cert_thumbprint: thumbprint.to_owned(),
+            expires_at: state.now() + expires_in,
+        })
+        .await?;
 
     let Value::Object(mut body) = json!({
         "access_token": access_token,
@@ -285,6 +297,8 @@ mod tests {
             .state
             .store
             .access_token(access, harness.state.now())
+            .await
+            .unwrap()
             .unwrap();
         assert_eq!(stored.cert_thumbprint, CERT);
 
@@ -366,6 +380,8 @@ mod tests {
             .state
             .store
             .access_token(body["access_token"].as_str().unwrap(), harness.state.now())
+            .await
+            .unwrap()
             .unwrap()
             .grant;
         let client = harness.state.clients.get("rp").unwrap();
@@ -410,6 +426,8 @@ mod tests {
                 .state
                 .store
                 .access_token(access, harness.state.now())
+                .await
+                .unwrap()
                 .is_none()
         );
     }
@@ -528,6 +546,8 @@ mod tests {
             .state
             .store
             .access_token(access, harness.state.now())
+            .await
+            .unwrap()
             .unwrap();
         assert_eq!(
             stored.cert_thumbprint, "another-cert",

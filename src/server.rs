@@ -68,19 +68,7 @@ impl ServerBuilder {
 
     pub async fn start(self) -> Result<Server> {
         let config = self.config;
-        config.validate()?;
-        // Load clients from the registry before accepting any request, so
-        // the provider never runs with a partial list.
-        let synced_clients = match &config.client_sync {
-            Some(sync) if sync.enabled => crate::client_sync::fetch(sync)
-                .await
-                .context("synchronising clients from the registry")?,
-            _ => Vec::new(),
-        };
-        let clock = self
-            .clock
-            .unwrap_or_else(|| Arc::new(crate::util::SystemClock));
-        let state = AppState::build(&config, clock, synced_clients)?;
+        let state = AppState::start(&config, self.clock).await?;
 
         let identity =
             if let (Some(cert), Some(key)) = (&config.server.tls_cert, &config.server.tls_key) {
@@ -205,7 +193,11 @@ async fn purge_loop(state: AppState, mut shutdown: watch::Receiver<bool>) {
     let mut ticker = tokio::time::interval(PURGE_INTERVAL);
     loop {
         tokio::select! {
-            _ = ticker.tick() => state.store.purge(state.now()),
+            _ = ticker.tick() => {
+                if let Err(error) = state.store.purge(state.now()).await {
+                    tracing::warn!(%error, "purging expired state failed");
+                }
+            }
             _ = shutdown.changed() => return,
         }
     }

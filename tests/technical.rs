@@ -357,6 +357,8 @@ async fn unedited_success_is_sent_for_the_selected_customer() {
         .state()
         .store
         .consent(claims["txn"].as_str().unwrap())
+        .await
+        .unwrap()
         .unwrap();
     assert_eq!(record.user_subject.as_deref(), Some(RILEY));
     assert_eq!(

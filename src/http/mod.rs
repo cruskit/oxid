@@ -190,7 +190,7 @@ pub fn no_store(mut response: Response) -> Response {
 
 /// Authenticate the client making a back-channel request, including replay
 /// protection for its assertion.
-pub fn authenticate_client(
+pub async fn authenticate_client(
     state: &AppState,
     params: &Params,
 ) -> Result<std::sync::Arc<crate::client::Client>, OAuthError> {
@@ -208,12 +208,16 @@ pub fn authenticate_client(
         state.security.clock_skew,
         now,
     )?;
-    if !state.store.record_jti(
-        &authenticated.client.id,
-        &authenticated.jti,
-        authenticated.expires_at,
-        now,
-    ) {
+    if !state
+        .store
+        .record_jti(
+            &authenticated.client.id,
+            &authenticated.jti,
+            authenticated.expires_at,
+            now,
+        )
+        .await?
+    {
         return Err(OAuthError::invalid_client(
             "client assertion has already been used",
         ));

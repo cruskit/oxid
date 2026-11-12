@@ -38,6 +38,9 @@ pub struct Config {
     pub keys: KeysConfig,
     #[serde(default)]
     pub security: SecurityConfig,
+    /// Where server-side state is kept.
+    #[serde(default)]
+    pub store: StoreConfig,
     #[serde(default)]
     pub clients: Vec<ClientConfig>,
     /// Loading further clients from the ConnectID registry at startup.
@@ -86,6 +89,53 @@ pub struct KeysConfig {
     /// Secret mixed into pairwise subject identifiers. When unset, a random
     /// value is generated at startup, so subjects change across restarts.
     pub pairwise_salt: Option<String>,
+}
+
+/// Which backend holds server-side state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StoreBackend {
+    /// In this process: lost on restart, not shared between instances.
+    #[default]
+    Memory,
+    /// An Amazon DynamoDB table, shared by every instance. Needs a build
+    /// with the `aws` feature.
+    Dynamodb,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct StoreConfig {
+    pub backend: StoreBackend,
+    /// DynamoDB table name. Required for the `dynamodb` backend.
+    pub table: Option<String>,
+    /// AWS region of the table. Defaults to the environment's region.
+    pub region: Option<String>,
+    /// Override the DynamoDB endpoint, e.g. `http://localhost:8000` for
+    /// DynamoDB Local.
+    pub endpoint_url: Option<String>,
+}
+
+impl StoreConfig {
+    fn validate(&self) -> Result<()> {
+        match self.backend {
+            StoreBackend::Memory => ensure!(
+                self.table.is_none() && self.region.is_none() && self.endpoint_url.is_none(),
+                "table, region and endpoint_url apply only to backend = \"dynamodb\""
+            ),
+            StoreBackend::Dynamodb => {
+                ensure!(
+                    cfg!(feature = "aws"),
+                    "backend = \"dynamodb\" needs oxID built with the 'aws' feature"
+                );
+                ensure!(
+                    self.table.as_deref().is_some_and(|t| !t.is_empty()),
+                    "table is required for backend = \"dynamodb\""
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Lifetimes and tolerances, in seconds.
@@ -258,6 +308,7 @@ impl Config {
         if let Some(sync) = &self.client_sync {
             sync.validate().context("client_sync")?;
         }
+        self.store.validate().context("store")?;
 
         if let Some(salt) = &self.keys.pairwise_salt {
             ensure!(
@@ -316,6 +367,34 @@ mod tests {
             toml::from_str::<Config>(
                 "issuer = \"https://op.example.com\"\nmtls_base_url = \"https://m.example.com\"\n\
                  experience = \"wizard\"",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn store_defaults_to_memory_and_dynamodb_needs_a_table() {
+        let config = minimal();
+        assert_eq!(config.store.backend, StoreBackend::Memory);
+
+        let with = |store: &str| -> Config {
+            toml::from_str(&format!(
+                "issuer = \"https://op.example.com\"\nmtls_base_url = \"https://m.example.com\"\n[store]\n{store}"
+            ))
+            .unwrap()
+        };
+        let no_table = with("backend = \"dynamodb\"");
+        assert!(no_table.validate().is_err());
+        let table = with("backend = \"dynamodb\"\ntable = \"oxid\"\nregion = \"ap-southeast-2\"");
+        assert_eq!(table.store.backend, StoreBackend::Dynamodb);
+        // Usable only when the binary was built with DynamoDB support.
+        assert_eq!(table.validate().is_ok(), cfg!(feature = "aws"));
+        let stray = with("table = \"oxid\"");
+        assert!(stray.validate().is_err(), "a table without the backend");
+        assert!(
+            toml::from_str::<Config>(
+                "issuer = \"https://op.example.com\"\nmtls_base_url = \"https://m.example.com\"\n\
+                 [store]\nbackend = \"redis\"",
             )
             .is_err()
         );

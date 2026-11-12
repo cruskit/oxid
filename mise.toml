@@ -7,11 +7,18 @@ run = "cargo fmt --all -- --check"
 
 [tasks.lint]
 description = "Run clippy with warnings as errors"
-run = "cargo clippy --all-targets --locked -- -D warnings"
+run = [
+  "cargo clippy --all-targets --locked -- -D warnings",
+  "cargo clippy --all-targets --locked --features aws -- -D warnings",
+]
 
 [tasks.test]
-description = "Run unit and integration tests"
-run = "cargo test --locked"
+description = "Run unit and integration tests (set OXID_TEST_DYNAMODB_ENDPOINT to include the DynamoDB store)"
+run = "cargo test --locked --features aws"
+
+[tasks.lambda]
+description = "Build the AWS Lambda deployment package into dist/lambda"
+run = "scripts/build-lambda.sh"
 
 [tasks.conformance]
 description = "Run the OpenID conformance suite (FAPI2 Message Signing, ConnectID) against oxID"

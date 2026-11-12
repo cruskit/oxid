@@ -32,13 +32,33 @@ mtls_listen = "127.0.0.1:9444"
 # client_ca = "tls/client-ca.pem"
 
 [keys]
-# RSA private key (PEM) used to sign ID tokens with PS256. If unset, an
-# ephemeral key is generated at startup. Development only.
+# RSA private key (PEM) used to sign ID tokens with PS256. If unset, a key is
+# generated and kept in the store: with the memory store that means a new key
+# at every start (development only); with the DynamoDB store the key is
+# created once and shared by every instance.
 # signing_key = "keys/signing.pem"
 
 # Secret mixed into pairwise subject identifiers, at least 16 characters.
-# If unset, a random value is used and every restart changes all subjects.
+# If unset, a random value is generated and kept in the store, in the same
+# way as the signing key.
 # pairwise_salt = "change-me-to-a-long-random-string"
+
+# Where server-side state is kept: pushed requests, codes, tokens, the client
+# assertion replay cache and consent records.
+[store]
+# "memory" (the default) keeps it in this process. It is lost on restart and
+# not shared, so it suits a single local instance.
+backend = "memory"
+
+# "dynamodb" keeps it in an Amazon DynamoDB table, shared by every instance.
+# Use it wherever consecutive requests may reach different instances, such as
+# AWS Lambda. It needs a build with the `aws` cargo feature. The table is
+# described in deploy/aws/requirements.json. Credentials and the region come
+# from the environment in the usual AWS ways.
+# backend = "dynamodb"
+# table = "oxid"
+# region = "ap-southeast-2"               # defaults to the environment's
+# endpoint_url = "http://localhost:8000"  # DynamoDB Local
 
 # Lifetimes and tolerances, in seconds. These are the defaults. Values outside
 # the limits set by FAPI 2.0 and ConnectID are refused at startup.
