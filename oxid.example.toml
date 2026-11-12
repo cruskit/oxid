@@ -86,12 +86,17 @@ profile = "connectid"
 #
 # [client_sync]
 # enabled = true
-# # The registry authorization server's metadata. The mutual TLS token
-# # endpoint and the assertion audience are taken from it. Alternatively set
-# # token_endpoint (and optionally audience) directly.
-# The URLs below are placeholders: use the ones the registry gives you.
-# discovery_url = "https://auth.registry.example/.well-known/openid-configuration"
-# clients_url = "https://matls-api.registry.example/clients"
+# # The registry's mutual TLS token endpoint and clients endpoint. These are
+# # the sandbox ones; production is matls-auth.directory.connectid.com.au.
+# token_endpoint = "https://matls-auth.directory.sandbox.connectid.com.au/token"
+# clients_url = "https://matls-auth.directory.sandbox.connectid.com.au/clients"
+# # Audience of the client assertion. Defaults to the token endpoint; set it
+# # if the registry expects its issuer identifier instead.
+# # audience = "https://auth.directory.sandbox.connectid.com.au"
+# # Alternatively, give the registry's metadata document in place of
+# # token_endpoint: the mutual TLS token endpoint and the audience (its
+# # issuer) are then taken from it.
+# # discovery_url = "https://.../.well-known/openid-configuration"
 # # This provider's client id at the registry, and the scope to request.
 # client_id = "00000000-0000-0000-0000-000000000000"
 # scope = "directory:software"
@@ -104,7 +109,8 @@ profile = "connectid"
 # signing_key_id = "the-kid-from-the-registry"
 # # Extra certificate authorities to trust for the registry (PEM bundle).
 # # ca = "registry/ca.pem"
-# page_size = 100
+# # Results per page when reading the clients endpoint.
+# page_size = 50
 # # Claims profile given to these clients.
 # profile = "connectid"
 
