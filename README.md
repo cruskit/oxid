@@ -86,21 +86,30 @@ issuing the code, recording the transaction and building the redirect.
 > about them. oxID logs a warning when it starts with it. Never expose it to
 > real users.
 
-The `technical` module has two pages:
+The `technical` module is a single page:
 
-1. **Request.** The request object is shown decoded (header and payload), with
-   the original encoded JWT one click away. You choose one of the predefined
-   customers, whose attributes can be expanded; the customer used on the last
-   completed flow is preselected (remembered in a cookie). You choose the
-   outcome: success, or one of the predefined errors (`access_denied`,
-   `login_required`, `consent_required`, `interaction_required`,
-   `account_selection_required`, `invalid_request`, `invalid_scope`,
-   `unauthorized_client`, `server_error`, `temporarily_unavailable`). Two
-   shortcut buttons send an unedited success or `access_denied` immediately.
-2. **Response.** For a success, the ID token payload is shown as JSON, before
-   signing, and can be edited freely: change, add or remove any claim,
-   including protocol claims such as `iss` or `exp`. For an error, the error
-   response is shown with an editable `error_description`.
+- **Request**, on one side. The request's parameters, and the request object
+  decoded (header and payload) with the original encoded JWT one click away.
+- **Response**, on the other.
+  - *Customer.* One of the predefined customers, whose attributes can be
+    expanded. The customer used on the last completed flow is preselected
+    (remembered in a cookie).
+  - *Outcome.* Success or error.
+  - *Success.* The ID token payload as JSON, before signing, free to edit:
+    change, add or remove any claim, including protocol claims such as `iss`
+    or `exp`. Choosing another customer swaps in that customer's claims, the
+    JSON is checked as you type, and Reset returns to the generated claims.
+  - *Error.* One of the predefined errors (`access_denied`, `login_required`,
+    `consent_required`, `interaction_required`,
+    `account_selection_required`, `invalid_request`, `invalid_scope`,
+    `unauthorized_client`, `server_error`, `temporarily_unavailable`) with an
+    editable `error_description`.
+  - *Send.* A preview of the redirect, and one button.
+
+The page is a plain HTML form improved by a small script, which runs under a
+per-response Content Security Policy nonce. Without the script it still works:
+if a different customer is submitted than the claims were generated for, the
+page comes back with that customer's claims instead of sending a mismatch.
 
 Edits are stored as differences from what was shown. Claims you leave alone
 get their real values when the token is issued: `iat`, `exp` and `auth_time`
@@ -156,6 +165,42 @@ one and is advertised through `mtls_endpoint_aliases`.
 | `/userinfo` | UserInfo endpoint |
 | `/healthz` | Liveness check |
 
+### Clients from the ConnectID registry
+
+Clients can be listed in the configuration file, loaded from the ConnectID
+registry, or both. Registry loading follows the
+[ConnectID Client Registration](https://cdn.connectid.com.au/specifications/digitalid-client-registration-05.html)
+profile and is off unless `[client_sync]` is present with `enabled = true`.
+
+At startup, before any request is served, oxID:
+
+1. reads the registry's metadata and takes the token endpoint from
+   `mtls_endpoint_aliases`;
+2. obtains an access token with the client credentials grant, authenticating
+   with `private_key_jwt` (PS256, with the configured key id) over mutual TLS
+   with the configured transport certificate;
+3. calls the clients endpoint with that token over mutual TLS, reading every
+   page;
+4. registers each active client, fetching its keys from its `jwks_uri`. The
+   client's `claims` and `claims_in_verified_claims` become the claims it is
+   provisioned for.
+
+Registry clients are added to the configured ones; if a client id is in both,
+the configured definition is used. If the registry cannot be reached or
+refuses the request, oxID does not start. An individual entry that is
+inactive, malformed or whose keys cannot be fetched is logged and skipped.
+
+The registry's pagination format is not set out in the specification, so the
+common forms are all handled: a `content`/`data`/`clients`/`items` envelope
+with `last` or `totalPages`, a `Link: rel="next"` header or `links.next`
+member, and a bare array (read until a short or empty page). Pages are
+requested with `page` (from 0) and `size` query parameters.
+
+Not done yet: periodic refresh of the client list and of each client's keys,
+which the profile requires of a production identity provider; fetching
+`sector_identifier_uri` to check the redirect URIs (its host is used as the
+sector identifier); and verifying software statements.
+
 ## Current limitations
 
 This is an initial version. By design it does not yet have:
@@ -166,7 +211,9 @@ This is an initial version. By design it does not yet have:
   warning when it does this. Do not expose an instance running with them.
 - **Other experience modules.** Presenting verifiable credentials, and
   self-registration, are planned as further modules and are not built.
-- **Client registration.** Clients are a static list in the configuration file.
+- **Client registration.** Clients come from the configuration file and,
+  optionally, the ConnectID registry at startup. There is no dynamic
+  registration and no refresh while running.
 - **Persistence.** Pushed requests, codes and tokens are held in memory, so they
   are lost on restart and a deployment is a single instance.
 - **Sessions.** Every authorization asks the user to sign in. For the same
@@ -296,6 +343,7 @@ src/
   authz.rs           authorization request parameters and their rules
   request_object.rs  signed request object verification
   client_auth.rs     private_key_jwt client authentication
+  client_sync.rs     loading clients from the ConnectID registry
   jose.rs            compact JWS framing and key selection
   keys.rs            the provider's signing key and JWK Set
   pkce.rs            PKCE (S256)

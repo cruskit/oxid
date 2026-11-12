@@ -219,5 +219,6 @@ fn login_page(
         title: "Sign in".to_owned(),
         body,
         style: STYLE,
+        script: None,
     }
 }

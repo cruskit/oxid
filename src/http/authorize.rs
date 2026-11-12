@@ -33,8 +33,9 @@ use crate::util::{ct_eq, html_escape, random_token};
 /// `Secure` and path `/` (RFC 6265bis §4.1.3.2).
 const CSRF_COOKIE: &str = "__Host-oxid-csrf";
 
-const CONTENT_SECURITY_POLICY: &str =
-    "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'";
+/// Content security policy for pages without script.
+const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; style-src 'unsafe-inline'; \
+     frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 
 /// Styles shared by every experience; a page may add its own.
 const STYLE: &str = "body{font-family:system-ui,sans-serif;max-width:32rem;margin:3rem auto;\
@@ -43,18 +44,40 @@ input{width:100%;padding:.5rem;box-sizing:border-box}\
 input[type=checkbox]{width:auto;margin-right:.5rem}button{padding:.6rem 1.2rem;margin:1rem .5rem 0 0}\
 .error{color:#b00020}.box{background:#f4f4f4;padding:.8rem;border-radius:.3rem}";
 
-fn page(status: StatusCode, title: &str, body: &str, style: &str) -> Response {
+fn page(
+    status: StatusCode,
+    title: &str,
+    body: &str,
+    style: &str,
+    script: Option<&str>,
+) -> Response {
+    // A page's own script runs under a nonce; nothing else can. The nonce is
+    // unguessable, so markup injected into the page could not carry it.
+    let nonce = random_token(16);
+    let (script_tag, policy) = match script {
+        Some(script) => (
+            format!("<script nonce=\"{nonce}\">{script}</script>"),
+            HeaderValue::from_str(&format!(
+                "{CONTENT_SECURITY_POLICY}; script-src 'nonce-{nonce}'"
+            ))
+            .unwrap_or_else(|_| HeaderValue::from_static(CONTENT_SECURITY_POLICY)),
+        ),
+        None => (
+            String::new(),
+            HeaderValue::from_static(CONTENT_SECURITY_POLICY),
+        ),
+    };
     let html = format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-         <title>{title} - oxID</title><style>{STYLE}{style}</style></head><body>{body}</body></html>",
+         <title>{title} - oxID</title><style>{STYLE}{style}</style></head>\
+         <body>{body}{script_tag}</body></html>",
         title = html_escape(title),
     );
     let mut response = no_store((status, Html(html)).into_response());
-    response.headers_mut().insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(CONTENT_SECURITY_POLICY),
-    );
+    response
+        .headers_mut()
+        .insert(header::CONTENT_SECURITY_POLICY, policy);
     response
 }
 
@@ -71,6 +94,7 @@ fn error_page(status: StatusCode, message: &str) -> Response {
             html_escape(message)
         ),
         "",
+        None,
     )
 }
 
@@ -134,6 +158,7 @@ fn experience_page(experience_page: &Page, csrf: &str, cookies: &[String]) -> Re
         &experience_page.title,
         &experience_page.body,
         experience_page.style,
+        experience_page.script,
     );
     let csrf_cookie = format!("{CSRF_COOKIE}={csrf}; Path=/; Secure; HttpOnly; SameSite=Strict");
     add_cookies(&mut response, &[csrf_cookie]);

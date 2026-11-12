@@ -49,11 +49,17 @@ impl SigningKey {
     /// Generate a fresh 2048-bit key. Used for development and tests; a real
     /// deployment configures a persistent key so tokens survive restarts.
     pub fn generate() -> Result<Self> {
+        Self::from_pem(Self::generate_pem()?.as_bytes())
+    }
+
+    /// Generate a fresh 2048-bit private key as PKCS#8 PEM, for writing to a
+    /// file that [`SigningKey::from_pem_file`] can load.
+    pub fn generate_pem() -> Result<String> {
         let pair = KeyPair::generate(KeySize::Rsa2048)
             .map_err(|_| anyhow::anyhow!("RSA key generation failed"))?;
         let der = AsDer::<aws_lc_rs::encoding::Pkcs8V1Der<'_>>::as_der(&pair)
             .map_err(|_| anyhow::anyhow!("RSA key serialisation failed"))?;
-        Self::from_pem(pkcs8_pem(der.as_ref()).as_bytes())
+        Ok(pkcs8_pem(der.as_ref()))
     }
 
     fn from_encoding_key(encoding_key: EncodingKey) -> Result<Self> {
@@ -94,6 +100,17 @@ impl SigningKey {
     /// Sign `claims` as a compact JWS with this key.
     pub fn sign(&self, typ: Option<&str>, claims: &impl Serialize) -> Result<String, JoseError> {
         jose::sign(Self::ALG, Some(&self.kid), typ, claims, &self.encoding_key)
+    }
+
+    /// Sign with an externally assigned key id in the header, for keys that
+    /// are registered elsewhere under an id that is not their thumbprint.
+    pub fn sign_with_kid(
+        &self,
+        kid: &str,
+        typ: Option<&str>,
+        claims: &impl Serialize,
+    ) -> Result<String, JoseError> {
+        jose::sign(Self::ALG, Some(kid), typ, claims, &self.encoding_key)
     }
 }
 

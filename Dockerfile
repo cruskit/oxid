@@ -14,7 +14,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && cp target/release/oxid /usr/local/bin/oxid
 
 FROM debian:trixie-slim
-RUN useradd --system --no-create-home --uid 10001 oxid
+# Root certificates, for outbound HTTPS to the ConnectID registry.
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --no-create-home --uid 10001 oxid
 COPY --from=build /usr/local/bin/oxid /usr/local/bin/oxid
 USER oxid
 EXPOSE 9443 9444

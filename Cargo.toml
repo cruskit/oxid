@@ -18,6 +18,7 @@ hyper = { version = "1", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["server-auto", "server-graceful", "service", "tokio", "http1", "http2"] }
 jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs", "use_pem"] }
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "form", "http2"] }
 rustls = "0.23"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -33,7 +34,6 @@ url = "2"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "form", "http2"] }
 toml = "1"
 
 [lints.rust]

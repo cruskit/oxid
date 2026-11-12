@@ -2,16 +2,21 @@
 //! authorization flow. For development, debugging and testing relying
 //! parties. There is no authentication, so it must never face real users.
 //!
-//! The flow has two pages:
+//! Everything is on one page:
 //!
-//! 1. **Request.** Shows the request object decoded (and, on demand, as the
-//!    original JWT), a choice of predefined customers with the last one used
-//!    preselected, and a choice of outcome: success or a predefined error.
-//!    Shortcut buttons send an unedited success or an `access_denied`
-//!    straight away.
-//! 2. **Response.** For success, shows the ID token claims as they are about
-//!    to be issued, as editable JSON. For an error, shows the error response
-//!    with an editable description. Sending completes the flow.
+//! - **Request.** The request's parameters, and the request object decoded
+//!   or, on demand, as the original JWT.
+//! - **Response.** A choice of predefined customers, with the one used on
+//!   the last flow preselected, and a choice of outcome. For a success, the
+//!   ID token claims as they are about to be issued, as editable JSON. For
+//!   an error, a predefined error condition with an editable description.
+//!
+//! The page works as a plain HTML form. A small script improves it: choosing
+//! another customer swaps in that customer's claims without a round trip,
+//! and the JSON is checked as it is typed. If the script does not run and a
+//! different customer is submitted than the claims were generated for, the
+//! page is shown again with that customer's claims rather than sending a
+//! mismatched response.
 //!
 //! Edits to the ID token are stored as a difference from what was shown
 //! ([`ClaimEdits`]), so claims the user leaves alone, such as `iat`, `exp`
@@ -41,13 +46,139 @@ const CUSTOMER_COOKIE_MAX_AGE: i64 = 365 * 24 * 60 * 60;
 /// The `outcome` form value for a successful response.
 const OUTCOME_SUCCESS: &str = "success";
 
-const STYLE: &str = "body{max-width:60rem}pre,textarea{font-family:ui-monospace,monospace;\
-font-size:.85rem}pre{background:#f4f4f4;padding:.8rem;border-radius:.3rem;overflow-x:auto;\
-white-space:pre-wrap;word-break:break-word}textarea{width:100%;box-sizing:border-box;\
-padding:.5rem}select{width:100%;padding:.5rem}h2{font-size:1.1rem;margin-top:2rem}\
-details{margin:.6rem 0}summary{cursor:pointer}.muted{color:#555;font-size:.9em}\
-.banner{background:#fff3cd;border:1px solid #e0c060;padding:.6rem .8rem;border-radius:.3rem}\
-dl{display:grid;grid-template-columns:max-content 1fr;gap:.2rem 1rem}dt{font-weight:600}dd{margin:0}";
+/// The `outcome` form value for an error response.
+const OUTCOME_ERROR: &str = "error";
+
+const STYLE: &str = "body{max-width:82rem;background:#f4f5f7;margin:1.5rem auto}\
+h1{font-size:1.25rem;font-weight:500;margin:0}h2{font-size:.75rem;letter-spacing:.06em;\
+color:#5b6472;margin:0 0 1rem;text-transform:uppercase}\
+.top{display:flex;flex-wrap:wrap;gap:.75rem 1.25rem;align-items:center;margin-bottom:1rem}\
+.top h1{flex:1 1 20rem}.banner{margin:0;background:#fff4d6;border:1px solid #e5c568;color:#5c4300;\
+padding:.5rem .75rem;border-radius:.4rem;font-size:.8rem}\
+.cols{display:flex;flex-wrap:wrap;gap:1rem;align-items:flex-start}\
+.panel{background:#fff;border:1px solid #dde1e7;border-radius:.6rem;padding:1.25rem;min-width:0;\
+box-sizing:border-box}.request{flex:1 1 27rem}.response{flex:1.25 1 32rem}\
+pre,textarea,code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem}\
+pre{background:#f4f5f7;padding:.75rem;border-radius:.5rem;margin:.25rem 0 .75rem;line-height:1.55;\
+white-space:pre-wrap;word-break:break-word}#request-encoded{word-break:break-all}\
+textarea{width:100%;box-sizing:border-box;padding:.75rem;border:1px solid #b8bfca;border-radius:.5rem;\
+background:#fbfbfc;line-height:1.55;resize:vertical}\
+select,input[type=text]{width:100%;min-height:2.75rem;padding:0 .75rem;border:1px solid #b8bfca;\
+border-radius:.5rem;background:#fff;font:inherit;box-sizing:border-box}\
+label,.label{display:block;font-weight:600;font-size:.9rem;margin:1rem 0 .4rem}\
+dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:.35rem 1rem;margin:0 0 1rem;\
+font-size:.9rem}dt{color:#5b6472}dd{margin:0;word-break:break-word}\
+.muted{color:#5b6472;font-size:.8rem;line-height:1.5}.row{display:flex;flex-wrap:wrap;gap:.6rem;\
+align-items:center;justify-content:space-between}\
+.tabs,.outcomes{display:flex;gap:.5rem;flex-wrap:wrap}\
+.tabs input,.outcomes input{position:absolute;opacity:0;width:auto}\
+.tabs label{margin:0;padding:.45rem .9rem;border-radius:.4rem;font-size:.8rem;font-weight:500;\
+cursor:pointer;background:#eef0f3}.tabs input:checked+label{background:#16181d;color:#fff}\
+.tabs input:focus-visible+label,.outcomes input:focus-visible+label{outline:2px solid #1d4ed8;\
+outline-offset:2px}\
+.outcomes label{flex:1 1 12rem;margin:0;padding:.75rem .9rem;border:1px solid #b8bfca;\
+border-radius:.5rem;cursor:pointer;font-weight:600}.outcomes label span{display:block;\
+font-weight:400;color:#5b6472;font-size:.8rem;margin-top:.2rem}\
+.outcomes input:checked+label{border-color:#1d4ed8;background:#eef3ff;box-shadow:0 0 0 1px #1d4ed8}\
+.request:has(#view-original:checked) #request-decoded{display:none}\
+.request:has(#view-decoded:checked) #request-original{display:none}\
+.response:has(#outcome-error:checked) #panel-success{display:none}\
+.response:has(#outcome-success:checked) #panel-error{display:none}\
+.pill{font-size:.75rem;border-radius:999px;padding:.2rem .6rem;background:#e3f4e4;color:#1e4620}\
+.pill.edited{background:#ffefc7;color:#7a4b00}.ok{color:#1e4620}.bad{color:#b42318}\
+#json-status{font-size:.75rem;font-weight:500}.notice{background:#eef3ff;border:1px solid #b9c8f5;\
+padding:.5rem .75rem;border-radius:.4rem;font-size:.85rem}\
+button{min-height:2.75rem;border-radius:.5rem;font:inherit;cursor:pointer}\
+#send{background:#1d4ed8;color:#fff;border:0;font-weight:600;padding:0 1.4rem}\
+#send:disabled{background:#8a93a3;cursor:not-allowed}\
+#reset{background:#fff;border:1px solid #b8bfca;min-height:2.25rem;padding:0 .75rem;margin:0;\
+font-size:.8rem}.send{border-top:1px solid #e6e9ee;margin-top:1.25rem;padding-top:.25rem}\
+[hidden]{display:none!important}";
+
+/// Progressive enhancement for the page. Written in plain ES5 so that it
+/// also runs in the conformance suite's scripted browser.
+const SCRIPT: &str = r"(function () {
+  var dataEl = document.getElementById('oxid-data');
+  if (!dataEl) { return; }
+  var data = JSON.parse(dataEl.textContent);
+  function el(id) { return document.getElementById(id); }
+  var customer = el('customer'), claims = el('id_token'), base = el('base');
+  var baseCustomer = el('base_customer'), status = el('json-status');
+  var edited = el('edited'), reset = el('reset'), send = el('send');
+  var error = el('error'), description = el('error_description');
+  var success = el('outcome-success'), failure = el('outcome-error');
+  var redirect = el('redirect-preview'), notice = el('script-notice');
+  var remembered = el('remembered');
+
+  function validJson() {
+    try {
+      var value = JSON.parse(claims.value);
+      return value !== null && typeof value === 'object' && !(value instanceof Array);
+    } catch (e) { return false; }
+  }
+  function same(a, b) {
+    try { return JSON.stringify(JSON.parse(a)) === JSON.stringify(JSON.parse(b)); }
+    catch (e) { return false; }
+  }
+  function refresh() {
+    var ok = validJson();
+    var isSuccess = success.checked;
+    status.textContent = ok ? 'Valid JSON' : 'Not a valid JSON object';
+    status.className = ok ? 'ok' : 'bad';
+    edited.hidden = !ok || same(claims.value, base.value);
+    send.disabled = isSuccess && !ok;
+    send.textContent = isSuccess ? 'Send response' : 'Send error';
+    var lines = [data.redirect_uri];
+    if (isSuccess) {
+      lines.push('  ?code=(generated when you send)');
+    } else {
+      lines.push('  ?error=' + error.value);
+      lines.push('  &error_description=' + (description.value || data.errors[error.value] || ''));
+    }
+    if (data.state !== null) { lines.push('  &state=' + data.state); }
+    lines.push('  &iss=' + data.issuer);
+    redirect.textContent = lines.join('\n');
+  }
+  function showAttributes() {
+    var blocks = document.querySelectorAll('.attributes');
+    for (var i = 0; i < blocks.length; i++) {
+      blocks[i].hidden = blocks[i].getAttribute('data-customer') !== customer.value;
+    }
+    if (remembered) { remembered.hidden = customer.value !== data.remembered; }
+  }
+  function loadCustomer(replacedEdits) {
+    var text = data.previews[customer.value];
+    if (typeof text !== 'string') { return; }
+    claims.value = text;
+    base.value = text;
+    baseCustomer.value = customer.value;
+    notice.hidden = !replacedEdits;
+  }
+
+  customer.addEventListener('change', function () {
+    var hadEdits = validJson() ? !same(claims.value, base.value) : true;
+    loadCustomer(hadEdits);
+    showAttributes();
+    refresh();
+  });
+  reset.addEventListener('click', function () {
+    claims.value = base.value;
+    notice.hidden = true;
+    refresh();
+  });
+  error.addEventListener('change', function () {
+    description.value = data.errors[error.value] || '';
+    refresh();
+  });
+  claims.addEventListener('input', refresh);
+  description.addEventListener('input', refresh);
+  success.addEventListener('change', refresh);
+  failure.addEventListener('change', refresh);
+
+  reset.hidden = false;
+  showAttributes();
+  refresh();
+})();";
 
 /// An error the user can choose to return instead of a success.
 #[derive(Debug, Clone, Copy)]
@@ -124,31 +255,6 @@ pub struct Technical {
     users: Arc<dyn UserStore>,
 }
 
-impl Technical {
-    pub fn new(users: Arc<dyn UserStore>) -> Self {
-        Self { users }
-    }
-
-    fn customer(&self, subject: &str) -> Option<Arc<User>> {
-        self.users
-            .list()
-            .into_iter()
-            .find(|user| user.subject == subject)
-    }
-
-    /// The customer to preselect: the one named by the cookie from the last
-    /// flow, if they still exist, otherwise the first.
-    fn preselected(&self, interaction: &Interaction<'_>) -> Option<String> {
-        let users = self.users.list();
-        let remembered = interaction.cookie(CUSTOMER_COOKIE);
-        users
-            .iter()
-            .find(|user| remembered == Some(cookie_value(user).as_str()))
-            .or_else(|| users.first())
-            .map(|user| user.subject.clone())
-    }
-}
-
 /// Subjects are arbitrary strings, so the cookie carries an encoded form.
 fn cookie_value(user: &User) -> String {
     b64url(user.subject.as_bytes())
@@ -162,17 +268,32 @@ fn remember(user: &User) -> String {
     )
 }
 
+/// What the page should show: the selections so far and any message.
+#[derive(Debug, Default)]
+struct View<'a> {
+    /// Subject of the selected customer.
+    customer: Option<String>,
+    error_outcome: bool,
+    error_code: Option<&'a str>,
+    error_description: Option<&'a str>,
+    /// The transaction identifier already shown, to keep it stable.
+    txn: Option<&'a str>,
+    /// The claims generated for the selected customer, when the page is
+    /// shown again after a failed submission.
+    base: Option<&'a str>,
+    /// The text in the claims editor, when it differs from `base`.
+    claims_text: Option<&'a str>,
+    error: Option<String>,
+    notice: Option<String>,
+}
+
 impl Experience for Technical {
     fn kind(&self) -> Kind {
         Kind::Technical
     }
 
     fn start<'a>(&'a self, interaction: &'a Interaction<'a>) -> StepFuture<'a> {
-        Box::pin(async move {
-            let selected = self.preselected(interaction);
-            self.request_page(interaction, selected.as_deref(), OUTCOME_SUCCESS, None)
-                .into()
-        })
+        Box::pin(async move { self.page(interaction, &View::default()).into() })
     }
 
     fn submit<'a>(&'a self, interaction: &'a Interaction<'a>, form: &'a Form) -> StepFuture<'a> {
@@ -181,92 +302,112 @@ impl Experience for Technical {
 }
 
 impl Technical {
-    fn handle(&self, interaction: &Interaction<'_>, form: &Form) -> Step {
-        let subject = form.get("customer").unwrap_or_default();
-        let outcome = form.get("outcome").unwrap_or(OUTCOME_SUCCESS);
-        let first_page = |error: &str| -> Step {
-            let selected = self
-                .customer(subject)
-                .map(|user| user.subject.clone())
-                .or_else(|| self.preselected(interaction));
-            self.request_page(interaction, selected.as_deref(), outcome, Some(error))
-                .into()
-        };
-
-        match form.get("action") {
-            // Shortcut: access_denied, without visiting the response page.
-            Some("deny") => deny(&ERROR_CONDITIONS[0], None),
-            // Shortcut: an unedited success for the selected customer.
-            Some("approve") => match self.customer(subject) {
-                Some(user) => approve(interaction, &user, None, None),
-                None => first_page("Choose a customer."),
-            },
-            Some("preview") => {
-                if outcome == OUTCOME_SUCCESS {
-                    match self.customer(subject) {
-                        Some(user) => {
-                            let txn = Uuid::new_v4().to_string();
-                            let base = preview(interaction, &user, &txn);
-                            let text = pretty(&Value::Object(base.clone()));
-                            response_page(interaction, &user, &txn, &base, &text, None).into()
-                        }
-                        None => first_page("Choose a customer."),
-                    }
-                } else {
-                    match error_condition(outcome) {
-                        Some(condition) => {
-                            error_page(interaction, condition, condition.description).into()
-                        }
-                        None => first_page("Choose an outcome."),
-                    }
-                }
-            }
-            Some("send") => self.send(interaction, form, &first_page),
-            Some("send_error") => match error_condition(outcome) {
-                Some(condition) => deny(condition, form.get("error_description")),
-                None => first_page("Choose an outcome."),
-            },
-            // "back", or anything unrecognised: return to the first page
-            // keeping the selections.
-            _ => {
-                let selected = self
-                    .customer(subject)
-                    .map(|user| user.subject.clone())
-                    .or_else(|| self.preselected(interaction));
-                self.request_page(interaction, selected.as_deref(), outcome, None)
-                    .into()
-            }
-        }
+    pub fn new(users: Arc<dyn UserStore>) -> Self {
+        Self { users }
     }
 
-    /// Send the (possibly edited) ID token claims from the response page.
-    fn send(
-        &self,
-        interaction: &Interaction<'_>,
-        form: &Form,
-        first_page: &dyn Fn(&str) -> Step,
-    ) -> Step {
-        let Some(user) = self.customer(form.get("customer").unwrap_or_default()) else {
-            return first_page("Choose a customer.");
+    fn customer(&self, subject: &str) -> Option<Arc<User>> {
+        self.users
+            .list()
+            .into_iter()
+            .find(|user| user.subject == subject)
+    }
+
+    /// The customer used on the last flow, if the browser's cookie names one
+    /// that still exists.
+    fn remembered(&self, interaction: &Interaction<'_>) -> Option<Arc<User>> {
+        let remembered = interaction.cookie(CUSTOMER_COOKIE)?;
+        self.users
+            .list()
+            .into_iter()
+            .find(|user| cookie_value(user) == remembered)
+    }
+
+    fn handle(&self, interaction: &Interaction<'_>, form: &Form) -> Step {
+        let subject = form.get("customer").unwrap_or_default();
+        let error_outcome = form.get("outcome") == Some(OUTCOME_ERROR);
+        let view = View {
+            customer: self.customer(subject).map(|user| user.subject.clone()),
+            error_outcome,
+            error_code: form.get("error"),
+            error_description: form.get("error_description"),
+            ..View::default()
         };
+        let again = |view: View<'_>, error: &str| -> Step {
+            self.page(
+                interaction,
+                &View {
+                    error: Some(error.to_owned()),
+                    ..view
+                },
+            )
+            .into()
+        };
+
+        if form.get("action") != Some("send") {
+            return again(view, "Choose a response and send it.");
+        }
+
+        if error_outcome {
+            return match form.get("error").and_then(error_condition) {
+                Some(condition) => deny(condition, form.get("error_description")),
+                None => again(view, "Choose one of the listed error conditions."),
+            };
+        }
+
+        let Some(user) = self.customer(subject) else {
+            return again(view, "Choose one of the listed customers.");
+        };
+
+        // The claims must have been generated for the customer being sent.
+        // Without the page's script, changing the customer does not update
+        // them, so show that customer's claims instead of sending.
+        if form.get("base_customer") != Some(subject) {
+            let notice = format!(
+                "The claims have been regenerated for {}. Review them and send again.",
+                user.display_name()
+            );
+            return self
+                .page(
+                    interaction,
+                    &View {
+                        notice: Some(notice),
+                        ..view
+                    },
+                )
+                .into();
+        }
+
         let txn = form.get("txn").unwrap_or_default();
-        let base = form
-            .get("base")
-            .and_then(|text| serde_json::from_str::<Value>(text).ok());
+        let base_text = form.get("base").unwrap_or_default();
+        let base = serde_json::from_str::<Value>(base_text).ok();
         let (Some(Value::Object(base)), true) = (base, Uuid::parse_str(txn).is_ok()) else {
-            return first_page("The response page was incomplete. Start again.");
+            return again(
+                view,
+                "The page was incomplete. The claims have been regenerated.",
+            );
         };
 
         let text = form.get("id_token").unwrap_or_default();
+        let keep_text = |error: String| -> Step {
+            self.page(
+                interaction,
+                &View {
+                    customer: Some(user.subject.clone()),
+                    txn: Some(txn),
+                    base: Some(base_text),
+                    claims_text: Some(text),
+                    error: Some(error),
+                    ..View::default()
+                },
+            )
+            .into()
+        };
         let edited = match serde_json::from_str::<Value>(text) {
             Ok(Value::Object(edited)) => edited,
-            Ok(_) => {
-                let error = "The ID token claims must be a JSON object.";
-                return response_page(interaction, &user, txn, &base, text, Some(error)).into();
-            }
+            Ok(_) => return keep_text("The ID token claims must be a JSON object.".to_owned()),
             Err(error) => {
-                let error = format!("The ID token claims are not valid JSON: {error}");
-                return response_page(interaction, &user, txn, &base, text, Some(&error)).into();
+                return keep_text(format!("The ID token claims are not valid JSON: {error}"));
             }
         };
 
@@ -279,40 +420,95 @@ impl Technical {
                 "ID token claims were edited by hand"
             );
         }
-        approve(
-            interaction,
-            &user,
-            (!edits.is_empty()).then_some(edits),
-            Some(txn.to_owned()),
-        )
+        Step {
+            decision: Decision::Approve(Approval {
+                user_subject: user.subject.clone(),
+                shared_claims: everything_requested(interaction),
+                declined: Vec::new(),
+                id_token_edits: (!edits.is_empty()).then_some(edits),
+                txn: Some(txn.to_owned()),
+            }),
+            set_cookies: vec![remember(&user)],
+        }
     }
 
-    /// Page 1: the request, the customer and the outcome.
-    fn request_page(
-        &self,
-        interaction: &Interaction<'_>,
-        selected: Option<&str>,
-        outcome: &str,
-        error: Option<&str>,
-    ) -> Page {
+    /// The whole experience: request on one side, response on the other.
+    fn page(&self, interaction: &Interaction<'_>, view: &View<'_>) -> Page {
         let client = interaction.client;
         let request = interaction.request();
+        let users = self.users.list();
+        let remembered = self.remembered(interaction);
+        let selected = view
+            .customer
+            .as_deref()
+            .and_then(|subject| users.iter().find(|user| user.subject == subject))
+            .or(remembered.as_ref())
+            .or_else(|| users.first());
+        let selected_subject = selected.map(|user| user.subject.as_str());
+
+        // One transaction identifier for the page, and every customer's
+        // claims generated with it, so the script can switch between them.
+        let txn = view
+            .txn
+            .map_or_else(|| Uuid::new_v4().to_string(), str::to_owned);
+        let previews: Map<String, Value> = users
+            .iter()
+            .map(|user| {
+                let claims = Value::Object(preview(interaction, user, &txn));
+                (user.subject.clone(), pretty(&claims).into())
+            })
+            .collect();
+        let base = view.base.map_or_else(
+            || {
+                selected_subject
+                    .and_then(|subject| previews.get(subject))
+                    .and_then(Value::as_str)
+                    .unwrap_or("{}")
+                    .to_owned()
+            },
+            str::to_owned,
+        );
+        let claims_text = view.claims_text.unwrap_or(&base);
+
+        let error_code = view
+            .error_code
+            .and_then(error_condition)
+            .unwrap_or(&ERROR_CONDITIONS[0]);
+        let error_description = view
+            .error_description
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .unwrap_or(error_code.description);
+
         let mut body = String::new();
         let _ = write!(
             body,
-            "<h1>Authorization request from <span id=\"client-name\">{}</span></h1>{BANNER}",
+            "<div class=\"top\"><h1>Authorization request from \
+             <span id=\"client-name\">{}</span></h1>\
+             <p class=\"banner\" id=\"technical-banner\">Technical experience. \
+             No authentication: development and testing only.</p></div>",
             html_escape(&client.name),
         );
-        if let Some(error) = error {
+        if let Some(error) = &view.error {
             let _ = write!(
                 body,
-                "<p id=\"error\" class=\"error\">{}</p>",
+                "<p id=\"error\" class=\"error\" role=\"alert\">{}</p>",
                 html_escape(error)
             );
         }
+        if let Some(notice) = &view.notice {
+            let _ = write!(
+                body,
+                "<p id=\"notice\" class=\"notice\" role=\"status\">{}</p>",
+                html_escape(notice)
+            );
+        }
+        body.push_str("<div class=\"cols\">");
 
-        // --- The request ---
-        body.push_str("<h2>Request</h2><dl>");
+        // --- Request ---
+        body.push_str(
+            "<section class=\"panel request\" aria-label=\"Request\"><h2>1 · Request</h2><dl>",
+        );
         let mut row = |name: &str, id: &str, value: &str| {
             let _ = write!(
                 body,
@@ -336,29 +532,46 @@ impl Technical {
         let (header, payload) = decode_jwt(&interaction.pushed.request_object);
         let _ = write!(
             body,
-            "<p>Request object, decoded:</p>\
-             <p class=\"muted\">Header</p><pre id=\"request-header\">{}</pre>\
-             <p class=\"muted\">Payload</p><pre id=\"request-payload\">{}</pre>\
-             <details id=\"request-original\"><summary>Show the original encoded JWT</summary>\
-             <textarea id=\"request-encoded\" rows=\"8\" readonly>{}</textarea></details>",
+            "<div class=\"row\"><span class=\"label\">Request object</span>\
+             <div class=\"tabs\" role=\"radiogroup\" aria-label=\"Request object format\">\
+             <input type=\"radio\" name=\"request-view\" id=\"view-decoded\" checked>\
+             <label for=\"view-decoded\">Decoded</label>\
+             <input type=\"radio\" name=\"request-view\" id=\"view-original\">\
+             <label for=\"view-original\">Original JWT</label></div></div>\
+             <div id=\"request-decoded\"><p class=\"muted\">Header</p>\
+             <pre id=\"request-header\">{}</pre><p class=\"muted\">Payload</p>\
+             <pre id=\"request-payload\">{}</pre></div>\
+             <div id=\"request-original\"><p class=\"muted\">As received</p>\
+             <pre id=\"request-encoded\">{}</pre></div></section>",
             html_escape(&header),
             html_escape(&payload),
             html_escape(&interaction.pushed.request_object),
         );
 
-        // --- The customer ---
-        body.push_str(&interaction.form_open());
-        let users = self.users.list();
+        // --- Response ---
+        let _ = write!(
+            body,
+            "<section class=\"panel response\" aria-label=\"Response\"><h2>2 · Response</h2>{}",
+            interaction.form_open()
+        );
         body.push_str(
-            "<h2>Customer</h2><label for=\"customer\">Generate the response for</label>\
-             <select id=\"customer\" name=\"customer\">",
+            "<div class=\"row\"><label for=\"customer\">Customer</label>\
+             <span class=\"pill\" id=\"remembered\"",
+        );
+        if remembered.as_ref().map(|user| user.subject.as_str()) != selected_subject
+            || remembered.is_none()
+        {
+            body.push_str(" hidden");
+        }
+        body.push_str(
+            ">Used on your last flow</span></div><select id=\"customer\" name=\"customer\">",
         );
         for user in &users {
             let _ = write!(
                 body,
                 "<option value=\"{}\"{}>{} ({})</option>",
                 html_escape(&user.subject),
-                if selected == Some(user.subject.as_str()) {
+                if selected_subject == Some(user.subject.as_str()) {
                     " selected"
                 } else {
                     ""
@@ -367,60 +580,123 @@ impl Technical {
                 html_escape(&user.username),
             );
         }
-        body.push_str("</select>");
+        body.push_str("</select><details><summary class=\"muted\">Customer attributes</summary>");
         for user in &users {
             let _ = write!(
                 body,
-                "<details class=\"customer\" data-customer=\"{}\">\
-                 <summary>Attributes of {} ({})</summary><pre>{}</pre></details>",
+                "<div class=\"attributes\" data-customer=\"{}\"><p class=\"muted\">{} ({})</p>\
+                 <pre>{}</pre></div>",
                 html_escape(&user.subject),
                 html_escape(&user.display_name()),
                 html_escape(&user.username),
                 html_escape(&pretty(&attributes(user))),
             );
         }
+        body.push_str("</details>");
 
-        // --- The outcome ---
-        body.push_str(
-            "<h2>Outcome</h2><label for=\"outcome\">Respond with</label>\
-             <select id=\"outcome\" name=\"outcome\">",
-        );
-        let selected_attr = |value: &str| if outcome == value { " selected" } else { "" };
+        let checked = |on: bool| if on { " checked" } else { "" };
         let _ = write!(
             body,
-            "<option value=\"{OUTCOME_SUCCESS}\"{}>Success: authorization code and ID token</option>",
-            selected_attr(OUTCOME_SUCCESS)
+            "<span class=\"label\" id=\"outcome-label\">Outcome</span>\
+             <div class=\"outcomes\" role=\"radiogroup\" aria-labelledby=\"outcome-label\">\
+             <input type=\"radio\" name=\"outcome\" id=\"outcome-success\" \
+             value=\"{OUTCOME_SUCCESS}\"{}>\
+             <label for=\"outcome-success\">Success<span>Authorization code and ID token</span></label>\
+             <input type=\"radio\" name=\"outcome\" id=\"outcome-error\" value=\"{OUTCOME_ERROR}\"{}>\
+             <label for=\"outcome-error\">Error<span>No code or ID token is issued</span></label></div>",
+            checked(!view.error_outcome),
+            checked(view.error_outcome),
+        );
+
+        // Success: the claims editor.
+        let rows = claims_text.lines().count().clamp(14, 34) + 1;
+        let _ = write!(
+            body,
+            "<div id=\"panel-success\">\
+             <input type=\"hidden\" name=\"txn\" value=\"{txn}\">\
+             <input type=\"hidden\" id=\"base\" name=\"base\" value=\"{base}\">\
+             <input type=\"hidden\" id=\"base_customer\" name=\"base_customer\" value=\"{base_customer}\">\
+             <div class=\"row\"><label for=\"id_token\">ID token claims, before signing</label>\
+             <span class=\"row\"><span class=\"pill edited\" id=\"edited\" hidden>Edited</span>\
+             <span id=\"json-status\" role=\"status\"></span>\
+             <button type=\"button\" id=\"reset\" hidden>Reset</button></span></div>\
+             <p class=\"notice\" id=\"script-notice\" hidden>Your edits were replaced with this \
+             customer's generated claims.</p>\
+             <textarea id=\"id_token\" name=\"id_token\" rows=\"{rows}\" spellcheck=\"false\">{text}</textarea>\
+             <p class=\"muted\">Change, add or remove any claim. Claims you leave alone get their \
+             real values when the token is issued: <code>iat</code>, <code>exp</code> and \
+             <code>auth_time</code> are set then, and <code>at_hash</code> is computed from the \
+             access token.</p></div>",
+            txn = html_escape(&txn),
+            base = html_escape(&base),
+            base_customer = html_escape(selected_subject.unwrap_or_default()),
+            text = html_escape(claims_text),
+        );
+
+        // Error: a predefined condition and its description.
+        body.push_str(
+            "<div id=\"panel-error\"><label for=\"error\">Error condition</label>\
+             <select id=\"error\" name=\"error\">",
         );
         for condition in ERROR_CONDITIONS {
             let code = condition.code.as_str();
             let _ = write!(
                 body,
-                "<option value=\"{code}\"{}>Error: {code} ({})</option>",
-                selected_attr(code),
+                "<option value=\"{code}\"{}>{code} · {}</option>",
+                if condition.code == error_code.code {
+                    " selected"
+                } else {
+                    ""
+                },
                 html_escape(condition.label),
             );
         }
-        body.push_str(
-            "</select>\
-             <button id=\"preview\" type=\"submit\" name=\"action\" value=\"preview\">\
-             Review response</button>\
-             <p class=\"muted\">Or respond immediately, without reviewing:</p>\
-             <button id=\"approve\" type=\"submit\" name=\"action\" value=\"approve\">\
-             Send success now</button>\
-             <button id=\"deny\" type=\"submit\" name=\"action\" value=\"deny\">\
-             Send access_denied now</button></form>",
+        let _ = write!(
+            body,
+            "</select><label for=\"error_description\">error_description</label>\
+             <input type=\"text\" id=\"error_description\" name=\"error_description\" \
+             value=\"{}\" maxlength=\"500\"></div>",
+            html_escape(error_description),
+        );
+
+        // What goes back to the client, and the button that sends it.
+        let _ = write!(
+            body,
+            "<div class=\"send\"><span class=\"label\">Authorization response</span>\
+             <pre id=\"redirect-preview\">{}\n  &amp;iss={}</pre>\
+             <button id=\"send\" type=\"submit\" name=\"action\" value=\"send\">Send response</button>\
+             </div></form></section></div>",
+            html_escape(&request.redirect_uri),
+            html_escape(&interaction.state.issuer),
+        );
+
+        // Data for the script. It is JSON in a non-executed block; `<` is
+        // escaped so no value can close the block.
+        let data = json!({
+            "previews": previews,
+            "errors": ERROR_CONDITIONS
+                .iter()
+                .map(|c| (c.code.as_str().to_owned(), Value::from(c.description)))
+                .collect::<Map<String, Value>>(),
+            "remembered": remembered.as_ref().map(|user| user.subject.clone()),
+            "redirect_uri": request.redirect_uri,
+            "state": request.state,
+            "issuer": interaction.state.issuer,
+        });
+        let _ = write!(
+            body,
+            "<script type=\"application/json\" id=\"oxid-data\">{}</script>",
+            data.to_string().replace('<', "\\u003c")
         );
 
         Page {
             title: "Authorization request".to_owned(),
             body,
             style: STYLE,
+            script: Some(SCRIPT),
         }
     }
 }
-
-const BANNER: &str = "<p class=\"banner\" id=\"technical-banner\">Technical experience. \
-There is no authentication here: this is for development and testing only.</p>";
 
 /// The ID token claims as they would be issued for `user`.
 fn preview(interaction: &Interaction<'_>, user: &User, txn: &str) -> Map<String, Value> {
@@ -458,24 +734,6 @@ fn everything_requested(interaction: &Interaction<'_>) -> std::collections::BTre
         .collect()
 }
 
-fn approve(
-    interaction: &Interaction<'_>,
-    user: &User,
-    id_token_edits: Option<ClaimEdits>,
-    txn: Option<String>,
-) -> Step {
-    Step {
-        decision: Decision::Approve(Approval {
-            user_subject: user.subject.clone(),
-            shared_claims: everything_requested(interaction),
-            declined: Vec::new(),
-            id_token_edits,
-            txn,
-        }),
-        set_cookies: vec![remember(user)],
-    }
-}
-
 fn deny(condition: &ErrorCondition, description: Option<&str>) -> Step {
     let description = description
         .map(str::trim)
@@ -493,114 +751,6 @@ fn deny(condition: &ErrorCondition, description: Option<&str>) -> Step {
 fn is_error_description(text: &str) -> bool {
     text.bytes()
         .all(|b| matches!(b, 0x20..=0x21 | 0x23..=0x5B | 0x5D..=0x7E))
-}
-
-/// Page 2, success: the ID token claims, editable.
-fn response_page(
-    interaction: &Interaction<'_>,
-    user: &User,
-    txn: &str,
-    base: &Map<String, Value>,
-    text: &str,
-    error: Option<&str>,
-) -> Page {
-    let request = interaction.request();
-    let mut body = String::new();
-    let _ = write!(
-        body,
-        "<h1>Response to <span id=\"client-name\">{}</span></h1>{BANNER}",
-        html_escape(&interaction.client.name),
-    );
-    if let Some(error) = error {
-        let _ = write!(
-            body,
-            "<p id=\"error\" class=\"error\">{}</p>",
-            html_escape(error)
-        );
-    }
-    let _ = write!(
-        body,
-        "<h2>Authorization response</h2><dl>\
-         <dt>Customer</dt><dd id=\"customer-name\">{} ({})</dd>\
-         <dt>Redirect to</dt><dd id=\"redirect-uri\">{}</dd>\
-         <dt>code</dt><dd class=\"muted\">generated when you send</dd>\
-         <dt>state</dt><dd id=\"state\">{}</dd>\
-         <dt>iss</dt><dd id=\"iss\">{}</dd></dl>",
-        html_escape(&user.display_name()),
-        html_escape(&user.username),
-        html_escape(&request.redirect_uri),
-        html_escape(request.state.as_deref().unwrap_or("(none)")),
-        html_escape(&interaction.state.issuer),
-    );
-    let rows = text.lines().count().clamp(12, 40) + 2;
-    let _ = write!(
-        body,
-        "{form}\
-         <input type=\"hidden\" name=\"customer\" value=\"{customer}\">\
-         <input type=\"hidden\" name=\"outcome\" value=\"{OUTCOME_SUCCESS}\">\
-         <input type=\"hidden\" name=\"txn\" value=\"{txn}\">\
-         <input type=\"hidden\" name=\"base\" value=\"{base}\">\
-         <h2>ID token claims</h2>\
-         <p class=\"muted\">This is the ID token payload before it is signed. Change, add or \
-         remove claims as you wish. Claims you leave alone are issued with their real values: \
-         <code>iat</code>, <code>exp</code> and <code>auth_time</code> are set when the token \
-         is issued, and <code>at_hash</code> is computed from the access token.</p>\
-         <label for=\"id_token\">ID token claims (JSON)</label>\
-         <textarea id=\"id_token\" name=\"id_token\" rows=\"{rows}\" spellcheck=\"false\">{text}</textarea>\
-         <button id=\"send\" type=\"submit\" name=\"action\" value=\"send\">Send response</button>\
-         <button id=\"back\" type=\"submit\" name=\"action\" value=\"back\">Back</button></form>",
-        form = interaction.form_open(),
-        customer = html_escape(&user.subject),
-        txn = html_escape(txn),
-        base = html_escape(&Value::Object(base.clone()).to_string()),
-        text = html_escape(text),
-    );
-    Page {
-        title: "Response".to_owned(),
-        body,
-        style: STYLE,
-    }
-}
-
-/// Page 2, error: the error response, with an editable description.
-fn error_page(
-    interaction: &Interaction<'_>,
-    condition: &ErrorCondition,
-    description: &str,
-) -> Page {
-    let request = interaction.request();
-    let code = condition.code.as_str();
-    let mut body = String::new();
-    let _ = write!(
-        body,
-        "<h1>Error response to <span id=\"client-name\">{client}</span></h1>{BANNER}\
-         <h2>Authorization response</h2><dl>\
-         <dt>Simulates</dt><dd>{label}</dd>\
-         <dt>Redirect to</dt><dd id=\"redirect-uri\">{redirect}</dd>\
-         <dt>error</dt><dd id=\"error-code\">{code}</dd>\
-         <dt>state</dt><dd id=\"state\">{state}</dd>\
-         <dt>iss</dt><dd id=\"iss\">{iss}</dd></dl>\
-         {form}\
-         <input type=\"hidden\" name=\"outcome\" value=\"{code}\">\
-         <label for=\"error_description\">error_description</label>\
-         <input id=\"error_description\" name=\"error_description\" value=\"{description}\" \
-         maxlength=\"500\">\
-         <p class=\"muted\">No code or ID token is issued.</p>\
-         <button id=\"send\" type=\"submit\" name=\"action\" value=\"send_error\">Send error</button>\
-         <button id=\"back\" type=\"submit\" name=\"action\" value=\"back\">Back</button></form>",
-        client = html_escape(&interaction.client.name),
-        label = html_escape(condition.label),
-        redirect = html_escape(&request.redirect_uri),
-        state = html_escape(request.state.as_deref().unwrap_or("(none)")),
-        iss = html_escape(&interaction.state.issuer),
-        form = interaction.form_open(),
-        description = html_escape(description),
-    );
-    Page {
-        title: "Error response".to_owned(),
-        body,
-        style: STYLE,
-    }
 }
 
 fn pretty(value: &Value) -> String {

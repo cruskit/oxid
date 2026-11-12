@@ -5,6 +5,7 @@ pub mod authz;
 pub mod claims;
 pub mod client;
 pub mod client_auth;
+pub mod client_sync;
 pub mod config;
 pub mod error;
 pub mod experience;

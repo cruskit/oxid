@@ -40,6 +40,8 @@ pub struct Config {
     pub security: SecurityConfig,
     #[serde(default)]
     pub clients: Vec<ClientConfig>,
+    /// Loading further clients from the ConnectID registry at startup.
+    pub client_sync: Option<crate::client_sync::ClientSyncConfig>,
     /// Users. When empty, the built-in demo user is used.
     #[serde(default)]
     pub users: Vec<UserConfig>,
@@ -200,6 +202,17 @@ impl Config {
         for client in &mut self.clients {
             fix(&mut client.jwks_file);
         }
+        if let Some(sync) = &mut self.client_sync {
+            let required = |path: &mut PathBuf| {
+                if path.is_relative() {
+                    *path = base.join(&*path);
+                }
+            };
+            required(&mut sync.transport_cert);
+            required(&mut sync.transport_key);
+            required(&mut sync.signing_key);
+            fix(&mut sync.ca);
+        }
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -241,6 +254,10 @@ impl Config {
             "security.refresh_token_ttl must be positive"
         );
         ensure!(s.id_token_ttl > 0, "security.id_token_ttl must be positive");
+
+        if let Some(sync) = &self.client_sync {
+            sync.validate().context("client_sync")?;
+        }
 
         if let Some(salt) = &self.keys.pairwise_salt {
             ensure!(

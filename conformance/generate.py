@@ -147,23 +147,26 @@ class Login:
 
 
 class Technical:
-    """The `technical` experience: no sign-in; the first customer is
-    preselected. Approval goes through the response preview page, so the
-    suite exercises the same path a person editing a response would."""
+    """The `technical` experience: one page, no sign-in. The first customer
+    and their generated ID token claims are preselected, so approving is
+    sending the page as it stands; denying is choosing the error outcome,
+    which defaults to access_denied."""
 
     name = "technical"
-    landmark = "preview"
+    landmark = "send"
 
     @staticmethod
     def approve() -> list:
-        return [
-            step("Review response", [["click", "id", "preview"]]),
-            step("Send response", [["click", "id", "send"]]),
-        ]
+        return [step("Send response", [["click", "id", "send"]])]
 
     @staticmethod
     def deny() -> list:
-        return [step("Send access_denied", [["click", "id", "deny"]])]
+        return [
+            step(
+                "Send access_denied",
+                [["click", "id", "outcome-error"], ["click", "id", "send"]],
+            )
+        ]
 
 
 EXPERIENCES = {cls.name: cls for cls in (Technical, Login)}

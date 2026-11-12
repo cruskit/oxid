@@ -68,10 +68,19 @@ impl ServerBuilder {
 
     pub async fn start(self) -> Result<Server> {
         let config = self.config;
-        let state = match self.clock {
-            Some(clock) => AppState::from_config_with_clock(&config, clock)?,
-            None => AppState::from_config(&config)?,
+        config.validate()?;
+        // Load clients from the registry before accepting any request, so
+        // the provider never runs with a partial list.
+        let synced_clients = match &config.client_sync {
+            Some(sync) if sync.enabled => crate::client_sync::fetch(sync)
+                .await
+                .context("synchronising clients from the registry")?,
+            _ => Vec::new(),
         };
+        let clock = self
+            .clock
+            .unwrap_or_else(|| Arc::new(crate::util::SystemClock));
+        let state = AppState::build(&config, clock, synced_clients)?;
 
         let identity =
             if let (Some(cert), Some(key)) = (&config.server.tls_cert, &config.server.tls_key) {
@@ -123,6 +132,24 @@ impl ServerBuilder {
             tasks,
         })
     }
+}
+
+/// Serve `router` over TLS on `listener` until the returned sender is
+/// dropped or sent `true`. The request extension [`ConnInfo`] carries the
+/// client certificate, if `tls` asks for one.
+///
+/// This is the provider's own connection handling, exposed so that other
+/// HTTPS services (in tests, a stand-in for the ConnectID registry) behave
+/// the same way.
+pub fn spawn_tls(
+    listener: std::net::TcpListener,
+    tls: Arc<rustls::ServerConfig>,
+    router: Router,
+) -> Result<(watch::Sender<bool>, JoinHandle<()>)> {
+    let listener = from_std(listener)?;
+    let (shutdown, receiver) = watch::channel(false);
+    let task = tokio::spawn(accept_loop(listener, tls, router, receiver));
+    Ok((shutdown, task))
 }
 
 fn from_std(listener: std::net::TcpListener) -> Result<TcpListener> {
