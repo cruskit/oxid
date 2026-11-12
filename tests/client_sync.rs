@@ -29,25 +29,13 @@ const IDP_CLIENT_ID: &str = "oxid-idp";
 const KEY_ID: &str = "registry-assigned-kid";
 const ACCESS_TOKEN: &str = "registry-access-token";
 
-/// How the stand-in paginates.
-#[derive(Clone, Copy, PartialEq)]
-enum Paging {
-    /// A `content` envelope with `last` and `totalPages`.
-    Envelope,
-    /// A bare array, with a `Link: rel="next"` header.
-    LinkHeader,
-    /// A bare array and nothing else: the reader must probe for the end.
-    BareArray,
-}
-
 struct Registry {
     base: String,
-    paging: Paging,
     /// The provider's assertion key, as registered under [`KEY_ID`].
     idp_jwks: jsonwebtoken::jwk::JwkSet,
     /// Keys of the relying parties, served from their `jwks_uri`.
     rp_jwks: Value,
-    entries: Vec<Value>,
+    entries: Mutex<Vec<Value>>,
     /// Thumbprint of the certificate the access token was issued to.
     token_bound_to: Mutex<Option<String>>,
     /// `page` values requested from the clients endpoint, in order.
@@ -132,37 +120,27 @@ async fn clients(
         .unwrap()
         .push(query.get("page").cloned().unwrap_or_default());
 
-    let total_pages = registry.entries.len().div_ceil(size).max(1);
-    let content: Vec<Value> = registry
-        .entries
+    // The response the registry's API definition gives: the clients in
+    // `content`, beside the pagination properties.
+    let entries = registry.entries.lock().unwrap().clone();
+    let total_pages = entries.len().div_ceil(size);
+    let content: Vec<Value> = entries
         .iter()
         .skip(page * size)
         .take(size)
         .cloned()
         .collect();
-    match registry.paging {
-        Paging::Envelope => Json(json!({
-            "content": content,
-            "number": page,
-            "size": size,
-            "totalPages": total_pages,
-            "totalElements": registry.entries.len(),
-            "last": page + 1 >= total_pages,
-        }))
-        .into_response(),
-        Paging::LinkHeader => {
-            let mut response = Json(json!(content)).into_response();
-            if page + 1 < total_pages {
-                // A relative link, as RFC 8288 allows.
-                let link = format!("</clients?page={}&size={size}>; rel=\"next\"", page + 1);
-                response
-                    .headers_mut()
-                    .insert(header::LINK, link.parse().unwrap());
-            }
-            response
-        }
-        Paging::BareArray => Json(json!(content)).into_response(),
-    }
+    Json(json!({
+        "empty": content.is_empty(),
+        "content": content,
+        "totalPages": total_pages,
+        "totalSize": entries.len(),
+        "pageable": {"number": page, "size": size, "offset": page * size},
+        "size": size,
+        "offset": page * size,
+        "pageNumber": page,
+    }))
+    .into_response()
 }
 
 async fn rp_jwks(State(registry): State<Shared>, Path(id): Path<String>) -> Response {
@@ -182,7 +160,7 @@ struct TestRegistry {
 
 impl TestRegistry {
     /// Must be called inside a Tokio runtime: it spawns the listener task.
-    fn start(paging: Paging, page_size: u32) -> Self {
+    fn start(page_size: u32) -> Self {
         let dir = std::env::temp_dir().join(format!("oxid-sync-{}", oxid::util::random_token(8)));
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -243,10 +221,9 @@ impl TestRegistry {
 
         let registry = Arc::new(Registry {
             base: base.clone(),
-            paging,
             idp_jwks,
             rp_jwks: serde_json::to_value(rp_key.jwks()).unwrap(),
-            entries,
+            entries: Mutex::new(entries),
             token_bound_to: Mutex::new(None),
             pages_requested: Mutex::new(Vec::new()),
             token_requests: Mutex::new(0),
@@ -303,7 +280,7 @@ const REGISTRABLE: [&str; 5] = ["rp-one", "rp-two", "rp-three", "rp-four", "test
 
 #[tokio::test]
 async fn every_page_is_loaded_and_usable_clients_are_registered() {
-    let registry = TestRegistry::start(Paging::Envelope, 3);
+    let registry = TestRegistry::start(3);
     let clients = fetch(&registry.config).await.unwrap();
 
     // Eight entries at three per page: all three pages were read.
@@ -326,20 +303,15 @@ async fn every_page_is_loaded_and_usable_clients_are_registered() {
 }
 
 #[tokio::test]
-async fn pagination_by_link_header_and_by_probing_also_load_everything() {
-    for (paging, page_size, expected_pages) in [
-        (Paging::LinkHeader, 3, vec!["0", "1", "2"]),
-        // Nothing marks the end: 8 entries in fours needs an empty third page.
-        (Paging::BareArray, 4, vec!["0", "1", "2"]),
-        (Paging::BareArray, 5, vec!["0", "1"]),
-        (Paging::Envelope, 100, vec!["0"]),
-        (
-            Paging::Envelope,
-            1,
-            vec!["0", "1", "2", "3", "4", "5", "6", "7"],
-        ),
+async fn all_pages_are_loaded_whatever_the_page_size() {
+    for (page_size, expected_pages) in [
+        // Eight entries in fours: exactly two full pages, and no third.
+        (4, vec!["0", "1"]),
+        (5, vec!["0", "1"]),
+        (50, vec!["0"]),
+        (1, vec!["0", "1", "2", "3", "4", "5", "6", "7"]),
     ] {
-        let registry = TestRegistry::start(paging, page_size);
+        let registry = TestRegistry::start(page_size);
         let clients = fetch(&registry.config).await.unwrap();
         assert_eq!(registry.pages(), expected_pages, "page size {page_size}");
         assert_eq!(ids(&clients), REGISTRABLE, "page size {page_size}");
@@ -348,9 +320,19 @@ async fn pagination_by_link_header_and_by_probing_also_load_everything() {
 }
 
 #[tokio::test]
+async fn an_empty_registry_yields_no_clients() {
+    let registry = TestRegistry::start(50);
+    registry.registry.entries.lock().unwrap().clear();
+    let clients = fetch(&registry.config).await.unwrap();
+    assert_eq!(clients.len(), 0);
+    assert_eq!(registry.pages(), ["0"], "one request, then stop");
+    registry.stop();
+}
+
+#[tokio::test]
 async fn authentication_failures_stop_the_synchronisation() {
     // An assertion signed with a key the registry does not know.
-    let registry = TestRegistry::start(Paging::Envelope, 3);
+    let registry = TestRegistry::start(3);
     std::fs::write(
         registry.dir.join("signing.key"),
         SigningKey::generate_pem().unwrap(),
@@ -369,7 +351,7 @@ async fn authentication_failures_stop_the_synchronisation() {
     registry.stop();
 
     // The wrong key id.
-    let registry = TestRegistry::start(Paging::Envelope, 3);
+    let registry = TestRegistry::start(3);
     let mut config = registry.config.clone();
     config.signing_key_id = "some-other-kid".to_owned();
     assert!(fetch(&config).await.is_err());
@@ -395,7 +377,7 @@ async fn authentication_failures_stop_the_synchronisation() {
 
 #[tokio::test]
 async fn provider_starts_with_configured_and_synchronised_clients() {
-    let registry = TestRegistry::start(Paging::Envelope, 3);
+    let registry = TestRegistry::start(3);
     let sync = registry.config.clone();
     let op = TestOp::start_with(move |config| config.client_sync = Some(sync)).await;
 
@@ -418,7 +400,7 @@ async fn provider_starts_with_configured_and_synchronised_clients() {
 
 #[tokio::test]
 async fn synchronisation_is_off_unless_enabled_and_failure_prevents_startup() {
-    let registry = TestRegistry::start(Paging::Envelope, 3);
+    let registry = TestRegistry::start(3);
 
     // Present but disabled: the registry is never contacted.
     let mut disabled = registry.config.clone();

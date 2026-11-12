@@ -190,11 +190,13 @@ the configured definition is used. If the registry cannot be reached or
 refuses the request, oxID does not start. An individual entry that is
 inactive, malformed or whose keys cannot be fetched is logged and skipped.
 
-The registry's pagination format is not set out in the specification, so the
-common forms are all handled: a `content`/`data`/`clients`/`items` envelope
-with `last` or `totalPages`, a `Link: rel="next"` header or `links.next`
-member, and a bare array (read until a short or empty page). Pages are
-requested with `page` (from 0) and `size` query parameters.
+Pagination follows the registry's API definition. Pages are requested with
+`page` (zero-indexed) and `size` (`page_size`, default 50, the registry's own
+default). Each response carries the clients in `content` beside `totalPages`,
+`totalSize` and `pageNumber`, and pages are read until `totalPages` have been
+fetched. A response that is not in that form, or that reports a different page
+than was asked for, stops the synchronisation. Only clients whose `status` is
+`Active` are registered.
 
 Not done yet: periodic refresh of the client list and of each client's keys,
 which the profile requires of a production identity provider; fetching

@@ -7,8 +7,9 @@
 //! 1. obtain an access token from the registry's token endpoint with the
 //!    client credentials grant, authenticating with `private_key_jwt` over
 //!    mutual TLS (the endpoint advertised in `mtls_endpoint_aliases`);
-//! 2. `GET` the clients endpoint with that token, over mutual TLS, following
-//!    the pagination until every page has been read;
+//! 2. `GET` the clients endpoint with that token, over mutual TLS, asking
+//!    for `page` 0, 1, 2... until the `totalPages` it reports have all been
+//!    read;
 //! 3. turn each active entry into a [`Client`], fetching its keys from its
 //!    `jwks_uri`.
 //!
@@ -27,7 +28,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use jsonwebtoken::jwk::JwkSet;
-use reqwest::header::{ACCEPT, LINK};
+use reqwest::header::ACCEPT;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use url::Url;
@@ -80,7 +81,8 @@ pub struct ClientSyncConfig {
     /// PEM bundle of extra certificate authorities to trust when talking to
     /// the registry and the client key stores, in addition to the system's.
     pub ca: Option<PathBuf>,
-    /// Page size to ask for.
+    /// The `size` to ask the clients endpoint for: the most results on one
+    /// page.
     #[serde(default = "default_page_size")]
     pub page_size: u32,
     /// The claims profile given to synchronised clients.
@@ -92,8 +94,9 @@ fn default_scope() -> String {
     "directory:software".to_owned()
 }
 
+/// The registry's own default.
 fn default_page_size() -> u32 {
-    100
+    50
 }
 
 impl ClientSyncConfig {
@@ -279,178 +282,114 @@ async fn access_token(
 /// Send a request and parse a JSON body, turning a failure status into an
 /// error that says what the registry answered.
 async fn get_json(request: reqwest::RequestBuilder, what: &str) -> Result<Value> {
-    let (value, _) = get_json_with_link(request, what).await?;
-    Ok(value)
-}
-
-async fn get_json_with_link(
-    request: reqwest::RequestBuilder,
-    what: &str,
-) -> Result<(Value, Option<String>)> {
     let response = request
         .header(ACCEPT, "application/json")
         .send()
         .await
         .with_context(|| format!("calling the {what}"))?;
     let status = response.status();
-    let link = response
-        .headers()
-        .get(LINK)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
     let text = response
         .text()
         .await
         .with_context(|| format!("reading the {what} response"))?;
     if !status.is_success() {
-        // Error bodies can be long; the start is enough to diagnose.
+        // Error bodies can be long; the start is enough to diagnose. The
+        // clients endpoint answers a 400 with `{"errors": [...]}`.
         let detail: String = text.chars().take(300).collect();
         bail!("the {what} answered {status}: {detail}");
     }
-    let value =
-        serde_json::from_str(&text).with_context(|| format!("the {what} response is not JSON"))?;
-    Ok((value, link))
+    serde_json::from_str(&text).with_context(|| format!("the {what} response is not JSON"))
 }
 
-/// Where the next page is, as far as one page can tell.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Next {
-    /// There is no further page.
-    Done,
-    /// The registry gave the next page's URL.
-    Url(String),
-    /// Ask for this page number.
-    Page(u32),
+/// One page of the clients endpoint (`RegisteredClientsResponse` in the
+/// registry's API definition): the client entries in `content`, with the
+/// pagination properties beside them.
+#[derive(Debug, Clone, PartialEq)]
+struct ClientsPage {
+    entries: Vec<Value>,
+    /// `totalPages`: how many pages there are in all.
+    total_pages: u64,
+    /// `totalSize`: how many clients there are in all.
+    total_size: Option<u64>,
 }
 
-/// One page of the clients endpoint: its entries and where to go next.
-///
-/// The registry's pagination format is not fixed by the ConnectID
-/// specification, so the common conventions are all understood:
-///
-/// - the entries may be the body itself (an array), or under `content`,
-///   `data`, `clients` or `items`;
-/// - the next page may be named by a `Link: <...>; rel="next"` header or a
-///   `links.next` / `next` member;
-/// - otherwise page numbers are used, stopping when the body says this is
-///   the last page (`last`, `totalPages`, `meta.totalPages`) or, failing
-///   that, when a page comes back short or empty.
-fn read_page(
-    body: &Value,
-    link_header: Option<&str>,
-    page: u32,
-    page_size: u32,
-) -> Result<(Vec<Value>, Next)> {
-    let entries = match body {
-        Value::Array(entries) => entries.clone(),
-        Value::Object(object) => ["content", "data", "clients", "items"]
-            .iter()
-            .find_map(|name| object.get(*name).and_then(Value::as_array))
-            .cloned()
-            .ok_or_else(|| anyhow!("the clients response has no list of clients"))?,
-        _ => bail!("the clients response is neither a list nor an object"),
-    };
-
-    let named = link_header.and_then(next_from_link_header).or_else(|| {
-        [
-            &body["links"]["next"],
-            &body["_links"]["next"]["href"],
-            &body["next"],
-        ]
-        .into_iter()
-        .find_map(|value| value.as_str())
-        .filter(|url| !url.is_empty())
-        .map(str::to_owned)
-    });
-    if let Some(url) = named {
-        return Ok((entries, Next::Url(url)));
+impl ClientsPage {
+    /// Read a response to a request for page `requested` (zero-indexed).
+    fn parse(body: &Value, requested: u32) -> Result<Self> {
+        let entries = body["content"]
+            .as_array()
+            .ok_or_else(|| anyhow!("the clients response has no content list"))?
+            .clone();
+        let total_pages = body["totalPages"]
+            .as_u64()
+            .ok_or_else(|| anyhow!("the clients response has no totalPages"))?;
+        // If the registry says which page this is, it must be the one asked
+        // for; otherwise pages could be skipped or read twice unnoticed.
+        if let Some(number) = body["pageNumber"].as_u64() {
+            ensure!(
+                number == u64::from(requested),
+                "asked the registry for page {requested} of clients but received page {number}"
+            );
+        }
+        if body["empty"].as_bool() == Some(true) {
+            ensure!(
+                entries.is_empty(),
+                "the clients response says it is empty but has content"
+            );
+        }
+        Ok(Self {
+            entries,
+            total_pages,
+            total_size: body["totalSize"].as_u64(),
+        })
     }
 
-    // Page-number conventions. `number` is the zero-based index of this page.
-    let total_pages = [
-        &body["totalPages"],
-        &body["meta"]["totalPages"],
-        &body["total_pages"],
-    ]
-    .into_iter()
-    .find_map(Value::as_u64);
-    let is_last = if let Some(last) = body["last"].as_bool() {
-        last
-    } else if let Some(total) = total_pages {
-        u64::from(page) + 1 >= total
-    } else {
-        // Nothing says how many pages there are: a short page is the end.
-        entries.len() < usize::try_from(page_size).unwrap_or(usize::MAX)
-    };
-    let next = if is_last || entries.is_empty() {
-        Next::Done
-    } else {
-        Next::Page(page + 1)
-    };
-    Ok((entries, next))
+    /// Whether another page follows page `requested`.
+    fn has_next(&self, requested: u32) -> bool {
+        u64::from(requested) + 1 < self.total_pages
+    }
 }
 
-/// The target of the `rel="next"` entry of an RFC 8288 `Link` header.
-fn next_from_link_header(header: &str) -> Option<String> {
-    header.split(',').find_map(|entry| {
-        let (target, parameters) = entry.split_once(';')?;
-        let is_next = parameters.split(';').any(|parameter| {
-            let parameter = parameter.trim().to_ascii_lowercase();
-            parameter == "rel=\"next\"" || parameter == "rel=next"
-        });
-        let url = target.trim().strip_prefix('<')?.strip_suffix('>')?;
-        is_next.then(|| url.to_owned())
-    })
-}
-
-/// Read the clients endpoint to the end.
+/// Read the clients endpoint to the end: `page` is zero-indexed and `size`
+/// is the largest number of results per page, as the registry defines them.
 async fn all_pages(
     config: &ClientSyncConfig,
     http: &reqwest::Client,
     access_token: &str,
 ) -> Result<Vec<Value>> {
     let base = Url::parse(&config.clients_url).context("clients_url")?;
-    let page_url = |page: u32| -> String {
+    let mut entries = Vec::new();
+    let mut expected_total = None;
+    for page in 0..MAX_PAGES {
         let mut url = base.clone();
         url.query_pairs_mut()
             .append_pair("page", &page.to_string())
             .append_pair("size", &config.page_size.to_string());
-        url.to_string()
-    };
-
-    let mut entries = Vec::new();
-    let mut page = 0;
-    let mut url = page_url(page);
-    let mut visited = BTreeSet::new();
-    for _ in 0..MAX_PAGES {
-        ensure!(
-            visited.insert(url.clone()),
-            "the clients endpoint pagination loops back to {url}"
+        let request = http.get(url).bearer_auth(access_token);
+        let body = get_json(request, "registry clients endpoint").await?;
+        let mut found = ClientsPage::parse(&body, page)?;
+        tracing::debug!(
+            page,
+            total_pages = found.total_pages,
+            clients = found.entries.len(),
+            "read a page of clients"
         );
-        let request = http.get(&url).bearer_auth(access_token);
-        let (body, link) = get_json_with_link(request, "registry clients endpoint").await?;
-        let (mut found, next) = read_page(&body, link.as_deref(), page, config.page_size)?;
-        tracing::debug!(page, clients = found.len(), "read a page of clients");
-        entries.append(&mut found);
-        match next {
-            Next::Done => return Ok(entries),
-            Next::Page(number) => {
-                page = number;
-                url = page_url(number);
-            }
-            Next::Url(next_url) => {
-                // Relative links are resolved against the page they are on.
-                let resolved = Url::parse(&url)
-                    .and_then(|current| current.join(&next_url))
-                    .context("the next page link is not a URL")?;
-                // The access token must not follow a link to another host.
-                ensure!(
-                    resolved.scheme() == "https" && resolved.host_str() == base.host_str(),
-                    "the next page link leaves the registry: {resolved}"
+        expected_total = expected_total.or(found.total_size);
+        let has_next = found.has_next(page);
+        entries.append(&mut found.entries);
+        if !has_next {
+            // The list can change while it is being read. A mismatch is not
+            // fatal, but it should not pass silently.
+            if let Some(total) = expected_total
+                && u64::try_from(entries.len()).ok() != Some(total)
+            {
+                tracing::warn!(
+                    expected = total,
+                    received = entries.len(),
+                    "the registry's client count changed during synchronisation"
                 );
-                page += 1;
-                url = resolved.to_string();
             }
+            return Ok(entries);
         }
     }
     bail!("the clients endpoint has more than {MAX_PAGES} pages")
@@ -482,7 +421,8 @@ fn strings(value: &Value) -> Vec<String> {
 }
 
 /// Whether a status member says the client or its organisation is active.
-/// A missing status is taken as active.
+/// The registry's values are `Active`, `Suspended` and `Inactive`; only the
+/// first is registered. A missing status is taken as active.
 fn is_active(value: &Value) -> bool {
     value
         .as_str()
@@ -708,7 +648,7 @@ mod tests {
         let defaults = config();
         defaults.validate().unwrap();
         assert_eq!(defaults.scope, "directory:software");
-        assert_eq!(defaults.page_size, 100);
+        assert_eq!(defaults.page_size, 50);
         assert_eq!(defaults.profile, Profile::Connectid);
         assert!(defaults.ca.is_none());
 
@@ -794,93 +734,80 @@ mod tests {
         );
     }
 
-    #[allow(clippy::needless_pass_by_value)]
-    fn page(body: Value, link: Option<&str>, number: u32, size: u32) -> (usize, Next) {
-        let (entries, next) = read_page(&body, link, number, size).unwrap();
-        (entries.len(), next)
+    /// A response shaped like the registry's `RegisteredClientsResponse`.
+    fn response(clients: usize, page: u64, size: u64, total: u64) -> Value {
+        json!({
+            "content": vec![json!({}); clients],
+            "totalPages": total.div_ceil(size),
+            "totalSize": total,
+            "pageable": {"number": page, "size": size, "offset": page * size},
+            "size": size,
+            "offset": page * size,
+            "empty": clients == 0,
+            "pageNumber": page,
+        })
     }
 
     #[test]
-    fn pages_in_a_content_envelope_use_last_and_total_pages() {
-        let body = |last: bool| json!({"content": [{"a": 1}, {"a": 2}], "last": last, "number": 0});
-        assert_eq!(page(body(false), None, 0, 2), (2, Next::Page(1)));
-        assert_eq!(page(body(true), None, 3, 2), (2, Next::Done));
+    fn pages_follow_the_registry_pagination_properties() {
+        // 120 clients at 50 a page: pages 0 and 1 are full, page 2 has 20.
+        let first = ClientsPage::parse(&response(50, 0, 50, 120), 0).unwrap();
+        assert_eq!(first.entries.len(), 50);
+        assert_eq!(first.total_pages, 3);
+        assert_eq!(first.total_size, Some(120));
+        assert!(first.has_next(0));
+        let second = ClientsPage::parse(&response(50, 1, 50, 120), 1).unwrap();
+        assert!(second.has_next(1));
+        let last = ClientsPage::parse(&response(20, 2, 50, 120), 2).unwrap();
+        assert_eq!(last.entries.len(), 20);
+        assert!(!last.has_next(2));
 
-        let totals = json!({"content": [{}, {}], "totalPages": 3});
-        assert_eq!(page(totals.clone(), None, 0, 2), (2, Next::Page(1)));
-        assert_eq!(page(totals.clone(), None, 1, 2), (2, Next::Page(2)));
-        assert_eq!(page(totals, None, 2, 2), (2, Next::Done));
+        // A full last page is still the last page: totalPages decides, not
+        // how many results came back.
+        let exact = ClientsPage::parse(&response(50, 1, 50, 100), 1).unwrap();
+        assert!(!exact.has_next(1));
 
-        let meta = json!({"data": [{}], "meta": {"totalPages": 2}});
-        assert_eq!(page(meta.clone(), None, 0, 50), (1, Next::Page(1)));
-        assert_eq!(page(meta, None, 1, 50), (1, Next::Done));
+        // No clients at all.
+        let none = ClientsPage::parse(&response(0, 0, 50, 0), 0).unwrap();
+        assert_eq!(none.entries.len(), 0);
+        assert_eq!(none.total_pages, 0);
+        assert!(!none.has_next(0));
     }
 
     #[test]
-    fn bare_arrays_end_on_a_short_or_empty_page() {
-        assert_eq!(page(json!([{}, {}, {}]), None, 0, 3), (3, Next::Page(1)));
-        assert_eq!(page(json!([{}, {}]), None, 1, 3), (2, Next::Done));
-        assert_eq!(page(json!([]), None, 2, 3), (0, Next::Done));
-        // An envelope with no paging information behaves the same way.
-        assert_eq!(
-            page(json!({"clients": [{}]}), None, 0, 1),
-            (1, Next::Page(1))
-        );
-        assert_eq!(page(json!({"items": []}), None, 1, 1), (0, Next::Done));
+    fn optional_pagination_properties_may_be_absent() {
+        let minimal = json!({"content": [{}, {}], "totalPages": 2});
+        let page = ClientsPage::parse(&minimal, 0).unwrap();
+        assert_eq!(page.entries.len(), 2);
+        assert_eq!(page.total_size, None);
+        assert!(page.has_next(0));
+        assert!(!ClientsPage::parse(&minimal, 1).unwrap().has_next(1));
     }
 
     #[test]
-    fn explicit_next_links_take_precedence() {
-        let link = "<https://r.example/clients?page=0>; rel=\"prev\", \
-                    <https://r.example/clients?page=2>; rel=\"next\"";
-        assert_eq!(
-            page(json!([{}]), Some(link), 1, 100),
-            (1, Next::Url("https://r.example/clients?page=2".into()))
-        );
-        assert_eq!(
-            page(
-                json!([{}]),
-                Some("<https://r.example/x>; rel=\"last\""),
-                1,
-                100
-            )
-            .1,
-            Next::Done
-        );
-
-        let body = json!({"data": [{}], "links": {"next": "/clients?cursor=abc"}, "last": true});
-        assert_eq!(
-            page(body, None, 0, 100).1,
-            Next::Url("/clients?cursor=abc".into())
-        );
-        let hal = json!({"content": [{}], "_links": {"next": {"href": "https://r.example/n"}}});
-        assert_eq!(
-            page(hal, None, 0, 100).1,
-            Next::Url("https://r.example/n".into())
-        );
-        let empty_link = json!({"data": [{}], "links": {"next": ""}, "meta": {"totalPages": 1}});
-        assert_eq!(page(empty_link, None, 0, 100).1, Next::Done);
-    }
-
-    #[test]
-    fn unrecognisable_client_lists_are_errors() {
-        assert!(read_page(&json!({"error": "nope"}), None, 0, 10).is_err());
-        assert!(read_page(&json!("clients"), None, 0, 10).is_err());
-        assert!(read_page(&json!({"content": "not a list"}), None, 0, 10).is_err());
-    }
-
-    #[test]
-    fn link_header_parsing_is_tolerant() {
-        assert_eq!(
-            next_from_link_header("<https://r.example/p2>;rel=next").unwrap(),
-            "https://r.example/p2"
-        );
-        assert_eq!(
-            next_from_link_header("<a>; rel=\"first\", </clients?page=3> ; REL=\"NEXT\"").unwrap(),
-            "/clients?page=3"
-        );
-        assert!(next_from_link_header("<https://r.example/p2>; rel=\"prev\"").is_none());
-        assert!(next_from_link_header("garbage").is_none());
+    fn malformed_or_inconsistent_pages_are_errors() {
+        for (name, body) in [
+            (
+                "an error body",
+                json!({"errors": ["endDate format is invalid"]}),
+            ),
+            ("a bare list", json!([{}, {}])),
+            (
+                "content that is not a list",
+                json!({"content": "x", "totalPages": 1}),
+            ),
+            ("no totalPages", json!({"content": [{}]})),
+            ("a text body", json!("clients")),
+            (
+                "content on a page marked empty",
+                json!({"content": [{}], "totalPages": 1, "empty": true}),
+            ),
+        ] {
+            assert!(ClientsPage::parse(&body, 0).is_err(), "{name}");
+        }
+        // The registry answering with a different page than was asked for.
+        let error = ClientsPage::parse(&response(50, 0, 50, 120), 1).unwrap_err();
+        assert!(error.to_string().contains("page 1"), "{error}");
     }
 
     #[test]
@@ -960,7 +887,7 @@ mod tests {
     fn inactive_clients_are_not_registered() {
         for (member, status) in [
             ("status", "Inactive"),
-            ("status", "Revoked"),
+            ("status", "Suspended"),
             ("org_status", "Withdrawn"),
         ] {
             let mut inactive = entry();
