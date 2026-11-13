@@ -35,9 +35,42 @@ use crate::util::{ct_eq, html_escape, random_token};
 /// `Secure` and path `/` (RFC 6265bis §4.1.3.2).
 const CSRF_COOKIE: &str = "__Host-oxid-csrf";
 
-/// Content security policy for pages without script.
+/// Content security policy for every page, before `form-action` and
+/// `script-src` are added by [`content_security_policy`].
 const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; style-src 'unsafe-inline'; \
-     frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
+     frame-ancestors 'none'; base-uri 'none'";
+
+/// The policy for one page.
+///
+/// Forms post to this origin only. But the final post of an interaction is
+/// answered with a redirect to the client's redirect URI, and browsers apply
+/// `form-action` to that redirect as well (CSP3 §6.3.1; Chromium enforces
+/// it). A page of an interaction therefore also names the origin of the
+/// redirect URI of the request being decided, `redirect_to`, or the browser
+/// blocks the authorization response. That URI is an exact match for one
+/// the client registered, checked when the request was pushed.
+fn content_security_policy(redirect_to: Option<&str>, nonce: Option<&str>) -> HeaderValue {
+    let mut policy = format!("{CONTENT_SECURITY_POLICY}; form-action 'self'");
+    let origin = redirect_to
+        .and_then(|uri| Url::parse(uri).ok())
+        .map(|uri| uri.origin())
+        .filter(url::Origin::is_tuple)
+        .map(|origin| origin.ascii_serialization());
+    if let Some(origin) = origin {
+        policy.push(' ');
+        policy.push_str(&origin);
+    }
+    if let Some(nonce) = nonce {
+        policy.push_str("; script-src 'nonce-");
+        policy.push_str(nonce);
+        policy.push('\'');
+    }
+    HeaderValue::from_str(&policy).unwrap_or_else(|_| {
+        HeaderValue::from_static(
+            "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+        )
+    })
+}
 
 /// Styles shared by every experience; a page may add its own.
 const STYLE: &str = "body{font-family:system-ui,sans-serif;max-width:32rem;margin:3rem auto;\
@@ -52,6 +85,7 @@ fn page(
     body: &str,
     style: &str,
     script: Option<&str>,
+    redirect_to: Option<&str>,
 ) -> Response {
     // A page's own script runs under a nonce; nothing else can. The nonce is
     // unguessable, so markup injected into the page could not carry it.
@@ -59,15 +93,9 @@ fn page(
     let (script_tag, policy) = match script {
         Some(script) => (
             format!("<script nonce=\"{nonce}\">{script}</script>"),
-            HeaderValue::from_str(&format!(
-                "{CONTENT_SECURITY_POLICY}; script-src 'nonce-{nonce}'"
-            ))
-            .unwrap_or_else(|_| HeaderValue::from_static(CONTENT_SECURITY_POLICY)),
+            content_security_policy(redirect_to, Some(&nonce)),
         ),
-        None => (
-            String::new(),
-            HeaderValue::from_static(CONTENT_SECURITY_POLICY),
-        ),
+        None => (String::new(), content_security_policy(redirect_to, None)),
     };
     let html = format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
@@ -106,6 +134,7 @@ fn error_page(status: StatusCode, message: &str) -> Response {
             html_escape(message)
         ),
         "",
+        None,
         None,
     )
 }
@@ -164,13 +193,21 @@ fn add_cookies(response: &mut Response, cookies: &[String]) {
 }
 
 /// Render an experience's page, setting the CSRF cookie its form relies on.
-fn experience_page(experience_page: &Page, csrf: &str, cookies: &[String]) -> Response {
+/// `redirect_uri` is where the interaction will end; see
+/// [`content_security_policy`].
+fn experience_page(
+    experience_page: &Page,
+    csrf: &str,
+    cookies: &[String],
+    redirect_uri: &str,
+) -> Response {
     let mut response = page(
         StatusCode::OK,
         &experience_page.title,
         &experience_page.body,
         experience_page.style,
         experience_page.script,
+        Some(redirect_uri),
     );
     let csrf_cookie = format!("{CSRF_COOKIE}={csrf}; Path=/; Secure; HttpOnly; SameSite=Strict");
     add_cookies(&mut response, &[csrf_cookie]);
@@ -313,7 +350,12 @@ async fn try_conclude(interaction: &Interaction<'_>, step: Step) -> StoreResult<
     let now = state.now();
     let mut response = match step.decision {
         Decision::Page(page) => {
-            return Ok(experience_page(&page, interaction.csrf, &step.set_cookies));
+            return Ok(experience_page(
+                &page,
+                interaction.csrf,
+                &step.set_cookies,
+                &request.redirect_uri,
+            ));
         }
         Decision::Deny { code, description } => {
             // The experience may already have discarded the request (after

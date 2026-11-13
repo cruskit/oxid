@@ -191,6 +191,17 @@ async fn one_page_shows_the_request_and_the_response_controls() {
         "{csp}"
     );
     assert!(!csp.contains("unsafe-inline' 'nonce") && !csp.contains("script-src 'unsafe"));
+    // The form's post is answered with a redirect to the client, which
+    // browsers hold to form-action too: the client's origin must be allowed,
+    // and nothing wider.
+    let redirect_origin = url::Url::parse(REDIRECT_URI)
+        .unwrap()
+        .origin()
+        .ascii_serialization();
+    assert!(
+        csp.contains(&format!("form-action 'self' {redirect_origin};")),
+        "{csp}"
+    );
     let page = LoginPage::from_response(response).await;
     let html = &page.html;
     let nonce = csp
