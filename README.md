@@ -79,7 +79,7 @@ issuing the code, recording the transaction and building the redirect.
 | Module | For | What it does |
 | --- | --- | --- |
 | `technical` (default) | Development, debugging, testing relying parties | No sign-in. Shows the request, lets you pick a customer and an outcome, and lets you edit the ID token claims before they are issued. |
-| `login` | The basis for a real end-user flow | Username and password sign-in with per-claim consent, described under [Consent](#consent). |
+| `login` | Showing an end user's flow | An oxID-branded login page, then a consent page that shows each claim and the value to be shared, described under [Consent](#consent). |
 
 > The `technical` module has no authentication: anyone who can reach the
 > authorization endpoint can act as any customer and change what is asserted
@@ -126,15 +126,47 @@ variant to `experience::Kind`, and construct it in `experience::build`.
 
 ### Consent
 
-This describes the `login` module. The sign-in page lists every claim that would be released. Claims requested
-with `"essential": true` are marked as required and have no checkbox; the only
-way to refuse them is to cancel the request. Every other claim, including those
-implied by a scope, has a checkbox that starts ticked, and the user can untick
-any of them before continuing.
+This describes the `login` module, which has two pages.
+
+The **login page** names the client and says that it is asking for
+information to be shared. It shows nothing about what was requested or why:
+that is only for the signed-in user.
+
+The **consent page** follows a successful login. It shows which client is
+asking, the purpose it gave, and every claim that would be released together
+with the value that would be shared. Claims requested with
+`"essential": true` are listed as required and have no switch; the only way to
+refuse them is to cancel the request. Every other claim, including those
+implied by a scope, has a switch that starts off, so the user has to choose to
+share it. "Turn all on" switches on every one of them at once.
+
+Signing in is remembered for that request only, and is tied to a cookie in
+the browser that signed in, so knowing the `request_uri` is not enough to
+consent on someone's behalf.
 
 The choice is stored with the grant, so a declined claim is left out of the ID
 token, of UserInfo, and of tokens issued later by refresh. The client receives
 no error for a declined claim; it is simply absent.
+
+### Sessions and timeouts
+
+Two limits apply at the authorization endpoint, both under `[security]`:
+
+| Setting | Default | Limits |
+| --- | --- | --- |
+| `request_uri_ttl` | 90 s | How long the browser may take to *arrive* with the `request_uri` (RFC 9126). After that the request is refused with an error page. |
+| `session_ttl` | 300 s | How long the user then has to sign in, read and decide. Starts when the browser first arrives. |
+
+Arriving in time starts the user's session, and from then on the
+`request_uri` lifetime no longer matters: someone reading the consent page is
+not cut off by it. Reloading the page does not extend the session. This
+applies to every experience module.
+
+When the session runs out, the page is replaced by one saying so, with a
+button back to the client. That goes by the normal error redirect, with
+`error=access_denied` and an `error_description` that starts with
+`session timeout`. The request is kept for an hour after the session ends so
+that this still works; after that only an error page is shown.
 
 ### Purpose
 
@@ -143,7 +175,7 @@ request that breaks this fails with `error=invalid_request` and
 `error_description=invalid_purpose`. Because requests arrive only through PAR,
 the client receives that error from the PAR endpoint.
 
-The purpose is shown, HTML-escaped, on the sign-in and consent page. Each
+The purpose is shown, HTML-escaped, on the consent page. Each
 decided transaction is recorded with its `txn`, client, user, purpose, the
 claims shared, the claims declined and the outcome, and is written to the log. The records are
 held in memory (the most recent 10,000) and there is no consent history page
@@ -160,7 +192,7 @@ one and is advertised through `mtls_endpoint_aliases`.
 | `/.well-known/openid-configuration` | Provider metadata (also at `/.well-known/oauth-authorization-server`) |
 | `/jwks` | The provider's public signing keys |
 | `/par` | Pushed authorization request endpoint |
-| `/authorize` | Authorization endpoint: sign-in and consent page |
+| `/authorize` | Authorization endpoint: login and consent pages |
 | `/token` | Token endpoint |
 | `/userinfo` | UserInfo endpoint |
 | `/healthz` | Liveness check |

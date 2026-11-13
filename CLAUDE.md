@@ -62,11 +62,19 @@ mise run build        # check + release build + conformance
   `id_token.rs` and `subject.rs` (pairwise subjects).
 - `src/experience/` holds the pluggable UI at the authorization endpoint (the
   `Experience` trait, a state machine over HTML forms):
-  - `login`: username and password, then per-claim consent.
+  - `login`: the end-user demonstration, branded as oxID. A login page
+    (which shows nothing about the request), then a consent page listing
+    each claim with the value to be shared. Voluntary claims start off.
   - `technical`: pick a predefined customer and edit the ID token, with **no
     authentication**. It is the default. Anyone who can reach the
     authorization endpoint can act as any customer, and the server logs a
     warning saying so at startup. Keep that warning and the README caveat.
+
+  The endpoint (`http/authorize.rs`), not the experience, owns the page
+  shell and the user's session: `request_uri_ttl` only limits how long the
+  browser may take to arrive, then `session_ttl` (5 minutes) applies. An
+  expired session gets its own page, with a way back to the client
+  (`access_denied`).
 
   To add an experience, implement the trait, add a `Kind` variant, and
   construct it in `build`.
@@ -107,7 +115,7 @@ mise run build        # check + release build + conformance
 
 ## Known gaps
 
-There is no user registration, sessions, dynamic client registration or
+There is no user registration, single sign-on across requests, dynamic client registration or
 client/JWKS refresh while running, and the VC module is not built. Not yet
 tested: a full authorization flow on Lambda, API Gateway's TLS policy
 against the FAPI checks, and registry client sync on Lambda. This repository

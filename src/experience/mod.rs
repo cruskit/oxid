@@ -6,6 +6,10 @@
 //! varies is the interaction in between: how the user is identified, what
 //! they are shown and what they decide. That part is an [`Experience`].
 //!
+//! The endpoint also owns the user's session: the time they have, once their
+//! browser has arrived, to get through the experience. When it runs out the
+//! endpoint shows the expiry page itself, whatever the experience.
+//!
 //! An experience is a state machine over HTML forms. The endpoint calls
 //! [`Experience::start`] when the browser arrives and [`Experience::submit`]
 //! for every form post, until a submission produces a final
@@ -29,7 +33,7 @@ use crate::client::Client;
 use crate::error::ErrorCode;
 use crate::id_token::ClaimEdits;
 use crate::state::AppState;
-use crate::store::PushedRequest;
+use crate::store::{PushedRequest, Session};
 use crate::user::UserStore;
 use crate::util::html_escape;
 
@@ -99,6 +103,9 @@ pub struct Interaction<'a> {
     pub request_uri: &'a str,
     /// The pushed request, including the request object as it was received.
     pub pushed: &'a PushedRequest,
+    /// The user's session for this request: how long they have left, and
+    /// whether they have signed in.
+    pub session: &'a Session,
     /// CSRF token to embed in forms; [`Interaction::form_open`] does this.
     pub csrf: &'a str,
     /// The browser's request headers, for reading cookies.
@@ -118,17 +125,34 @@ impl Interaction<'_> {
     /// An opening `<form>` tag that posts back to this experience, with the
     /// hidden fields the endpoint needs to route and verify the submission.
     pub fn form_open(&self) -> String {
-        format!(
-            "<form method=\"post\" action=\"{action}\">\
-             <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
-             <input type=\"hidden\" name=\"client_id\" value=\"{client_id}\">\
-             <input type=\"hidden\" name=\"request_uri\" value=\"{request_uri}\">",
-            action = crate::http::PATH_DECISION,
-            csrf = html_escape(self.csrf),
-            client_id = html_escape(&self.client.id),
-            request_uri = html_escape(self.request_uri),
-        )
+        form_open(self.csrf, &self.client.id, self.request_uri)
     }
+}
+
+/// An opening `<form>` tag that posts to the decision endpoint with the
+/// hidden fields it needs to route and verify the submission.
+pub fn form_open(csrf: &str, client_id: &str, request_uri: &str) -> String {
+    format!(
+        "<form method=\"post\" action=\"{action}\">\
+         <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+         <input type=\"hidden\" name=\"client_id\" value=\"{client_id}\">\
+         <input type=\"hidden\" name=\"request_uri\" value=\"{request_uri}\">",
+        action = crate::http::PATH_DECISION,
+        csrf = html_escape(csrf),
+        client_id = html_escape(client_id),
+        request_uri = html_escape(request_uri),
+    )
+}
+
+/// A length of time in words, for telling the user how long they have.
+pub fn duration_text(seconds: i64) -> String {
+    let (count, unit) = if seconds % 60 == 0 {
+        (seconds / 60, "minute")
+    } else {
+        (seconds, "second")
+    };
+    let plural = if count == 1 { "" } else { "s" };
+    format!("{count} {unit}{plural}")
 }
 
 /// The value of the cookie `name` in a request's headers.
@@ -164,6 +188,9 @@ pub struct Page {
     /// JavaScript for this page, if it has any. It is served inline under a
     /// per-response nonce; nothing else on the page can run script.
     pub script: Option<&'static str>,
+    /// Use the full width of the window instead of the narrow card that
+    /// suits pages for end users.
+    pub wide: bool,
 }
 
 /// The user's approval of a request.
@@ -273,6 +300,13 @@ mod tests {
         assert_eq!(cookie(&headers, "__Host-oxid-csrf"), Some("tok"));
         assert_eq!(cookie(&headers, "a"), Some("1"));
         assert_eq!(cookie(&headers, "missing"), None);
+    }
+
+    #[test]
+    fn durations_read_naturally() {
+        assert_eq!(duration_text(300), "5 minutes");
+        assert_eq!(duration_text(60), "1 minute");
+        assert_eq!(duration_text(90), "90 seconds");
     }
 
     #[test]

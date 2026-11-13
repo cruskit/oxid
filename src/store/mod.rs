@@ -41,6 +41,14 @@ pub const REQUEST_URI_PREFIX: &str = "urn:ietf:params:oauth:request_uri:";
 /// Failed password attempts allowed against one pushed request.
 pub const MAX_FAILED_LOGINS: u32 = 5;
 
+/// How long an expired session is remembered, so that the user can still be
+/// told what happened and be sent back to the client with an error.
+pub const EXPIRED_SESSION_RETENTION: i64 = 60 * 60;
+
+/// How long a user has to finish once they arrive, when nothing else is
+/// configured (`security.session_ttl`).
+pub const DEFAULT_SESSION_TTL: i64 = 300;
+
 /// Consent records kept before the oldest are dropped.
 pub const MAX_CONSENT_RECORDS: usize = 10_000;
 
@@ -50,10 +58,52 @@ pub struct PushedRequest {
     pub request: AuthorizationRequest,
     /// The signed request object exactly as the client sent it.
     pub request_object: String,
+    /// When the `request_uri` stops being accepted from a browser that has
+    /// not yet arrived (RFC 9126 §2.2 `expires_in`).
     pub expires_at: i64,
     /// Kept by the backend as the record's counter, not in the stored value.
     #[serde(skip)]
     pub failed_logins: u32,
+}
+
+/// A user's visit to the authorization endpoint for one pushed request.
+///
+/// It starts when the browser first presents a `request_uri` that is still
+/// valid, and from then on it, not the `request_uri` lifetime, limits how
+/// long the user has to sign in and decide.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Session {
+    pub expires_at: i64,
+    /// Set once the user has signed in during this session.
+    #[serde(default)]
+    pub signed_in: Option<SignedIn>,
+}
+
+/// Who signed in during a [`Session`], and from which browser.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedIn {
+    /// The user's internal subject.
+    pub user_subject: String,
+    /// SHA-256 digest of the secret held in that browser's cookie. Signing
+    /// in does not authorise anyone else who knows the `request_uri`.
+    pub browser: String,
+}
+
+impl SignedIn {
+    /// Whether `secret` is the one given to the browser that signed in.
+    pub fn is_browser(&self, secret: &str) -> bool {
+        crate::util::ct_eq(&self.browser, digest(secret))
+    }
+}
+
+/// A pushed request as found for a browser at the authorization endpoint.
+#[derive(Debug, Clone)]
+pub enum Visit {
+    /// The user is within their session.
+    Active(Box<PushedRequest>, Session),
+    /// The user arrived in time but then took too long. The request is kept
+    /// only so that they can be returned to the client with an error.
+    Expired(Box<PushedRequest>),
 }
 
 /// What the user authorised. Shared by the code and every token derived from
@@ -245,6 +295,8 @@ pub struct Store {
     /// The longest any token of a grant can outlive the grant's code. A
     /// revocation is remembered for this long.
     grant_lifetime: i64,
+    /// How long a user has at the authorization endpoint once they arrive.
+    session_ttl: i64,
 }
 
 impl Default for Store {
@@ -267,6 +319,10 @@ fn decode<T: DeserializeOwned>(value: &str) -> StoreResult<T> {
 
 fn request_key(request_uri: &str) -> String {
     format!("par#{}", digest(request_uri))
+}
+
+fn session_key(request_uri: &str) -> String {
+    format!("session#{}", digest(request_uri))
 }
 
 fn code_key(code: &str) -> String {
@@ -298,7 +354,16 @@ impl Store {
         Self {
             backend,
             grant_lifetime: DEFAULT_GRANT_LIFETIME,
+            session_ttl: DEFAULT_SESSION_TTL,
         }
+    }
+
+    /// Set how long a user has at the authorization endpoint once they
+    /// arrive with a valid `request_uri`.
+    #[must_use]
+    pub fn session_ttl(mut self, seconds: i64) -> Self {
+        self.session_ttl = seconds;
+        self
     }
 
     /// Set how long a revoked grant is remembered: at least as long as its
@@ -323,8 +388,12 @@ impl Store {
             expires_at,
             failed_logins: 0,
         };
+        // The record outlives the `request_uri`: a session that starts just
+        // before it expires still needs the request, and so does telling the
+        // user afterwards that their session ran out.
+        let kept_until = expires_at + self.session_ttl + EXPIRED_SESSION_RETENTION;
         self.backend
-            .put(&request_key(&uri), encode(&pushed)?, Some(expires_at))
+            .put(&request_key(&uri), encode(&pushed)?, Some(kept_until))
             .await?;
         Ok(uri)
     }
@@ -338,9 +407,8 @@ impl Store {
         Ok(Some(pushed))
     }
 
-    /// Look at a pushed request without consuming it. A `request_uri` stays
-    /// usable until the user completes authorization, so that reloading the
-    /// login page works (FAPI 2.0 §5.3.2.2 note 3).
+    /// Look at a pushed request without consuming it, whether or not its
+    /// `request_uri` is still accepted from a new browser.
     pub async fn peek_request(
         &self,
         request_uri: &str,
@@ -349,8 +417,109 @@ impl Store {
         Self::pushed(self.backend.get(&request_key(request_uri)).await?, now)
     }
 
-    /// Consume a pushed request. Returns `None` if it is unknown, expired or
-    /// already consumed, which is what makes a `request_uri` one-time use.
+    async fn session(&self, request_uri: &str) -> StoreResult<Option<Session>> {
+        self.backend
+            .get(&session_key(request_uri))
+            .await?
+            .map(|record| decode(&record.value))
+            .transpose()
+    }
+
+    fn visit(pushed: PushedRequest, session: Session, now: i64) -> Visit {
+        if session.expires_at > now {
+            Visit::Active(Box::new(pushed), session)
+        } else {
+            Visit::Expired(Box::new(pushed))
+        }
+    }
+
+    /// The browser has arrived at the authorization endpoint.
+    ///
+    /// The first arrival must be before the `request_uri` expires (RFC 9126
+    /// §2.2, FAPI 2.0 §5.3.2.2-11), and starts the user's session. After
+    /// that the session alone decides how long they have, so someone reading
+    /// the consent page is not cut off by the short `request_uri` lifetime.
+    /// The request is not consumed: a reload works (§5.3.2.2 note 3) and
+    /// continues the same session.
+    ///
+    /// Returns `None` if the request is unknown, already used, or expired
+    /// before any browser arrived.
+    pub async fn arrive(&self, request_uri: &str, now: i64) -> StoreResult<Option<Visit>> {
+        let Some(pushed) = self.peek_request(request_uri, now).await? else {
+            return Ok(None);
+        };
+        if let Some(session) = self.session(request_uri).await? {
+            return Ok(Some(Self::visit(pushed, session, now)));
+        }
+        if pushed.expires_at <= now {
+            return Ok(None);
+        }
+        let session = Session {
+            expires_at: now + self.session_ttl,
+            signed_in: None,
+        };
+        let started = self
+            .backend
+            .put_new(
+                &session_key(request_uri),
+                encode(&session)?,
+                Some(session.expires_at + EXPIRED_SESSION_RETENTION),
+                now,
+            )
+            .await?;
+        if started {
+            return Ok(Some(Visit::Active(Box::new(pushed), session)));
+        }
+        // Another request for the same `request_uri` started it first.
+        Ok(self
+            .session(request_uri)
+            .await?
+            .map(|session| Self::visit(pushed, session, now)))
+    }
+
+    /// The pushed request and session for a form submission. Unlike
+    /// [`Store::arrive`] this never starts a session: a form can only come
+    /// from a page that was shown within one.
+    pub async fn resume(&self, request_uri: &str, now: i64) -> StoreResult<Option<Visit>> {
+        let Some(pushed) = self.peek_request(request_uri, now).await? else {
+            return Ok(None);
+        };
+        Ok(self
+            .session(request_uri)
+            .await?
+            .map(|session| Self::visit(pushed, session, now)))
+    }
+
+    /// Record that `user_subject` signed in during `session`, from the
+    /// browser holding `browser_secret`. Returns the updated session.
+    pub async fn sign_in(
+        &self,
+        request_uri: &str,
+        session: &Session,
+        user_subject: &str,
+        browser_secret: &str,
+    ) -> StoreResult<Session> {
+        let session = Session {
+            expires_at: session.expires_at,
+            signed_in: Some(SignedIn {
+                user_subject: user_subject.to_owned(),
+                browser: digest(browser_secret),
+            }),
+        };
+        self.backend
+            .put(
+                &session_key(request_uri),
+                encode(&session)?,
+                Some(session.expires_at + EXPIRED_SESSION_RETENTION),
+            )
+            .await?;
+        Ok(session)
+    }
+
+    /// Consume a pushed request. Returns `None` if it is unknown or already
+    /// consumed, which is what makes a `request_uri` one-time use. Whether
+    /// the user was still in time is for the caller to have checked, with
+    /// [`Store::arrive`] or [`Store::resume`].
     pub async fn take_request(
         &self,
         request_uri: &str,
@@ -691,10 +860,9 @@ pub(crate) mod contract {
         assert!(store.take_request(&a, NOW).await.unwrap().is_none());
         assert!(store.peek_request(&a, NOW).await.unwrap().is_none());
 
-        // Expiry.
-        assert!(store.peek_request(&b, NOW + 59).await.unwrap().is_some());
-        assert!(store.peek_request(&b, NOW + 60).await.unwrap().is_none());
-        assert!(store.take_request(&b, NOW + 60).await.unwrap().is_none());
+        // A browser must arrive before the request_uri expires.
+        assert!(store.arrive(&b, NOW + 60).await.unwrap().is_none());
+        assert!(store.resume(&b, NOW).await.unwrap().is_none(), "no session");
         assert!(
             store
                 .peek_request("urn:ietf:params:oauth:request_uri:unknown", NOW)
@@ -702,6 +870,75 @@ pub(crate) mod contract {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    /// Arriving in time starts a session, which then outlives the
+    /// `request_uri` and is what the user is held to.
+    pub async fn sessions(store: &Store) {
+        let ttl = DEFAULT_SESSION_TTL;
+        let uri = store
+            .push_request(request(), String::new(), NOW + 60)
+            .await
+            .unwrap();
+        let arrived = NOW + 59;
+        let Some(Visit::Active(_, session)) = store.arrive(&uri, arrived).await.unwrap() else {
+            panic!("arriving in time starts a session");
+        };
+        assert_eq!(session.expires_at, arrived + ttl);
+        assert_eq!(session.signed_in, None);
+
+        // Past the request_uri lifetime, the same session carries on, and
+        // arriving again does not extend it.
+        let later = arrived + ttl - 1;
+        for visit in [
+            store.arrive(&uri, later).await.unwrap(),
+            store.resume(&uri, later).await.unwrap(),
+        ] {
+            let Some(Visit::Active(pushed, again)) = visit else {
+                panic!("the session is still running");
+            };
+            assert_eq!(again, session);
+            assert_eq!(pushed.request, request());
+        }
+
+        let session = store
+            .sign_in(&uri, &session, "u1", "browser-secret")
+            .await
+            .unwrap();
+        let Some(Visit::Active(_, read)) = store.resume(&uri, later).await.unwrap() else {
+            panic!("signing in keeps the session");
+        };
+        assert_eq!(read, session);
+        let signed_in = read.signed_in.unwrap();
+        assert_eq!(signed_in.user_subject, "u1");
+        assert!(signed_in.is_browser("browser-secret"));
+        assert!(!signed_in.is_browser("another"));
+        assert_ne!(signed_in.browser, "browser-secret", "only a digest is kept");
+
+        // Once the session ends the request is kept, to explain and to
+        // return an error to the client, but only for a while.
+        for at in [arrived + ttl, arrived + ttl + EXPIRED_SESSION_RETENTION - 1] {
+            assert!(matches!(
+                store.arrive(&uri, at).await.unwrap(),
+                Some(Visit::Expired(_))
+            ));
+            assert!(matches!(
+                store.resume(&uri, at).await.unwrap(),
+                Some(Visit::Expired(_))
+            ));
+        }
+        let gone = NOW + 60 + ttl + EXPIRED_SESSION_RETENTION;
+        assert!(store.arrive(&uri, gone).await.unwrap().is_none());
+
+        // A used request has no session to come back to.
+        let uri = store
+            .push_request(request(), String::new(), NOW + 60)
+            .await
+            .unwrap();
+        assert!(store.arrive(&uri, NOW).await.unwrap().is_some());
+        assert!(store.take_request(&uri, NOW).await.unwrap().is_some());
+        assert!(store.arrive(&uri, NOW).await.unwrap().is_none());
+        assert!(store.resume(&uri, NOW).await.unwrap().is_none());
     }
 
     pub async fn failed_logins(store: &Store) {
@@ -916,6 +1153,7 @@ pub(crate) mod contract {
         consent_history(store, tag).await;
         secrets(store, tag).await;
         pushed_requests(store).await;
+        sessions(store).await;
         failed_logins(store).await;
         code_replay(store).await;
         code_binding(store).await;
@@ -980,8 +1218,14 @@ mod tests {
         assert_eq!(backend.len(), 5);
 
         store.purge(NOW + 50).await.unwrap();
-        assert_eq!(backend.len(), 3, "short-lived request and jti are gone");
-        store.purge(NOW + 1000).await.unwrap();
+        assert_eq!(backend.len(), 4, "the jti is gone");
+        // Requests are kept past their request_uri, for sessions.
+        store
+            .purge(NOW + 10 + DEFAULT_SESSION_TTL + EXPIRED_SESSION_RETENTION)
+            .await
+            .unwrap();
+        assert_eq!(backend.len(), 1, "only the longer-lived request is left");
+        store.purge(NOW + 10_000).await.unwrap();
         assert!(backend.is_empty());
     }
 

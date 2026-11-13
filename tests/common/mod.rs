@@ -246,8 +246,76 @@ impl TestOp {
         LoginPage::from_response(response).await
     }
 
-    /// Submit the login form as a browser would, with every offered claim
-    /// left ticked.
+    /// Post a form to the decision endpoint from the browser showing `page`.
+    pub async fn post_form(
+        &self,
+        page: &LoginPage,
+        request_uri: &str,
+        fields: &[(&str, &str)],
+    ) -> Response {
+        let mut form: Vec<(&str, &str)> = vec![
+            ("csrf", &page.csrf),
+            ("client_id", CLIENT_ID),
+            ("request_uri", request_uri),
+        ];
+        form.extend_from_slice(fields);
+        self.browser
+            .post(self.url("/authorize/decision"))
+            .header(COOKIE, &page.cookie)
+            .form(&form)
+            .send()
+            .await
+            .unwrap()
+    }
+
+    /// Submit the login form. On success the response is the consent page.
+    pub async fn sign_in(
+        &self,
+        page: &LoginPage,
+        request_uri: &str,
+        username: &str,
+        password: &str,
+    ) -> Response {
+        let fields = [
+            ("username", username),
+            ("password", password),
+            ("action", "sign-in"),
+        ];
+        self.post_form(page, request_uri, &fields).await
+    }
+
+    /// Sign in as the demo user and return the consent page.
+    pub async fn open_consent(&self, request_uri: &str) -> LoginPage {
+        let page = self.open_login(request_uri).await;
+        let response = self
+            .sign_in(&page, request_uri, DEMO_USERNAME, DEMO_PASSWORD)
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        page.followed_by(response).await
+    }
+
+    /// Submit the consent page, sharing every voluntary claim except the
+    /// `declined` ones.
+    pub async fn consent(
+        &self,
+        consent: &LoginPage,
+        request_uri: &str,
+        action: &str,
+        declined: &[&str],
+    ) -> Response {
+        let share: Vec<String> = consent
+            .offered()
+            .into_iter()
+            .filter(|field| !declined.iter().any(|d| *field == format!("share_{d}")))
+            .collect();
+        let mut fields = vec![("action", action)];
+        fields.extend(share.iter().map(|field| (field.as_str(), "1")));
+        self.post_form(consent, request_uri, &fields).await
+    }
+
+    /// Go through the experience as a browser would, from the login page:
+    /// cancel there (`deny`), or sign in and then share every claim offered
+    /// (`approve`). If signing in fails, that response is returned.
     pub async fn decide(
         &self,
         page: &LoginPage,
@@ -260,7 +328,7 @@ impl TestOp {
             .await
     }
 
-    /// As [`Self::decide`], but unticking the checkboxes of `declined` claims.
+    /// As [`Self::decide`], but leaving the `declined` claims turned off.
     pub async fn decide_declining(
         &self,
         page: &LoginPage,
@@ -270,27 +338,22 @@ impl TestOp {
         action: &str,
         declined: &[&str],
     ) -> Response {
-        let mut form = vec![
-            ("csrf".to_owned(), page.csrf.clone()),
-            ("client_id".to_owned(), CLIENT_ID.to_owned()),
-            ("request_uri".to_owned(), request_uri.to_owned()),
-            ("username".to_owned(), username.to_owned()),
-            ("password".to_owned(), password.to_owned()),
-            ("action".to_owned(), action.to_owned()),
-        ];
-        form.extend(
-            page.ticked()
-                .into_iter()
-                .filter(|field| !declined.iter().any(|d| *field == format!("share_{d}")))
-                .map(|field| (field, "1".to_owned())),
-        );
-        self.browser
-            .post(self.url("/authorize/decision"))
-            .header(COOKIE, &page.cookie)
-            .form(&form)
-            .send()
-            .await
-            .unwrap()
+        if action == "deny" {
+            return self
+                .post_form(page, request_uri, &[("action", "deny")])
+                .await;
+        }
+        let response = self.sign_in(page, request_uri, username, password).await;
+        let signed_in = response
+            .headers()
+            .get_all(SET_COOKIE)
+            .iter()
+            .any(|cookie| cookie.as_bytes().starts_with(b"__Host-oxid-login="));
+        if !signed_in {
+            return response;
+        }
+        let consent = page.followed_by(response).await;
+        self.consent(&consent, request_uri, action, declined).await
     }
 
     /// Complete the browser leg as the demo user; returns the redirect's
@@ -354,7 +417,7 @@ impl TestOp {
     }
 }
 
-/// The login form as a browser sees it.
+/// A page of an experience as a browser sees it, with the cookies it holds.
 #[derive(Debug)]
 pub struct LoginPage {
     pub csrf: String,
@@ -364,39 +427,72 @@ pub struct LoginPage {
 }
 
 impl LoginPage {
-    /// Field names of the ticked consent checkboxes.
-    pub fn ticked(&self) -> Vec<String> {
+    fn checkboxes(&self, only_ticked: bool) -> Vec<String> {
         self.html
             .split("<input type=\"checkbox\"")
             .skip(1)
             .filter_map(|rest| {
                 let tag = rest.split('>').next()?;
                 let name = tag.split("name=\"").nth(1)?.split('"').next()?;
-                tag.contains(" checked").then(|| name.to_owned())
+                (!only_ticked || tag.contains(" checked")).then(|| name.to_owned())
             })
             .collect()
     }
 
+    /// Field names of the consent checkboxes: the voluntary claims.
+    pub fn offered(&self) -> Vec<String> {
+        self.checkboxes(false)
+    }
+
+    /// Field names of the consent checkboxes that start ticked.
+    pub fn ticked(&self) -> Vec<String> {
+        self.checkboxes(true)
+    }
+
     pub async fn from_response(response: Response) -> Self {
-        let cookie = response
-            .headers()
-            .get(SET_COOKIE)
-            .expect("login page sets the CSRF cookie")
-            .to_str()
-            .unwrap()
-            .split(';')
-            .next()
-            .unwrap()
-            .to_owned();
+        let cookie = cookies(&response);
+        assert!(!cookie.is_empty(), "the page sets the CSRF cookie");
+        Self::read(response, cookie).await
+    }
+
+    /// The page this browser is shown in `response`, keeping the cookies it
+    /// already has and adding any that are set.
+    pub async fn followed_by(&self, response: Response) -> Self {
+        let mut cookie = self.cookie.clone();
+        for new in cookies(&response).split("; ") {
+            let name = new.split('=').next().unwrap_or_default();
+            if !cookie
+                .split("; ")
+                .any(|old| old.split('=').next() == Some(name))
+            {
+                cookie = format!("{cookie}; {new}");
+            }
+        }
+        Self::read(response, cookie).await
+    }
+
+    async fn read(response: Response, cookie: String) -> Self {
         let html = response.text().await.unwrap();
         let csrf = html
             .split("name=\"csrf\" value=\"")
             .nth(1)
             .and_then(|rest| rest.split('"').next())
-            .expect("login page contains the CSRF field")
+            .expect("the page contains the CSRF field")
             .to_owned();
         Self { csrf, cookie, html }
     }
+}
+
+/// `name=value` pairs set by a response, joined for a `Cookie` header.
+fn cookies(response: &Response) -> String {
+    response
+        .headers()
+        .get_all(SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .filter_map(|value| value.split(';').next())
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// The query parameters of a 303 redirect back to the relying party.

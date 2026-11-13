@@ -694,6 +694,7 @@ impl Technical {
             body,
             style: STYLE,
             script: Some(SCRIPT),
+            wide: true,
         }
     }
 }

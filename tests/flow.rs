@@ -234,15 +234,13 @@ async fn clients_receive_only_the_claims_they_are_provisioned_for() {
         .await;
 
     // The consent page offers only what will be shared.
-    let page = op.open_login(&request_uri).await;
+    let page = op.open_consent(&request_uri).await;
     assert!(page.html.contains("data-claim=\"given_name\""));
     assert!(page.html.contains("data-claim=\"beneficiary_account_au\""));
     assert!(!page.html.contains("data-claim=\"email\""));
     assert!(!page.html.contains("data-claim=\"over65\""));
 
-    let response = op
-        .decide(&page, &request_uri, DEMO_USERNAME, DEMO_PASSWORD, "approve")
-        .await;
+    let response = op.consent(&page, &request_uri, "approve", &[]).await;
     let params = redirect_params(&response);
     let tokens: Value = op
         .exchange(&params["code"], &pkce)
@@ -387,10 +385,21 @@ async fn users_choose_which_voluntary_claims_to_share() {
         )
         .await;
 
-    let page = op.open_login(&request_uri).await;
-    // Voluntary claims are ticked checkboxes; essential ones have none.
+    // Nothing about the request is shown before the user signs in.
+    let login = op.open_login(&request_uri).await;
+    assert!(!login.html.contains("data-claim") && !login.html.contains("share_"));
+
+    let page = op.open_consent(&request_uri).await;
+    // Voluntary claims are checkboxes, off until chosen; essential ones
+    // have none. Each claim is shown with the value to be shared.
+    assert_eq!(page.ticked(), Vec::<String>::new());
+    assert!(
+        page.html
+            .contains("id=\"value-email\">alex.citizen@example.com<")
+    );
+    assert!(page.html.contains("id=\"value-given_name\">Alex<"));
     assert_eq!(
-        page.ticked(),
+        page.offered(),
         [
             "share_beneficiary_account_au",
             "share_email",
@@ -408,11 +417,9 @@ async fn users_choose_which_voluntary_claims_to_share() {
     );
 
     let response = op
-        .decide_declining(
+        .consent(
             &page,
             &request_uri,
-            DEMO_USERNAME,
-            DEMO_PASSWORD,
             "approve",
             &["email", "beneficiary_account_au"],
         )
@@ -499,7 +506,7 @@ async fn purpose_is_shown_escaped_and_recorded_with_the_transaction() {
             }),
         )
         .await;
-    let page = op.open_login(&request_uri).await;
+    let page = op.open_consent(&request_uri).await;
     assert!(
         page.html
             .contains("Confirm you are over 18 for &lt;Bottle &amp; Co&gt; — order #4521"),
@@ -508,9 +515,7 @@ async fn purpose_is_shown_escaped_and_recorded_with_the_transaction() {
     );
     assert!(!page.html.contains("<Bottle"));
 
-    let response = op
-        .decide(&page, &request_uri, DEMO_USERNAME, DEMO_PASSWORD, "approve")
-        .await;
+    let response = op.consent(&page, &request_uri, "approve", &[]).await;
     let params = redirect_params(&response);
     let tokens: Value = op
         .exchange(&params["code"], &pkce)
