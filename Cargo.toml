@@ -10,12 +10,16 @@ publish = false
 [dependencies]
 anyhow = "1"
 argon2 = "0.6"
+askama = "0.16"
 aws-lc-rs = "1"
 axum = { version = "0.8", features = ["http2"] }
 base64 = "0.23"
 clap = { version = "4", features = ["derive", "env"] }
 hyper = { version = "1", features = ["server", "http1", "http2"] }
-hyper-util = { version = "0.1", features = ["server-auto", "server-graceful", "service", "tokio", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["server-graceful", "service", "tokio", "http1", "http2"] }
+# Time zones for age calculations, with the database compiled in (Lambda
+# has no tzdata).
+jiff = { version = "0.2.44", default-features = false, features = ["std", "tzdb-bundle-always"] }
 jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs", "use_pem"] }
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "form", "http2"] }
@@ -37,8 +41,6 @@ uuid = { version = "1", features = ["v4"] }
 aws-config = { version = "1", optional = true, default-features = false, features = ["rt-tokio", "default-https-client", "credentials-process", "sso"] }
 aws-sdk-dynamodb = { version = "1", optional = true, default-features = false, features = ["rt-tokio", "default-https-client"] }
 lambda_http = { version = "1", optional = true, default-features = false, features = ["apigw_http"] }
-askama = "0.16"
-jiff = { version = "0.2.44", default-features = false, features = ["std", "tzdb-bundle-always"] }
 
 [features]
 # Amazon DynamoDB as the store, and the `oxid-lambda` binary for AWS Lambda.
@@ -62,7 +64,6 @@ oxid = { path = ".", features = ["test-util"] }
 scraper = "0.29"
 # Paused time, for testing the `ci` experience's wait without waiting.
 tokio = { version = "1", features = ["test-util"] }
-toml = "1"
 
 [lints.rust]
 unsafe_code = "forbid"

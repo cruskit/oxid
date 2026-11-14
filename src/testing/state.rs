@@ -30,7 +30,7 @@ impl UserStore for SharedUsers {
         demo_store().find_by_subject(subject)
     }
 
-    fn list(&self) -> Vec<Arc<crate::user::User>> {
+    fn list(&self) -> &[Arc<crate::user::User>] {
         demo_store().list()
     }
 }

@@ -179,8 +179,9 @@ fn find_user(state: &AppState, name: &str) -> Option<std::sync::Arc<User>> {
     state
         .users
         .list()
-        .into_iter()
+        .iter()
         .find(|user| user.username == name || user.subject == name)
+        .cloned()
 }
 
 fn success(

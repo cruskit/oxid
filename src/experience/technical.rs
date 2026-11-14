@@ -173,10 +173,7 @@ impl Technical {
     }
 
     fn customer(&self, subject: &str) -> Option<Arc<User>> {
-        self.users
-            .list()
-            .into_iter()
-            .find(|user| user.subject == subject)
+        self.users.find_by_subject(subject)
     }
 
     /// The customer used on the last flow, if the browser's cookie names one
@@ -185,8 +182,9 @@ impl Technical {
         let remembered = interaction.cookie(CUSTOMER_COOKIE)?;
         self.users
             .list()
-            .into_iter()
+            .iter()
             .find(|user| cookie_value(user) == remembered)
+            .cloned()
     }
 
     fn handle(&self, interaction: &Interaction<'_>, form: &Form) -> Step {
@@ -304,10 +302,12 @@ impl Technical {
         let request = interaction.request();
         let users = self.users.list();
         let remembered = self.remembered(interaction);
-        let selected = view
+        let chosen = view
             .customer
             .as_deref()
-            .and_then(|subject| users.iter().find(|user| user.subject == subject))
+            .and_then(|subject| self.users.find_by_subject(subject));
+        let selected = chosen
+            .as_ref()
             .or(remembered.as_ref())
             .or_else(|| users.first());
         let selected_subject = selected.map(|user| user.subject.as_str());

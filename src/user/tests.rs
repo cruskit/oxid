@@ -1,3 +1,5 @@
+use serde_json::json;
+
 use super::*;
 use crate::testing::demo_store;
 
@@ -46,7 +48,7 @@ fn built_in_customers_cover_different_situations() {
     let users = demo_store().list();
     let usernames: Vec<&str> = users.iter().map(|u| u.username.as_str()).collect();
     assert_eq!(usernames, [DEMO_USERNAME, "riley", "margaret", "sam"]);
-    for user in &users {
+    for user in users {
         assert!(
             demo_store()
                 .authenticate(&user.username, DEMO_PASSWORD)
@@ -120,20 +122,18 @@ fn store_rejects_duplicates() {
 
 #[test]
 fn precomputed_hashes_match_the_current_parameters() {
-    // If the argon2 defaults change, regenerate both constants with
-    // `oxid hash-password` so the decoy costs what a real check costs.
+    // If the argon2 defaults change, regenerate DECOY_HASH and the hash in
+    // demo_users.toml with `oxid hash-password`, so the decoy costs what a
+    // real check costs.
     // Algorithm, version and parameters: everything before the salt.
     let settings = |hash: &str| hash.split('$').take(4).collect::<Vec<_>>().join("$");
     let current = settings(&hash_password("x").unwrap());
-    for constant in [DECOY_HASH, DEMO_PASSWORD_HASH] {
-        assert_eq!(settings(constant), current);
+    assert_eq!(settings(DECOY_HASH), current);
+    for user in demo_users().unwrap() {
+        let hash = user.password_hash.as_ref().unwrap();
+        assert_eq!(settings(hash.expose()), current, "{}", user.username);
+        assert!(user.password_matches(DEMO_PASSWORD), "{}", user.username);
     }
-    let demo = PasswordHash::new(DEMO_PASSWORD_HASH).unwrap();
-    assert!(
-        Argon2::default()
-            .verify_password(DEMO_PASSWORD.as_bytes(), &demo)
-            .is_ok()
-    );
 }
 
 #[test]

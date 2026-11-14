@@ -8,18 +8,19 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow, ensure};
+use anyhow::{Context, Result, anyhow, ensure};
 use argon2::Argon2;
 use argon2::password_hash::phc::PasswordHash;
 use argon2::password_hash::{PasswordHasher, PasswordVerifier};
 use serde::Deserialize;
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 
 use crate::config::UserConfig;
 use crate::util::Secret;
 use jiff::tz::TimeZone;
 
-/// Username of the built-in demo user.
+/// Username of the first built-in demo user (see `demo_users.toml`).
+#[cfg(any(test, feature = "test-util"))]
 #[cfg_attr(
     not(feature = "test-util"),
     expect(unreachable_pub, reason = "the integration tests use it")
@@ -288,10 +289,6 @@ impl User {
 /// [`hash_password`]: precomputed so that a cold start does not pay for it.
 const DECOY_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$TVs5tMgE/FS28BBEu7uI9A$e0EFOYlUFlmAwN2BIP5mQw7FqzrdWnB324v1gBurBM0";
 
-/// [`DEMO_PASSWORD`] hashed with [`hash_password`], precomputed for the
-/// same reason as [`DECOY_HASH`].
-const DEMO_PASSWORD_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$1pD2JL/Druui48zrii3E7A$WfVEWbPUbl1H0N8SBiJz7RupMKJgdRJ6UzfUZ9+EkUk";
-
 /// Hash a password with Argon2id, producing a PHC string for configuration.
 pub fn hash_password(password: &str) -> Result<String> {
     Argon2::default()
@@ -310,7 +307,7 @@ pub(crate) trait UserStore: Send + Sync + Debug {
 
     /// Every user, in a stable order. Used by experiences that let a user be
     /// picked from a list.
-    fn list(&self) -> Vec<Arc<User>>;
+    fn list(&self) -> &[Arc<User>];
 }
 
 /// A fixed set of users held in memory.
@@ -392,146 +389,22 @@ impl UserStore for StaticUserStore {
             .cloned()
     }
 
-    fn list(&self) -> Vec<Arc<User>> {
-        self.ordered.clone()
+    fn list(&self) -> &[Arc<User>] {
+        &self.ordered
     }
 }
 
-/// The built-in customers: fictional people chosen to exercise different
-/// outcomes. All of them sign in with [`DEMO_PASSWORD`].
-///
-/// - `demo`: an adult with every claim, a `PayID` and a BIC.
-/// - `riley`: under 18, with a bank account but no `PayID` or BIC.
-/// - `margaret`: over 65, no middle name, `PayID` by mobile number.
-/// - `sam`: sparse data: no birthdate, phone, address or bank account.
+/// The built-in customers (`demo_users.toml`), loaded through the same
+/// path as configured users.
 fn demo_users() -> Result<Vec<User>> {
-    let hash = DEMO_PASSWORD_HASH.to_owned();
-    let object = |value: Value| match value {
-        Value::Object(map) => map,
-        _ => Map::new(),
-    };
-    let riley = User::new(
-        "demo-user-0002",
-        "riley",
-        Some(hash.clone()),
-        object(json!({
-            "name": "Riley Young",
-            "given_name": "Riley",
-            "family_name": "Young",
-            "email": "riley.young@example.com",
-            "email_verified": true,
-            "birthdate": "2010-06-15",
-            "phone_number": "+61 400 000 002",
-            "phone_number_verified": false,
-            "locale": "en-AU",
-            "address": {
-                "street_address": "2 Sample Avenue",
-                "locality": "Melbourne",
-                "region": "VIC",
-                "postal_code": "3000",
-                "country": "Australia"
-            }
-        })),
-    )?
-    .with_bank_account(BankAccount {
-        beneficiary_name: "Riley Young".to_owned(),
-        bsb: "234567".to_owned(),
-        account_number: "23456789".to_owned(),
-        payid: None,
-        payid_type: None,
-        bic_swift_code: None,
-        account_number_international: None,
-    })?;
-    let margaret = User::new(
-        "demo-user-0003",
-        "margaret",
-        Some(hash.clone()),
-        object(json!({
-            "name": "Margaret Elder",
-            "given_name": "Margaret",
-            "family_name": "Elder",
-            "email": "margaret.elder@example.com",
-            "email_verified": true,
-            "birthdate": "1950-02-03",
-            "phone_number": "+61 400 000 003",
-            "phone_number_verified": true,
-            "locale": "en-AU",
-            "address": {
-                "street_address": "Unit 3\n30 Placeholder Road",
-                "locality": "Brisbane",
-                "region": "QLD",
-                "postal_code": "4000",
-                "country": "Australia"
-            }
-        })),
-    )?
-    .with_bank_account(BankAccount {
-        beneficiary_name: "Margaret Elder".to_owned(),
-        bsb: "345678".to_owned(),
-        account_number: "345678901".to_owned(),
-        payid: Some("0400000003".to_owned()),
-        payid_type: Some(PayIdType::Mobile),
-        bic_swift_code: Some("OXIDAU2S".to_owned()),
-        account_number_international: None,
-    })?;
-    let sam = User::new(
-        "demo-user-0004",
-        "sam",
-        Some(hash.clone()),
-        object(json!({
-            "given_name": "Sam",
-            "family_name": "Lee",
-            "email": "sam.lee@example.com",
-            "email_verified": false
-        })),
-    )?;
-    Ok(vec![demo_user(hash)?, riley, margaret, sam])
-}
-
-/// The first built-in customer: a fictional person carrying every standard
-/// `OpenID` Connect claim, and so every claim the ConnectID profile defines.
-fn demo_user(password_hash: String) -> Result<User> {
-    let Value::Object(claims) = json!({
-        "name": "Alex Jordan Citizen",
-        "nickname": "Al",
-        "preferred_username": "alex",
-        "profile": "https://example.com/people/alex",
-        "picture": "https://example.com/people/alex.jpg",
-        "website": "https://alex.example.com",
-        "email_verified": true,
-        "gender": "non-binary",
-        "zoneinfo": "Australia/Sydney",
-        "locale": "en-AU",
-        "phone_number_verified": true,
-        // 2026-01-01T00:00:00Z
-        "updated_at": 1_767_225_600,
-        "given_name": "Alex",
-        "middle_name": "Jordan",
-        "family_name": "Citizen",
-        "email": "alex.citizen@example.com",
-        "birthdate": "1985-04-12",
-        "phone_number": "+61 400 000 000",
-        "address": {
-            "street_address": "1 Example Street",
-            "locality": "Sydney",
-            "region": "NSW",
-            "postal_code": "2000",
-            "country": "Australia"
-        }
-    }) else {
-        unreachable!("literal is an object");
-    };
-    User::new("demo-user-0001", DEMO_USERNAME, Some(password_hash), claims)?.with_bank_account(
-        BankAccount {
-            beneficiary_name: "Alex Jordan Citizen".to_owned(),
-            bsb: "123456".to_owned(),
-            account_number: "12345678".to_owned(),
-            payid: Some("alex.citizen@example.com".to_owned()),
-            payid_type: Some(PayIdType::Email),
-            bic_swift_code: Some("OXIDAU2SXXX".to_owned()),
-            account_number_international: None,
-        },
-    )
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct DemoUsers {
+        users: Vec<UserConfig>,
+    }
+    let demo: DemoUsers =
+        toml::from_str(include_str!("user/demo_users.toml")).context("demo_users.toml")?;
+    demo.users.iter().map(User::from_config).collect()
 }
 
 #[cfg(test)]

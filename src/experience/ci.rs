@@ -49,7 +49,7 @@ pub(crate) struct Ci {
 
 /// The user a response is about when the client does not name one.
 pub(crate) fn default_user(users: &dyn UserStore) -> Option<Arc<User>> {
-    users.list().into_iter().next()
+    users.list().first().cloned()
 }
 
 fn server_error(error: &dyn std::fmt::Display, what: &str) -> Step {

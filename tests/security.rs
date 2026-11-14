@@ -658,3 +658,18 @@ async fn connections_are_capped_per_listener() {
     assert_eq!(response.status(), StatusCode::OK);
     op.stop().await;
 }
+
+#[tokio::test]
+async fn a_dropped_server_stops_listening() {
+    let op = TestOp::start().await;
+    let url = op.url("/healthz");
+    let browser = op.browser.clone();
+    drop(op);
+    for _ in 0..50 {
+        if browser.get(&url).send().await.is_err() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("the server is still listening after being dropped");
+}

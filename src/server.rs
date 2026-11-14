@@ -222,7 +222,7 @@ impl Server {
         self.state
             .users
             .list()
-            .into_iter()
+            .iter()
             .find(|user| user.username == username)
             .map(|user| user.claims.clone())
     }
@@ -264,6 +264,11 @@ impl Server {
     }
 
     /// Stop accepting connections, let in-flight requests finish, and wait.
+    ///
+    /// A server dropped without this still stops: dropping the sender wakes
+    /// every task's `shutdown.changed()`, so the listeners close and
+    /// in-flight requests get the usual grace period, but nothing waits for
+    /// them.
     pub async fn shutdown(self) {
         let _ = self.shutdown.send(true);
         for task in self.tasks {
