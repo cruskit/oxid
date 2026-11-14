@@ -31,9 +31,10 @@ use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
 use super::{
-    Approval, Decision, Experience, Form, Interaction, Kind, Page, Step, StepFuture, host_cookie,
+    Approval, Decision, ERROR_CONDITIONS, ErrorCondition, Experience, Form, Interaction, Kind,
+    MAX_ERROR_DESCRIPTION, Page, Step, StepFuture, error_condition, everything_requested,
+    host_cookie, is_error_description,
 };
-use crate::error::ErrorCode;
 use crate::id_token::{self, ClaimEdits};
 use crate::store::Grant;
 use crate::user::{User, UserStore};
@@ -179,76 +180,6 @@ const SCRIPT: &str = r"(function () {
   showAttributes();
   refresh();
 })();";
-
-/// An error the user can choose to return instead of a success.
-#[derive(Debug, Clone, Copy)]
-pub struct ErrorCondition {
-    pub code: ErrorCode,
-    /// What this condition simulates.
-    pub label: &'static str,
-    /// The default `error_description`, which the user can change.
-    pub description: &'static str,
-}
-
-/// The predefined error conditions, in the order they are offered.
-pub const ERROR_CONDITIONS: &[ErrorCondition] = &[
-    ErrorCondition {
-        code: ErrorCode::AccessDenied,
-        label: "The user did not consent",
-        description: "the user denied the request",
-    },
-    ErrorCondition {
-        code: ErrorCode::LoginRequired,
-        label: "The user could not be authenticated",
-        description: "the user must authenticate",
-    },
-    ErrorCondition {
-        code: ErrorCode::ConsentRequired,
-        label: "Consent is needed and was not given",
-        description: "the user's consent is required",
-    },
-    ErrorCondition {
-        code: ErrorCode::InteractionRequired,
-        label: "User interaction is needed",
-        description: "user interaction is required",
-    },
-    ErrorCondition {
-        code: ErrorCode::AccountSelectionRequired,
-        label: "The user must choose an account",
-        description: "the user must select an account",
-    },
-    ErrorCondition {
-        code: ErrorCode::InvalidRequest,
-        label: "The request is malformed",
-        description: "the request is invalid",
-    },
-    ErrorCondition {
-        code: ErrorCode::InvalidScope,
-        label: "The requested scope is not allowed",
-        description: "the requested scope is invalid",
-    },
-    ErrorCondition {
-        code: ErrorCode::UnauthorizedClient,
-        label: "The client may not make this request",
-        description: "the client is not authorized to request a code",
-    },
-    ErrorCondition {
-        code: ErrorCode::ServerError,
-        label: "The provider failed unexpectedly",
-        description: "the authorization server encountered an unexpected condition",
-    },
-    ErrorCondition {
-        code: ErrorCode::TemporarilyUnavailable,
-        label: "The provider is overloaded or under maintenance",
-        description: "the authorization server is temporarily unavailable",
-    },
-];
-
-fn error_condition(code: &str) -> Option<&'static ErrorCondition> {
-    ERROR_CONDITIONS
-        .iter()
-        .find(|condition| condition.code.as_str() == code)
-}
 
 #[derive(Debug)]
 pub struct Technical {
@@ -725,33 +656,18 @@ fn preview(interaction: &Interaction<'_>, user: &User, txn: &str) -> Map<String,
 
 /// In this experience nothing is declined: every claim that can be released
 /// is, and the user removes what they do not want by editing the response.
-fn everything_requested(interaction: &Interaction<'_>) -> std::collections::BTreeSet<String> {
-    let request = interaction.request();
-    request
-        .claims
-        .consentable(interaction.client, &request.scope)
-        .into_iter()
-        .map(|item| item.name)
-        .collect()
-}
-
 fn deny(condition: &ErrorCondition, description: Option<&str>) -> Step {
     let description = description
         .map(str::trim)
-        .filter(|text| !text.is_empty() && text.len() <= 500 && is_error_description(text))
+        .filter(|text| {
+            !text.is_empty() && text.len() <= MAX_ERROR_DESCRIPTION && is_error_description(text)
+        })
         .unwrap_or(condition.description);
     Decision::Deny {
         code: condition.code,
         description: description.to_owned(),
     }
     .into()
-}
-
-/// RFC 6749 §4.1.2.1: `error_description` is printable ASCII without `"` or
-/// `\`.
-fn is_error_description(text: &str) -> bool {
-    text.bytes()
-        .all(|b| matches!(b, 0x20..=0x21 | 0x23..=0x5B | 0x5D..=0x7E))
 }
 
 fn pretty(value: &Value) -> String {

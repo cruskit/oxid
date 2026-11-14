@@ -947,6 +947,9 @@ mod tests {
 
         let html = body_text(response).await;
         assert!(html.contains("Log in to oxID"));
+        // They are logging in to see the request, not to reach the client.
+        assert!(html.contains("Log in to review this request:"));
+        assert!(html.contains("is asking you to share some of your information."));
         assert!(html.contains("<strong id=\"client-name\">Test RP</strong>"));
         assert!(html.contains("id=\"username\"") && html.contains("id=\"password\""));
         assert!(html.contains("id=\"sign-in\"") && html.contains("id=\"deny\""));
@@ -962,10 +965,14 @@ mod tests {
         let uri = harness.push(&everything_requested()).await;
         let browser = sign_in(&harness, &uri).await;
         let html = &browser.html;
-        assert!(html.contains("<span id=\"client-name\">Test RP</span>"));
         assert!(html.contains("Logged in as <strong>Alex Jordan Citizen</strong>"));
+        // The purpose completes the sentence it was written for.
         assert!(
-            html.contains("<p id=\"purpose\">Verify your &lt;age&gt; for checkout</p>"),
+            html.contains(
+                "<p><strong id=\"client-name\">Test RP</strong> is asking you to share your \
+                 information for the purpose of</p>\
+                 <p id=\"purpose\" class=\"purpose\">Verify your &lt;age&gt; for checkout</p>"
+            ),
             "purpose is shown, escaped"
         );
         // Each claim is listed with the value that would be shared.

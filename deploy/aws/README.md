@@ -70,6 +70,10 @@ client back end ─────────────────────�
   TTL setting rather than by a background task.
 - Clients loaded from the ConnectID registry are loaded once per cold start.
 
+- Under the `ci` experience the authorization endpoint holds its response
+  for up to `ci.response_delay` seconds, inside the request. Give the
+  function a timeout comfortably longer than that.
+
 ## Trying the DynamoDB store locally
 
 ```sh

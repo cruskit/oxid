@@ -1,6 +1,6 @@
 [package]
 name = "oxid"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.85"
 description = "oxID - an OpenID Provider implementing the FAPI 2.0 and ConnectID security profiles"
@@ -52,6 +52,8 @@ path = "src/bin/oxid-lambda.rs"
 required-features = ["aws"]
 
 [dev-dependencies]
+# Paused time, for testing the `ci` experience's wait without waiting.
+tokio = { version = "1", features = ["test-util"] }
 toml = "1"
 
 [lints.rust]

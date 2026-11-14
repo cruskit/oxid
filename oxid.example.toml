@@ -14,8 +14,18 @@ mtls_base_url = "https://localhost:9444"
 #                          edit the ID token claims or return an error.
 #                          Development and testing only.
 #   "login"                username and password sign-in with consent.
+#   "ci"                   no user and no pages: the authorization URL is
+#                          answered with the redirect by itself, and the
+#                          client may choose the response at /ci/response.
+#                          No authentication. Automated testing only.
 # Can be overridden with --experience or the OXID_EXPERIENCE variable.
 experience = "technical"
+
+# Settings of the "ci" experience.
+# [ci]
+# Seconds the default response is held back after the browser arrives, to
+# give the client time to choose another. 0 to 25.
+# response_delay = 5
 
 [server]
 listen = "127.0.0.1:9443"
