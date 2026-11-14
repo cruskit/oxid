@@ -35,7 +35,7 @@ const OUTCOME_ABANDON: &str = "abandon";
 
 /// `GET /ci`: the choices the response endpoint offers. Nothing here is
 /// secret from anyone who may use a provider running this experience.
-pub async fn options(State(state): State<AppState>) -> Response {
+pub(super) async fn options(State(state): State<AppState>) -> Response {
     let users: Vec<Value> = state
         .users
         .list()
@@ -89,7 +89,7 @@ pub async fn options(State(state): State<AppState>) -> Response {
 /// A parameter that does not apply to the outcome is refused rather than
 /// ignored: in a test, a response that is quietly not the one asked for is
 /// worse than an error. Setting a response again replaces the earlier one.
-pub async fn plan_response(
+pub(super) async fn plan_response(
     State(state): State<AppState>,
     OAuthForm(params): OAuthForm,
 ) -> Result<Response, OAuthError> {

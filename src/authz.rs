@@ -14,16 +14,16 @@ use crate::error::{ErrorCode, OAuthError};
 use crate::pkce;
 
 /// `purpose` length limits, in characters (OAuth 2 Purpose §3).
-pub const PURPOSE_MIN_CHARS: usize = 3;
-pub const PURPOSE_MAX_CHARS: usize = 300;
+pub(crate) const PURPOSE_MIN_CHARS: usize = 3;
+pub(crate) const PURPOSE_MAX_CHARS: usize = 300;
 
 /// `error_description` for a `purpose` that breaks the rules.
-pub const INVALID_PURPOSE: &str = "invalid_purpose";
+pub(crate) const INVALID_PURPOSE: &str = "invalid_purpose";
 
 /// Whether `purpose` is acceptable: human-readable text of 3 to 300
 /// characters. Control characters are refused as well, since the text is
 /// recorded and shown to the user (OAuth 2 Purpose §9.1).
-pub fn is_valid_purpose(purpose: &str) -> bool {
+pub(crate) fn is_valid_purpose(purpose: &str) -> bool {
     (PURPOSE_MIN_CHARS..=PURPOSE_MAX_CHARS).contains(&purpose.chars().count())
         && !purpose.chars().any(char::is_control)
         && !purpose.trim().is_empty()
@@ -34,11 +34,11 @@ pub fn is_valid_purpose(purpose: &str) -> bool {
 const MAX_NONCE_LEN: usize = 512;
 const MAX_STATE_LEN: usize = 2048;
 
-pub const SCOPE_OPENID: &str = "openid";
+pub(crate) const SCOPE_OPENID: &str = "openid";
 
 /// A validated authorization request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AuthorizationRequest {
+pub(crate) struct AuthorizationRequest {
     pub client_id: String,
     pub redirect_uri: String,
     pub scope: Vec<String>,
@@ -53,7 +53,8 @@ pub struct AuthorizationRequest {
 }
 
 impl AuthorizationRequest {
-    pub fn is_openid(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_openid(&self) -> bool {
         self.scope.iter().any(|s| s == SCOPE_OPENID)
     }
 
@@ -61,7 +62,7 @@ impl AuthorizationRequest {
     ///
     /// `params` are the claims of a verified request object; only these are
     /// used, never parameters sent alongside it (ConnectID §4.2-3.9).
-    pub fn from_params(client: &Client, params: &Map<String, Value>) -> Result<Self, OAuthError> {
+    pub(crate) fn from_params(client: &Client, params: &Map<String, Value>) -> Result<Self, OAuthError> {
         let string = |name: &str| -> Result<Option<&str>, OAuthError> {
             match params.get(name) {
                 None | Some(Value::Null) => Ok(None),

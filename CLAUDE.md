@@ -61,7 +61,14 @@ mise run build        # check + release build + conformance
 
 ## Architecture
 
-- `src/lib.rs` re-exports the crate. `main.rs` is the CLI. `server.rs` and
+- `src/lib.rs` exports a small facade (`Config`, `ServerBuilder`, `lambda::run`
+  and the types they name); every other module is `pub(crate)`, and
+  `unreachable_pub` is linted. The integration tests in `tests/` reach the
+  internals through the `test-util` feature (enabled by a dev-dependency on
+  the crate itself); an item they need stays `pub` with
+  `#[cfg_attr(not(feature = "test-util"), expect(unreachable_pub, …))]`.
+  `mise run lint` also lints the library without that feature, which is
+  where dead code shows. `main.rs` is the CLI. `server.rs` and
   `tls.rs` set up the two TLS listeners: public, and mTLS for the token, PAR
   and UserInfo endpoints.
 - `src/http/` holds the endpoints: discovery/JWKS, PAR, authorize, token and

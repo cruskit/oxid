@@ -25,25 +25,25 @@ mod theme;
 mod token;
 mod userinfo;
 
-pub const PATH_DISCOVERY: &str = "/.well-known/openid-configuration";
-pub const PATH_OAUTH_METADATA: &str = "/.well-known/oauth-authorization-server";
-pub const PATH_JWKS: &str = "/jwks";
-pub const PATH_PAR: &str = "/par";
-pub const PATH_AUTHORIZE: &str = "/authorize";
-pub const PATH_DECISION: &str = "/authorize/decision";
-pub const PATH_TOKEN: &str = "/token";
-pub const PATH_USERINFO: &str = "/userinfo";
-pub const PATH_HEALTH: &str = "/healthz";
+pub(crate) const PATH_DISCOVERY: &str = "/.well-known/openid-configuration";
+pub(crate) const PATH_OAUTH_METADATA: &str = "/.well-known/oauth-authorization-server";
+pub(crate) const PATH_JWKS: &str = "/jwks";
+pub(crate) const PATH_PAR: &str = "/par";
+pub(crate) const PATH_AUTHORIZE: &str = "/authorize";
+pub(crate) const PATH_DECISION: &str = "/authorize/decision";
+pub(crate) const PATH_TOKEN: &str = "/token";
+pub(crate) const PATH_USERINFO: &str = "/userinfo";
+pub(crate) const PATH_HEALTH: &str = "/healthz";
 /// The theme's logo, when it has one.
-pub const PATH_THEME_LOGO: &str = "/theme/logo";
+pub(crate) const PATH_THEME_LOGO: &str = "/theme/logo";
 /// The theme's logo for dark mode, when it has one of its own.
-pub const PATH_THEME_LOGO_DARK: &str = "/theme/logo-dark";
+pub(crate) const PATH_THEME_LOGO_DARK: &str = "/theme/logo-dark";
 /// What the `ci` experience offers. Served only under that experience.
-pub const PATH_CI: &str = "/ci";
+pub(crate) const PATH_CI: &str = "/ci";
 /// Where a client chooses the `ci` experience's response to a request.
-pub const PATH_CI_RESPONSE: &str = "/ci/response";
+pub(crate) const PATH_CI_RESPONSE: &str = "/ci/response";
 
-pub static X_FAPI_INTERACTION_ID: HeaderName = HeaderName::from_static("x-fapi-interaction-id");
+pub(crate) static X_FAPI_INTERACTION_ID: HeaderName = HeaderName::from_static("x-fapi-interaction-id");
 
 /// Largest request body accepted. Request objects with claims requests are a
 /// few kilobytes; this leaves generous headroom while bounding memory.
@@ -51,13 +51,17 @@ const MAX_BODY_BYTES: usize = 64 * 1024;
 
 /// Per-connection facts, attached to every request by the server.
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(
+    not(feature = "test-util"),
+    expect(unreachable_pub, reason = "the integration tests use it")
+)]
 pub struct ConnInfo {
     /// The TLS client certificate, if the client presented one. Always
     /// `None` on the public listener, which never asks for one.
     pub client_cert: Option<ClientCert>,
 }
 
-pub fn router(state: AppState) -> Router {
+pub(crate) fn router(state: AppState) -> Router {
     // The endpoints of the `ci` experience do not exist under any other.
     let ci = if state.experience.kind() == crate::experience::Kind::Ci {
         Router::new()
@@ -147,10 +151,10 @@ async fn common_headers(request: Request, next: Next) -> Response {
 ///
 /// RFC 6749 §3.1/§3.2: parameters must not be included more than once.
 #[derive(Debug, Clone, Default)]
-pub struct Params(HashMap<String, String>);
+pub(crate) struct Params(HashMap<String, String>);
 
 impl Params {
-    pub fn parse(encoded: &[u8]) -> Result<Self, OAuthError> {
+    pub(crate) fn parse(encoded: &[u8]) -> Result<Self, OAuthError> {
         let mut map = HashMap::new();
         for (name, value) in url::form_urlencoded::parse(encoded) {
             if map.insert(name.to_string(), value.into_owned()).is_some() {
@@ -163,13 +167,13 @@ impl Params {
     }
 
     /// Whether the parameter was sent at all, even with an empty value.
-    pub fn contains(&self, name: &str) -> bool {
+    pub(crate) fn contains(&self, name: &str) -> bool {
         self.0.contains_key(name)
     }
 
     /// The parameter's value. An empty value is treated as absent
     /// (RFC 6749 §3.1).
-    pub fn get(&self, name: &str) -> Option<&str> {
+    pub(crate) fn get(&self, name: &str) -> Option<&str> {
         self.0
             .get(name)
             .map(String::as_str)
@@ -180,7 +184,7 @@ impl Params {
 /// Extracts a form-encoded body, reporting problems as OAuth errors rather
 /// than axum's plain-text rejections.
 #[derive(Debug)]
-pub struct OAuthForm(pub Params);
+pub(crate) struct OAuthForm(pub Params);
 
 impl<S: Send + Sync> FromRequest<S> for OAuthForm {
     type Rejection = OAuthError;
@@ -208,7 +212,7 @@ impl<S: Send + Sync> FromRequest<S> for OAuthForm {
 }
 
 /// Mark a response as uncacheable (RFC 6749 §5.1).
-pub fn no_store(mut response: Response) -> Response {
+pub(crate) fn no_store(mut response: Response) -> Response {
     let headers = response.headers_mut();
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     headers.insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
@@ -217,7 +221,7 @@ pub fn no_store(mut response: Response) -> Response {
 
 /// Authenticate the client making a back-channel request, including replay
 /// protection for its assertion.
-pub async fn authenticate_client(
+pub(crate) async fn authenticate_client(
     state: &AppState,
     params: &Params,
 ) -> Result<std::sync::Arc<crate::client::Client>, OAuthError> {

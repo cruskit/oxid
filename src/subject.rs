@@ -11,7 +11,7 @@ use crate::util::b64url;
 ///
 /// HMAC-SHA256 keyed with the deployment's salt gives a value that is stable,
 /// differs per sector, and cannot be reversed or correlated without the salt.
-pub fn pairwise(salt: &[u8], sector_identifier: &str, local_subject: &str) -> String {
+pub(crate) fn pairwise(salt: &[u8], sector_identifier: &str, local_subject: &str) -> String {
     let key = hmac::Key::new(hmac::HMAC_SHA256, salt);
     let mut ctx = hmac::Context::with_key(&key);
     ctx.update(sector_identifier.as_bytes());

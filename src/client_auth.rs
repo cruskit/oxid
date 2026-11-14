@@ -9,10 +9,10 @@ use crate::client::{Client, ClientRegistry};
 use crate::error::OAuthError;
 use crate::jose::{Jws, SigningAlg};
 
-pub const ASSERTION_TYPE: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
+pub(crate) const ASSERTION_TYPE: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
 
 /// Algorithms accepted for client assertions (ConnectID §5).
-pub const ALLOWED_ALGS: &[SigningAlg] = &[SigningAlg::PS256];
+pub(crate) const ALLOWED_ALGS: &[SigningAlg] = &[SigningAlg::PS256];
 
 /// Longest an assertion may remain valid. Bounds how long its `jti` must be
 /// remembered for replay detection.
@@ -20,7 +20,11 @@ const MAX_ASSERTION_LIFETIME: i64 = 600;
 
 /// The client authentication parameters of a token or PAR request.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct Credentials<'a> {
+#[expect(
+    clippy::struct_field_names,
+    reason = "named after the RFC 7523 request parameters"
+)]
+pub(crate) struct Credentials<'a> {
     pub client_id: Option<&'a str>,
     pub client_assertion_type: Option<&'a str>,
     pub client_assertion: Option<&'a str>,
@@ -29,7 +33,7 @@ pub struct Credentials<'a> {
 /// A verified assertion: who it is from, and what must be recorded to stop it
 /// being replayed.
 #[derive(Debug, Clone)]
-pub struct Authenticated {
+pub(crate) struct Authenticated {
     pub client: Arc<Client>,
     pub jti: String,
     pub expires_at: i64,
@@ -39,7 +43,7 @@ pub struct Authenticated {
 ///
 /// The caller must then record `(client, jti)` until `expires_at` and reject
 /// the request if it was already present; see [`crate::store::Store::record_jti`].
-pub fn authenticate(
+pub(crate) fn authenticate(
     credentials: Credentials<'_>,
     clients: &dyn ClientRegistry,
     issuer: &str,

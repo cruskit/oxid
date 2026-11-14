@@ -43,12 +43,12 @@ use crate::user::{User, UserStore};
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug)]
-pub struct Ci {
+pub(crate) struct Ci {
     users: Arc<dyn UserStore>,
 }
 
 /// The user a response is about when the client does not name one.
-pub fn default_user(users: &dyn UserStore) -> Option<Arc<User>> {
+pub(crate) fn default_user(users: &dyn UserStore) -> Option<Arc<User>> {
     users.list().into_iter().next()
 }
 
@@ -77,7 +77,7 @@ impl Experience for Ci {
 }
 
 impl Ci {
-    pub fn new(users: Arc<dyn UserStore>) -> Self {
+    pub(crate) fn new(users: Arc<dyn UserStore>) -> Self {
         Self { users }
     }
 

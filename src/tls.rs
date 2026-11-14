@@ -33,13 +33,17 @@ const TLS12_SUITES: &[CipherSuite] = &[
 
 /// A certificate chain and its private key.
 #[derive(Debug)]
+#[cfg_attr(
+    not(feature = "test-util"),
+    expect(unreachable_pub, reason = "the integration tests use it")
+)]
 pub struct TlsIdentity {
     pub certs: Vec<CertificateDer<'static>>,
     pub key: PrivateKeyDer<'static>,
 }
 
 impl TlsIdentity {
-    pub fn from_pem_files(cert: &Path, key: &Path) -> Result<Self> {
+    pub(crate) fn from_pem_files(cert: &Path, key: &Path) -> Result<Self> {
         let certs = CertificateDer::pem_file_iter(cert)
             .with_context(|| format!("reading certificate {}", cert.display()))?
             .collect::<Result<Vec<_>, _>>()
@@ -56,6 +60,10 @@ impl TlsIdentity {
 
     /// Generate a self-signed certificate valid for `names` (DNS names or IP
     /// addresses). For development and tests only.
+    #[cfg_attr(
+        not(feature = "test-util"),
+        expect(unreachable_pub, reason = "the integration tests use it")
+    )]
     pub fn self_signed(names: Vec<String>) -> Result<Self> {
         let generated = rcgen::generate_simple_self_signed(names)
             .context("generating self-signed certificate")?;
@@ -67,11 +75,13 @@ impl TlsIdentity {
     }
 
     /// PEM encoding of the leaf certificate.
+    #[cfg(any(test, feature = "test-util"))]
     pub fn cert_pem(&self) -> String {
         pem("CERTIFICATE", self.certs[0].as_ref())
     }
 
     /// PEM encoding of the private key.
+    #[cfg(any(test, feature = "test-util"))]
     pub fn key_pem(&self) -> String {
         let label = match &self.key {
             PrivateKeyDer::Pkcs1(_) => "RSA PRIVATE KEY",
@@ -82,6 +92,7 @@ impl TlsIdentity {
     }
 }
 
+#[cfg(any(test, feature = "test-util"))]
 fn pem(label: &str, der: &[u8]) -> String {
     use base64::Engine;
     let body = base64::engine::general_purpose::STANDARD.encode(der);
@@ -98,6 +109,10 @@ fn pem(label: &str, der: &[u8]) -> String {
 
 /// Which client certificates a listener asks for and accepts.
 #[derive(Debug)]
+#[cfg_attr(
+    not(feature = "test-util"),
+    expect(unreachable_pub, reason = "the integration tests use it")
+)]
 pub enum ClientCertPolicy {
     /// Do not request a client certificate (the browser-facing listener).
     None,
@@ -111,7 +126,7 @@ pub enum ClientCertPolicy {
 
 impl ClientCertPolicy {
     /// Load trusted roots from a PEM bundle.
-    pub fn from_ca_file(path: &Path) -> Result<Self> {
+    pub(crate) fn from_ca_file(path: &Path) -> Result<Self> {
         let mut roots = RootCertStore::empty();
         for cert in CertificateDer::pem_file_iter(path)
             .with_context(|| format!("reading client CA bundle {}", path.display()))?
@@ -142,6 +157,10 @@ fn provider() -> Arc<CryptoProvider> {
 
 /// Build a server configuration: TLS 1.2 and 1.3 only (FAPI 2.0 §5.2.1),
 /// offering HTTP/2 and HTTP/1.1.
+#[cfg_attr(
+    not(feature = "test-util"),
+    expect(unreachable_pub, reason = "the integration tests use it")
+)]
 pub fn server_config(
     identity: &TlsIdentity,
     policy: ClientCertPolicy,
@@ -231,21 +250,26 @@ impl ClientCertVerifier for ProofOfPossessionOnly {
 
 /// The certificate a client presented on a connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    not(feature = "test-util"),
+    expect(unreachable_pub, reason = "the integration tests use it")
+)]
 pub struct ClientCert {
     /// `x5t#S256`: base64url SHA-256 of the DER certificate (RFC 8705 §3.1).
     pub thumbprint: String,
 }
 
 impl ClientCert {
-    pub fn from_der(der: &[u8]) -> Self {
+    pub(crate) fn from_der(der: &[u8]) -> Self {
         Self {
             thumbprint: b64url(sha256(der)),
         }
     }
 
+    #[cfg(feature = "aws")]
     /// From a PEM certificate, as handed over by a TLS-terminating proxy.
     /// If there are several, the first is the client's own.
-    pub fn from_pem(pem: &str) -> Option<Self> {
+    pub(crate) fn from_pem(pem: &str) -> Option<Self> {
         CertificateDer::from_pem_slice(pem.as_bytes())
             .ok()
             .map(|cert| Self::from_der(cert.as_ref()))

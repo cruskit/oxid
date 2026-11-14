@@ -44,9 +44,9 @@ use crate::store::{PushedRequest, Session};
 use crate::theme::Theme;
 use crate::user::UserStore;
 
-pub mod ci;
-pub mod login;
-pub mod technical;
+pub(crate) mod ci;
+pub(crate) mod login;
+pub(crate) mod technical;
 
 /// The experiences that can be selected in configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -101,7 +101,7 @@ impl std::fmt::Display for Kind {
 }
 
 /// Construct the experience selected in configuration.
-pub fn build(kind: Kind, users: Arc<dyn UserStore>) -> Arc<dyn Experience> {
+pub(crate) fn build(kind: Kind, users: Arc<dyn UserStore>) -> Arc<dyn Experience> {
     match kind {
         Kind::Technical => Arc::new(technical::Technical::new(users)),
         Kind::Login => Arc::new(login::Login::new(users)),
@@ -111,7 +111,7 @@ pub fn build(kind: Kind, users: Arc<dyn UserStore>) -> Arc<dyn Experience> {
 
 /// Everything an experience may need to know about the request in hand.
 #[derive(Debug)]
-pub struct Interaction<'a> {
+pub(crate) struct Interaction<'a> {
     pub state: &'a AppState,
     pub client: &'a Client,
     pub request_uri: &'a str,
@@ -127,24 +127,24 @@ pub struct Interaction<'a> {
 }
 
 impl Interaction<'_> {
-    pub fn request(&self) -> &AuthorizationRequest {
+    pub(crate) fn request(&self) -> &AuthorizationRequest {
         &self.pushed.request
     }
 
     /// The value of a cookie the browser sent.
-    pub fn cookie(&self, name: &str) -> Option<&str> {
+    pub(crate) fn cookie(&self, name: &str) -> Option<&str> {
         cookie(self.headers, name)
     }
 
     /// Where a form on a page of this experience posts to. A template with
     /// this in its `form` field opens the form with
     /// `{% include "form_open.html" %}`.
-    pub fn form(&self) -> FormTarget<'_> {
+    pub(crate) fn form(&self) -> FormTarget<'_> {
         FormTarget::new(self.csrf, &self.client.id, self.request_uri)
     }
 
     /// The name, logo and colours the pages are shown with.
-    pub fn theme(&self) -> &Theme {
+    pub(crate) fn theme(&self) -> &Theme {
         &self.state.theme
     }
 }
@@ -153,7 +153,7 @@ impl Interaction<'_> {
 /// decision endpoint: the hidden fields that route and verify the
 /// submission.
 #[derive(Debug, Clone, Copy)]
-pub struct FormTarget<'a> {
+pub(crate) struct FormTarget<'a> {
     pub action: &'static str,
     pub csrf: &'a str,
     pub client_id: &'a str,
@@ -161,7 +161,7 @@ pub struct FormTarget<'a> {
 }
 
 impl<'a> FormTarget<'a> {
-    pub fn new(csrf: &'a str, client_id: &'a str, request_uri: &'a str) -> Self {
+    pub(crate) fn new(csrf: &'a str, client_id: &'a str, request_uri: &'a str) -> Self {
         Self {
             action: crate::http::PATH_DECISION,
             csrf,
@@ -174,7 +174,7 @@ impl<'a> FormTarget<'a> {
 /// Render a template to HTML. The templates are compiled into the binary and
 /// checked at build time, so rendering fails only if a value cannot be
 /// written; that is logged, and the page comes out empty.
-pub fn render(template: &impl Template) -> String {
+pub(crate) fn render(template: &impl Template) -> String {
     template.render().unwrap_or_else(|error| {
         tracing::error!(%error, "a page could not be rendered");
         String::new()
@@ -182,7 +182,7 @@ pub fn render(template: &impl Template) -> String {
 }
 
 /// A length of time in words, for telling the user how long they have.
-pub fn duration_text(seconds: i64) -> String {
+pub(crate) fn duration_text(seconds: i64) -> String {
     let (count, unit) = if seconds % 60 == 0 {
         (seconds / 60, "minute")
     } else {
@@ -193,7 +193,7 @@ pub fn duration_text(seconds: i64) -> String {
 }
 
 /// The value of the cookie `name` in a request's headers.
-pub fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+pub(crate) fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers
         .get_all(axum::http::header::COOKIE)
         .iter()
@@ -205,7 +205,7 @@ pub fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
 
 /// A `Set-Cookie` value for a cookie scoped to this origin. The `__Host-`
 /// prefix requires `Secure` and `Path=/`, which are always set here.
-pub fn host_cookie(name: &str, value: &str, max_age_seconds: Option<i64>) -> String {
+pub(crate) fn host_cookie(name: &str, value: &str, max_age_seconds: Option<i64>) -> String {
     let base = format!("{name}={value}; Path=/; Secure; HttpOnly; SameSite=Lax");
     match max_age_seconds {
         Some(max_age) => format!("{base}; Max-Age={max_age}"),
@@ -215,7 +215,7 @@ pub fn host_cookie(name: &str, value: &str, max_age_seconds: Option<i64>) -> Str
 
 /// A page shown to the user.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Page {
+pub(crate) struct Page {
     pub title: String,
     /// The page body, as HTML: a template of the experience, rendered with
     /// [`render`]. Templates escape what they interpolate.
@@ -232,7 +232,7 @@ pub struct Page {
 
 /// The user's approval of a request.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Approval {
+pub(crate) struct Approval {
     /// Internal subject of the user the response is about.
     pub user_subject: String,
     /// Claims the user agreed to share. Nothing else is released.
@@ -249,7 +249,7 @@ pub struct Approval {
 
 /// What a form submission leads to.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Decision {
+pub(crate) enum Decision {
     /// Show another page; the interaction continues.
     Page(Page),
     /// Issue an authorization code.
@@ -263,7 +263,7 @@ pub enum Decision {
 
 /// The result of one step: a decision, plus any cookies to set.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Step {
+pub(crate) struct Step {
     pub decision: Decision,
     /// `Set-Cookie` header values, e.g. from [`host_cookie`].
     pub set_cookies: Vec<String>,
@@ -287,7 +287,7 @@ impl From<Page> for Step {
 /// An error an experience can return to the client instead of a success,
 /// when it is asked to simulate one.
 #[derive(Debug, Clone, Copy)]
-pub struct ErrorCondition {
+pub(crate) struct ErrorCondition {
     pub code: ErrorCode,
     /// What this condition simulates.
     pub label: &'static str,
@@ -296,7 +296,7 @@ pub struct ErrorCondition {
 }
 
 /// The predefined error conditions, in the order they are offered.
-pub const ERROR_CONDITIONS: &[ErrorCondition] = &[
+pub(crate) const ERROR_CONDITIONS: &[ErrorCondition] = &[
     ErrorCondition {
         code: ErrorCode::AccessDenied,
         label: "The user did not consent",
@@ -350,25 +350,25 @@ pub const ERROR_CONDITIONS: &[ErrorCondition] = &[
 ];
 
 /// The predefined error condition with this error code.
-pub fn error_condition(code: &str) -> Option<&'static ErrorCondition> {
+pub(crate) fn error_condition(code: &str) -> Option<&'static ErrorCondition> {
     ERROR_CONDITIONS
         .iter()
         .find(|condition| condition.code.as_str() == code)
 }
 
 /// Longest `error_description` accepted from whoever chooses the response.
-pub const MAX_ERROR_DESCRIPTION: usize = 500;
+pub(crate) const MAX_ERROR_DESCRIPTION: usize = 500;
 
 /// RFC 6749 §4.1.2.1: `error_description` is printable ASCII without `"` or
 /// `\`.
-pub fn is_error_description(text: &str) -> bool {
+pub(crate) fn is_error_description(text: &str) -> bool {
     text.bytes()
         .all(|b| matches!(b, 0x20..=0x21 | 0x23..=0x5B | 0x5D..=0x7E))
 }
 
 /// Every claim that can be released for the request: what a user who agreed
 /// to everything would share.
-pub fn everything_requested(interaction: &Interaction<'_>) -> BTreeSet<String> {
+pub(crate) fn everything_requested(interaction: &Interaction<'_>) -> BTreeSet<String> {
     let request = interaction.request();
     request
         .claims
@@ -379,13 +379,13 @@ pub fn everything_requested(interaction: &Interaction<'_>) -> BTreeSet<String> {
 }
 
 /// A boxed future, so that [`Experience`] can be used as a trait object.
-pub type StepFuture<'a> = Pin<Box<dyn Future<Output = Step> + Send + 'a>>;
+pub(crate) type StepFuture<'a> = Pin<Box<dyn Future<Output = Step> + Send + 'a>>;
 
 /// Form fields submitted by the browser.
-pub type Form = crate::http::Params;
+pub(crate) type Form = crate::http::Params;
 
 /// One way of interacting with the user at the authorization endpoint.
-pub trait Experience: Send + Sync + Debug {
+pub(crate) trait Experience: Send + Sync + Debug {
     /// The name used to select this experience in configuration.
     fn kind(&self) -> Kind;
 

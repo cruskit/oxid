@@ -7,8 +7,17 @@ use super::{Backend, BackendFuture, MAX_CONSENT_RECORDS, Record};
 
 #[derive(Debug)]
 struct LogEntry {
+    #[cfg_attr(not(test), expect(dead_code, reason = "the read side of the consent log, for the planned consent history"))]
     partition: String,
+    #[cfg_attr(
+        not(any(test, feature = "test-util")),
+        expect(dead_code, reason = "the read side of the consent log, for the planned consent history")
+    )]
     id: String,
+    #[cfg_attr(
+        not(any(test, feature = "test-util")),
+        expect(dead_code, reason = "the read side of the consent log, for the planned consent history")
+    )]
     value: String,
 }
 
@@ -22,7 +31,7 @@ struct Inner {
 /// Keeps everything in this process. Nothing survives a restart, and nothing
 /// is shared with other instances.
 #[derive(Default)]
-pub struct MemoryBackend {
+pub(crate) struct MemoryBackend {
     inner: Mutex<Inner>,
 }
 
@@ -39,7 +48,7 @@ impl std::fmt::Debug for MemoryBackend {
 }
 
 impl MemoryBackend {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -50,13 +59,15 @@ impl MemoryBackend {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    #[cfg(test)]
     /// Number of records held (log entries excluded), for diagnostics and
     /// tests.
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.lock().records.len()
     }
 
-    pub fn is_empty(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
         self.len() == 0
     }
 }

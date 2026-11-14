@@ -35,7 +35,7 @@ use crate::util::random_token;
 const SHARE_FIELD_PREFIX: &str = "share_";
 
 /// Holds the secret that ties a signed-in session to this browser.
-pub const LOGIN_COOKIE: &str = "__Host-oxid-login";
+pub(crate) const LOGIN_COOKIE: &str = "__Host-oxid-login";
 
 // The `action` values of the buttons in the templates.
 const ACTION_SIGN_IN: &str = "sign-in";
@@ -48,12 +48,12 @@ const ACTION_SHARE_ALL: &str = "share-all";
 const STYLE: &str = include_str!("../../templates/login/login.css");
 
 #[derive(Debug)]
-pub struct Login {
+pub(crate) struct Login {
     users: Arc<dyn UserStore>,
 }
 
 impl Login {
-    pub fn new(users: Arc<dyn UserStore>) -> Self {
+    pub(crate) fn new(users: Arc<dyn UserStore>) -> Self {
         Self { users }
     }
 }

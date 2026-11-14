@@ -43,6 +43,9 @@ jiff = { version = "0.2.44", default-features = false, features = ["std", "tzdb-
 [features]
 # Amazon DynamoDB as the store, and the `oxid-lambda` binary for AWS Lambda.
 aws = ["dep:aws-config", "dep:aws-sdk-dynamodb", "dep:lambda_http"]
+# Makes the crate's internal modules public, for the integration tests in
+# tests/. Not for use otherwise: nothing behind it is a stable API.
+test-util = []
 
 [[bin]]
 name = "oxid"
@@ -54,6 +57,8 @@ path = "src/bin/oxid-lambda.rs"
 required-features = ["aws"]
 
 [dev-dependencies]
+# The integration tests drive the internals (see the `test-util` feature).
+oxid = { path = ".", features = ["test-util"] }
 scraper = "0.29"
 # Paused time, for testing the `ci` experience's wait without waiting.
 tokio = { version = "1", features = ["test-util"] }
@@ -62,6 +67,7 @@ toml = "1"
 [lints.rust]
 unsafe_code = "forbid"
 missing_debug_implementations = "warn"
+unreachable_pub = "warn"
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }

@@ -12,7 +12,7 @@ use crate::error::OAuthError;
 use crate::request_object;
 use crate::state::AppState;
 
-pub async fn pushed_authorization_request(
+pub(super) async fn pushed_authorization_request(
     State(state): State<AppState>,
     OAuthForm(params): OAuthForm,
 ) -> Result<Response, OAuthError> {

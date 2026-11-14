@@ -10,9 +10,14 @@ run = "cargo fmt --all -- --check"
 
 [tasks.lint]
 description = "Run clippy with warnings as errors"
+# Tests turn on the `test-util` feature, which makes the internals public,
+# so the library and binaries are also linted on their own: that is where
+# dead code and unreachable `pub` items show.
 run = [
   "cargo clippy --all-targets --locked -- -D warnings",
   "cargo clippy --all-targets --locked --features aws -- -D warnings",
+  "cargo clippy --lib --bins --locked -- -D warnings",
+  "cargo clippy --lib --bins --locked --features aws -- -D warnings",
 ]
 
 [tasks.deny]

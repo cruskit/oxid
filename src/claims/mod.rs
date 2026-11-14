@@ -16,21 +16,21 @@
 //! which voluntary claims to share; essential ones can only be refused by
 //! cancelling the request.
 
-mod catalogue;
+pub(crate) mod catalogue;
 mod dates;
 mod release;
 mod request;
 
-pub use catalogue::{
-    BENEFICIARY_ACCOUNT_AU, BENEFICIARY_ACCOUNT_AU_PAYID, BENEFICIARY_ACCOUNT_INTERNATIONAL,
-    CLAIM_SCOPES, TRUST_FRAMEWORK, VERIFIED_CLAIMS, claims_supported, connectid_standard_claims,
-    oidc_standard_claims, profile_allows, scopes_supported, verified_claims_supported,
+pub(crate) use catalogue::{
+    TRUST_FRAMEWORK, claims_supported, profile_allows, scopes_supported, verified_claims_supported,
 };
 pub(crate) use dates::parse_date;
 pub(crate) use release::one_line_address;
-pub use release::release;
-pub use request::{ClaimsRequest, ConsentItem, shared_claims};
+pub(crate) use release::release;
+pub(crate) use request::{ClaimsRequest, ConsentItem, shared_claims};
 
+#[cfg(test)]
+use catalogue::{VERIFIED_CLAIMS, connectid_standard_claims, oidc_standard_claims};
 #[cfg(test)]
 use dates::*;
 

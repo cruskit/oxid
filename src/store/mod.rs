@@ -27,34 +27,34 @@ use crate::error::OAuthError;
 use crate::util::{b64url, random_token, sha256};
 
 #[cfg(feature = "aws")]
-pub mod dynamodb;
+pub(crate) mod dynamodb;
 mod memory;
 
-pub use memory::MemoryBackend;
+pub(crate) use memory::MemoryBackend;
 
 /// Bytes of entropy in generated secrets (256 bits; FAPI 2.0 needs >= 128).
 const SECRET_BYTES: usize = 32;
 
 /// RFC 9126 §2.2 recommends this URN prefix for `request_uri` values.
-pub const REQUEST_URI_PREFIX: &str = "urn:ietf:params:oauth:request_uri:";
+pub(crate) const REQUEST_URI_PREFIX: &str = "urn:ietf:params:oauth:request_uri:";
 
 /// Failed password attempts allowed against one pushed request.
-pub const MAX_FAILED_LOGINS: u32 = 5;
+pub(crate) const MAX_FAILED_LOGINS: u32 = 5;
 
 /// How long an expired session is remembered, so that the user can still be
 /// told what happened and be sent back to the client with an error.
-pub const EXPIRED_SESSION_RETENTION: i64 = 60 * 60;
+pub(crate) const EXPIRED_SESSION_RETENTION: i64 = 60 * 60;
 
 /// How long a user has to finish once they arrive, when nothing else is
 /// configured (`security.session_ttl`).
-pub const DEFAULT_SESSION_TTL: i64 = 300;
+pub(crate) const DEFAULT_SESSION_TTL: i64 = 300;
 
 /// Consent records kept before the oldest are dropped.
-pub const MAX_CONSENT_RECORDS: usize = 10_000;
+pub(crate) const MAX_CONSENT_RECORDS: usize = 10_000;
 
 /// A pushed authorization request awaiting the user.
 #[derive(Clone, Serialize, Deserialize)]
-pub struct PushedRequest {
+pub(crate) struct PushedRequest {
     pub request: AuthorizationRequest,
     /// The signed request object exactly as the client sent it.
     pub request_object: String,
@@ -84,7 +84,7 @@ impl std::fmt::Debug for PushedRequest {
 /// valid, and from then on it, not the `request_uri` lifetime, limits how
 /// long the user has to sign in and decide.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Session {
+pub(crate) struct Session {
     pub expires_at: i64,
     /// Set once the user has signed in during this session.
     #[serde(default)]
@@ -93,7 +93,7 @@ pub struct Session {
 
 /// Who signed in during a [`Session`], and from which browser.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SignedIn {
+pub(crate) struct SignedIn {
     /// The user's internal subject.
     pub user_subject: String,
     /// SHA-256 digest of the secret held in that browser's cookie. Signing
@@ -103,14 +103,14 @@ pub struct SignedIn {
 
 impl SignedIn {
     /// Whether `secret` is the one given to the browser that signed in.
-    pub fn is_browser(&self, secret: &str) -> bool {
+    pub(crate) fn is_browser(&self, secret: &str) -> bool {
         crate::util::ct_eq(&self.browser, digest(secret))
     }
 }
 
 /// A pushed request as found for a browser at the authorization endpoint.
 #[derive(Debug, Clone)]
-pub enum Visit {
+pub(crate) enum Visit {
     /// The user is within their session.
     Active(Box<PushedRequest>, Session),
     /// The user arrived in time but then took too long. The request is kept
@@ -123,7 +123,7 @@ pub enum Visit {
 /// sets it, so what is stored can be applied as it stands.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
-pub enum PlannedResponse {
+pub(crate) enum PlannedResponse {
     /// Issue an authorization code.
     Success {
         /// Internal subject of the user the response is about.
@@ -144,7 +144,7 @@ pub enum PlannedResponse {
 /// What the user authorised. Shared by the code and every token derived from
 /// it, so they can be revoked together.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Grant {
+pub(crate) struct Grant {
     pub id: String,
     pub client_id: String,
     /// The user's internal subject (not the pairwise value sent to clients).
@@ -166,7 +166,7 @@ pub struct Grant {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ConsentOutcome {
+pub(crate) enum ConsentOutcome {
     Approved,
     Denied,
 }
@@ -176,7 +176,7 @@ pub enum ConsentOutcome {
 /// to be recorded for each transaction and to be available for a consent
 /// history.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ConsentRecord {
+pub(crate) struct ConsentRecord {
     pub txn: String,
     pub client_id: String,
     /// The user's internal subject. `None` when the request was cancelled
@@ -192,7 +192,7 @@ pub struct ConsentRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuthorizationCode {
+pub(crate) struct AuthorizationCode {
     pub grant: Grant,
     pub redirect_uri: String,
     pub code_challenge: String,
@@ -201,7 +201,7 @@ pub struct AuthorizationCode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AccessToken {
+pub(crate) struct AccessToken {
     pub grant: Grant,
     /// SHA-256 thumbprint of the client certificate the token is bound to
     /// (RFC 8705 §3).
@@ -210,14 +210,14 @@ pub struct AccessToken {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RefreshToken {
+pub(crate) struct RefreshToken {
     pub grant: Grant,
     pub expires_at: i64,
 }
 
 /// Outcome of presenting an authorization code.
 #[derive(Debug)]
-pub enum CodeRedemption {
+pub(crate) enum CodeRedemption {
     Valid(Box<AuthorizationCode>),
     /// The code was already used. Tokens issued from it have been revoked.
     Replayed,
@@ -228,10 +228,10 @@ pub enum CodeRedemption {
 /// The backend could not be reached, or held something unreadable.
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("store: {0}")]
-pub struct StoreError(pub String);
+pub(crate) struct StoreError(pub String);
 
 impl StoreError {
-    pub fn new(detail: impl std::fmt::Display) -> Self {
+    pub(crate) fn new(detail: impl std::fmt::Display) -> Self {
         Self(detail.to_string())
     }
 }
@@ -242,11 +242,11 @@ impl From<StoreError> for OAuthError {
     }
 }
 
-pub type StoreResult<T> = Result<T, StoreError>;
+pub(crate) type StoreResult<T> = Result<T, StoreError>;
 
 /// A stored value with its bookkeeping.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Record {
+pub(crate) struct Record {
     pub value: String,
     /// When the record stops being valid (seconds since the epoch). `None`
     /// for records that are kept indefinitely.
@@ -261,7 +261,7 @@ impl Record {
     }
 }
 
-pub type BackendFuture<'a, T> = Pin<Box<dyn Future<Output = StoreResult<T>> + Send + 'a>>;
+pub(crate) type BackendFuture<'a, T> = Pin<Box<dyn Future<Output = StoreResult<T>> + Send + 'a>>;
 
 /// Where the store's data lives: a key-value table with a few atomic
 /// operations, and an append-only log.
@@ -269,7 +269,7 @@ pub type BackendFuture<'a, T> = Pin<Box<dyn Future<Output = StoreResult<T>> + Se
 /// Backends may return records that have expired; [`Store`] checks. Each
 /// operation must be atomic with respect to the others on the same key,
 /// including across processes for a shared backend.
-pub trait Backend: std::fmt::Debug + Send + Sync {
+pub(crate) trait Backend: std::fmt::Debug + Send + Sync {
     /// Write `value` under `key`, replacing anything there and resetting its
     /// counter.
     fn put<'a>(
@@ -311,8 +311,13 @@ pub trait Backend: std::fmt::Debug + Send + Sync {
     ) -> BackendFuture<'a, ()>;
 
     /// The entries of one partition, most recent first.
+    #[cfg_attr(not(test), expect(dead_code, reason = "the read side of the consent log, for the planned consent history"))]
     fn log_list<'a>(&'a self, partition: &'a str) -> BackendFuture<'a, Vec<String>>;
 
+    #[cfg_attr(
+        not(any(test, feature = "test-util")),
+        expect(dead_code, reason = "the read side of the consent log, for the planned consent history")
+    )]
     fn log_get<'a>(&'a self, id: &'a str) -> BackendFuture<'a, Option<String>>;
 
     /// Drop everything that expired at or before `now`. Backends that
@@ -325,7 +330,7 @@ pub trait Backend: std::fmt::Debug + Send + Sync {
 const DEFAULT_GRANT_LIFETIME: i64 = 24 * 60 * 60 + crate::config::MAX_ACCESS_TOKEN_TTL;
 
 #[derive(Debug, Clone)]
-pub struct Store {
+pub(crate) struct Store {
     backend: Arc<dyn Backend>,
     /// The longest any token of a grant can outlive the grant's code. A
     /// revocation is remembered for this long.
@@ -389,7 +394,7 @@ fn consent_partition(user_subject: Option<&str>) -> String {
 
 impl Store {
     /// A store over `backend`.
-    pub fn new(backend: Arc<dyn Backend>) -> Self {
+    pub(crate) fn new(backend: Arc<dyn Backend>) -> Self {
         Self {
             backend,
             grant_lifetime: DEFAULT_GRANT_LIFETIME,
@@ -400,7 +405,7 @@ impl Store {
     /// Set how long a user has at the authorization endpoint once they
     /// arrive with a valid `request_uri`.
     #[must_use]
-    pub fn session_ttl(mut self, seconds: i64) -> Self {
+    pub(crate) fn session_ttl(mut self, seconds: i64) -> Self {
         self.session_ttl = seconds;
         self
     }
@@ -408,13 +413,13 @@ impl Store {
     /// Set how long a revoked grant is remembered: at least as long as its
     /// longest-lived token.
     #[must_use]
-    pub fn grant_lifetime(mut self, seconds: i64) -> Self {
+    pub(crate) fn grant_lifetime(mut self, seconds: i64) -> Self {
         self.grant_lifetime = seconds;
         self
     }
 
     /// Store a pushed request and return its `request_uri`.
-    pub async fn push_request(
+    pub(crate) async fn push_request(
         &self,
         request: AuthorizationRequest,
         request_object: String,
@@ -448,7 +453,7 @@ impl Store {
 
     /// Look at a pushed request without consuming it, whether or not its
     /// `request_uri` is still accepted from a new browser.
-    pub async fn peek_request(
+    pub(crate) async fn peek_request(
         &self,
         request_uri: &str,
         now: i64,
@@ -483,7 +488,7 @@ impl Store {
     ///
     /// Returns `None` if the request is unknown, already used, or expired
     /// before any browser arrived.
-    pub async fn arrive(&self, request_uri: &str, now: i64) -> StoreResult<Option<Visit>> {
+    pub(crate) async fn arrive(&self, request_uri: &str, now: i64) -> StoreResult<Option<Visit>> {
         let Some(pushed) = self.peek_request(request_uri, now).await? else {
             return Ok(None);
         };
@@ -519,7 +524,7 @@ impl Store {
     /// The pushed request and session for a form submission. Unlike
     /// [`Store::arrive`] this never starts a session: a form can only come
     /// from a page that was shown within one.
-    pub async fn resume(&self, request_uri: &str, now: i64) -> StoreResult<Option<Visit>> {
+    pub(crate) async fn resume(&self, request_uri: &str, now: i64) -> StoreResult<Option<Visit>> {
         let Some(pushed) = self.peek_request(request_uri, now).await? else {
             return Ok(None);
         };
@@ -531,7 +536,7 @@ impl Store {
 
     /// Record that `user_subject` signed in during `session`, from the
     /// browser holding `browser_secret`. Returns the updated session.
-    pub async fn sign_in(
+    pub(crate) async fn sign_in(
         &self,
         request_uri: &str,
         session: &Session,
@@ -557,7 +562,7 @@ impl Store {
 
     /// Set the response the `ci` experience is to give to a pushed request,
     /// replacing any set before. It is kept until `expires_at`.
-    pub async fn plan_response(
+    pub(crate) async fn plan_response(
         &self,
         request_uri: &str,
         plan: &PlannedResponse,
@@ -569,7 +574,7 @@ impl Store {
     }
 
     /// The response a client has asked for, if it has asked for one.
-    pub async fn planned_response(
+    pub(crate) async fn planned_response(
         &self,
         request_uri: &str,
         now: i64,
@@ -579,7 +584,7 @@ impl Store {
 
     /// Forget the response chosen for a pushed request, so that it gets the
     /// default one again.
-    pub async fn clear_planned_response(&self, request_uri: &str) -> StoreResult<()> {
+    pub(crate) async fn clear_planned_response(&self, request_uri: &str) -> StoreResult<()> {
         self.backend.take(&plan_key(request_uri)).await.map(|_| ())
     }
 
@@ -587,7 +592,7 @@ impl Store {
     /// consumed, which is what makes a `request_uri` one-time use. Whether
     /// the user was still in time is for the caller to have checked, with
     /// [`Store::arrive`] or [`Store::resume`].
-    pub async fn take_request(
+    pub(crate) async fn take_request(
         &self,
         request_uri: &str,
         now: i64,
@@ -597,7 +602,7 @@ impl Store {
 
     /// Count a failed login. Returns `false` once the limit is reached, at
     /// which point the request has been discarded.
-    pub async fn record_failed_login(&self, request_uri: &str) -> StoreResult<bool> {
+    pub(crate) async fn record_failed_login(&self, request_uri: &str) -> StoreResult<bool> {
         let key = request_key(request_uri);
         let Some(record) = self.backend.increment(&key).await? else {
             return Ok(false);
@@ -609,7 +614,7 @@ impl Store {
         Ok(true)
     }
 
-    pub async fn create_code(&self, code: AuthorizationCode) -> StoreResult<String> {
+    pub(crate) async fn create_code(&self, code: AuthorizationCode) -> StoreResult<String> {
         let value = random_token(SECRET_BYTES);
         self.backend
             .put(&code_key(&value), encode(&code)?, Some(code.expires_at))
@@ -622,7 +627,7 @@ impl Store {
     /// Codes are single use (FAPI 2.0 §5.3.2.2-9). A second presentation
     /// revokes everything issued from the first (RFC 6749 §4.1.2). A used
     /// code is kept until it expires so that the replay can be recognised.
-    pub async fn redeem_code(
+    pub(crate) async fn redeem_code(
         &self,
         code: &str,
         client_id: &str,
@@ -682,7 +687,7 @@ impl Store {
         }
     }
 
-    pub async fn issue_access_token(&self, token: AccessToken) -> StoreResult<String> {
+    pub(crate) async fn issue_access_token(&self, token: AccessToken) -> StoreResult<String> {
         let value = random_token(SECRET_BYTES);
         self.backend
             .put(&access_key(&value), encode(&token)?, Some(token.expires_at))
@@ -690,7 +695,7 @@ impl Store {
         Ok(value)
     }
 
-    pub async fn access_token(&self, token: &str, now: i64) -> StoreResult<Option<AccessToken>> {
+    pub(crate) async fn access_token(&self, token: &str, now: i64) -> StoreResult<Option<AccessToken>> {
         let Some(found) = self.live::<AccessToken>(&access_key(token), now).await? else {
             return Ok(None);
         };
@@ -700,7 +705,7 @@ impl Store {
         Ok(Some(found))
     }
 
-    pub async fn issue_refresh_token(&self, token: RefreshToken) -> StoreResult<String> {
+    pub(crate) async fn issue_refresh_token(&self, token: RefreshToken) -> StoreResult<String> {
         let value = random_token(SECRET_BYTES);
         self.backend
             .put(
@@ -712,7 +717,7 @@ impl Store {
         Ok(value)
     }
 
-    pub async fn refresh_token(&self, token: &str, now: i64) -> StoreResult<Option<RefreshToken>> {
+    pub(crate) async fn refresh_token(&self, token: &str, now: i64) -> StoreResult<Option<RefreshToken>> {
         let Some(found) = self.live::<RefreshToken>(&refresh_key(token), now).await? else {
             return Ok(None);
         };
@@ -724,7 +729,7 @@ impl Store {
 
     /// Record a client assertion's `jti`. Returns `false` if it was already
     /// seen and has not yet expired, i.e. the assertion is a replay.
-    pub async fn record_jti(
+    pub(crate) async fn record_jti(
         &self,
         client_id: &str,
         jti: &str,
@@ -740,7 +745,7 @@ impl Store {
 
     /// Record a decided transaction. Records do not expire; the in-memory
     /// backend keeps only the most recent [`MAX_CONSENT_RECORDS`].
-    pub async fn record_consent(&self, record: ConsentRecord) -> StoreResult<()> {
+    pub(crate) async fn record_consent(&self, record: ConsentRecord) -> StoreResult<()> {
         self.backend
             .log_append(
                 &consent_partition(record.user_subject.as_deref()),
@@ -752,7 +757,11 @@ impl Store {
     }
 
     /// A user's decided transactions, most recent first.
-    pub async fn consent_history(&self, user_subject: &str) -> StoreResult<Vec<ConsentRecord>> {
+    ///
+    /// Consent history is a planned feature; nothing outside the tests
+    /// reads this yet. Do not remove it as dead code.
+    #[cfg_attr(not(test), expect(dead_code, reason = "the read side of the consent log, for the planned consent history"))]
+    pub(crate) async fn consent_history(&self, user_subject: &str) -> StoreResult<Vec<ConsentRecord>> {
         self.backend
             .log_list(&consent_partition(Some(user_subject)))
             .await?
@@ -761,8 +770,13 @@ impl Store {
             .collect()
     }
 
-    /// The record of the transaction identified by `txn`.
-    pub async fn consent(&self, txn: &str) -> StoreResult<Option<ConsentRecord>> {
+    /// The record of the transaction identified by `txn`. Like
+    /// [`Store::consent_history`], planned for the consent history.
+    #[cfg_attr(
+        not(any(test, feature = "test-util")),
+        expect(dead_code, reason = "the read side of the consent log, for the planned consent history")
+    )]
+    pub(crate) async fn consent(&self, txn: &str) -> StoreResult<Option<ConsentRecord>> {
         self.backend
             .log_get(txn)
             .await?
@@ -774,7 +788,7 @@ impl Store {
     /// as the signing key: the stored value, or the result of `generate` if
     /// there is none yet. When several instances start at once, they all
     /// end up with the value that was stored first.
-    pub async fn secret(
+    pub(crate) async fn secret(
         &self,
         name: &str,
         generate: impl FnOnce() -> anyhow::Result<String>,
@@ -794,7 +808,7 @@ impl Store {
     }
 
     /// Drop everything that has expired. Called periodically.
-    pub async fn purge(&self, now: i64) -> StoreResult<()> {
+    pub(crate) async fn purge(&self, now: i64) -> StoreResult<()> {
         self.backend.purge(now).await
     }
 }

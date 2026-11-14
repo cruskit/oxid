@@ -250,7 +250,7 @@ async fn load_request(
 }
 
 /// `GET /authorize`
-pub async fn authorize(
+pub(super) async fn authorize(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
@@ -315,7 +315,7 @@ pub async fn authorize(
 
 /// `POST /authorize/decision`: a form submitted from an experience's page,
 /// or from the session expiry page.
-pub async fn decision(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+pub(super) async fn decision(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
     let Ok(params) = Params::parse(&body) else {
         return error_page(
             &state,

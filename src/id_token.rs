@@ -13,7 +13,7 @@ use crate::user::User;
 use crate::util::{b64url, sha256};
 
 /// The `sub` that `client` sees for `user`.
-pub fn subject_for(state: &AppState, client: &Client, user: &User) -> String {
+pub(crate) fn subject_for(state: &AppState, client: &Client, user: &User) -> String {
     subject::pairwise(
         state.pairwise_salt.expose(),
         &client.sector_identifier,
@@ -29,7 +29,7 @@ fn at_hash(access_token: &str) -> String {
 
 /// Shown in place of `at_hash` when previewing an ID token: the real value
 /// depends on the access token, which does not exist yet.
-pub const AT_HASH_PLACEHOLDER: &str = "(set when the access token is issued)";
+pub(crate) const AT_HASH_PLACEHOLDER: &str = "(set when the access token is issued)";
 
 /// Manual changes to a set of claims: values to set and names to remove.
 ///
@@ -37,14 +37,14 @@ pub const AT_HASH_PLACEHOLDER: &str = "(set when the access token is issued)";
 /// replacement, so that claims they left alone (`iat`, `exp`, `at_hash`)
 /// still get their real values when the token is issued.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ClaimEdits {
+pub(crate) struct ClaimEdits {
     pub set: Map<String, Value>,
     pub remove: BTreeSet<String>,
 }
 
 impl ClaimEdits {
     /// The changes that turn `base` into `edited`.
-    pub fn between(base: &Map<String, Value>, edited: &Map<String, Value>) -> Self {
+    pub(crate) fn between(base: &Map<String, Value>, edited: &Map<String, Value>) -> Self {
         Self {
             set: edited
                 .iter()
@@ -59,11 +59,11 @@ impl ClaimEdits {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.set.is_empty() && self.remove.is_empty()
     }
 
-    pub fn apply(&self, claims: &mut Map<String, Value>) {
+    pub(crate) fn apply(&self, claims: &mut Map<String, Value>) {
         for name in &self.remove {
             claims.remove(name);
         }
@@ -74,7 +74,7 @@ impl ClaimEdits {
 }
 
 /// Build and sign an ID token, applying any manual edits on the grant.
-pub fn issue(
+pub(crate) fn issue(
     state: &AppState,
     client: &Client,
     user: &User,
@@ -91,7 +91,7 @@ pub fn issue(
 
 /// The ID token claims for a grant as they would be issued now, with
 /// [`AT_HASH_PLACEHOLDER`] for `at_hash` and before any manual edits.
-pub fn preview(
+pub(crate) fn preview(
     state: &AppState,
     client: &Client,
     user: &User,
@@ -142,7 +142,7 @@ fn claims(
 }
 
 /// The `UserInfo` response body for a grant.
-pub fn userinfo(
+pub(crate) fn userinfo(
     state: &AppState,
     client: &Client,
     user: &User,

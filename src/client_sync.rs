@@ -131,6 +131,10 @@ impl ClientSyncConfig {
 }
 
 /// Fetch every client from the registry.
+#[cfg_attr(
+    not(feature = "test-util"),
+    expect(unreachable_pub, reason = "the integration tests use it")
+)]
 pub async fn fetch(config: &ClientSyncConfig) -> Result<Vec<Client>> {
     config.validate()?;
     let signing_key = SigningKey::from_pem_file(&config.signing_key)?;

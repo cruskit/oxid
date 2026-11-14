@@ -6,6 +6,8 @@
 //! - [`http`]: the router driven in-process, and the browser and token legs
 //!   of the flow.
 
+#![allow(unreachable_pub, reason = "test fixtures, shared across modules")]
+
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
@@ -108,7 +110,7 @@ pub fn valid_assertion(issuer: &str, now: i64) -> Value {
 
 /// A consent in which the user shares every claim that exists.
 pub fn everything() -> BTreeSet<String> {
-    crate::claims::oidc_standard_claims()
+    crate::claims::catalogue::oidc_standard_claims()
         .map(str::to_owned)
         .chain(crate::claims::verified_claims_supported())
         .collect()

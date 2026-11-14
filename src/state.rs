@@ -16,7 +16,7 @@ use crate::user::{StaticUserStore, UserStore};
 use crate::util::{Clock, Secret, SystemClock, random_token};
 
 #[derive(Debug)]
-pub struct Inner {
+pub(crate) struct Inner {
     pub issuer: String,
     pub mtls_base_url: String,
     pub security: SecurityConfig,
@@ -36,7 +36,7 @@ pub struct Inner {
 
 /// Cheaply cloneable handle to the provider's state.
 #[derive(Debug, Clone)]
-pub struct AppState(Arc<Inner>);
+pub(crate) struct AppState(Arc<Inner>);
 
 impl Deref for AppState {
     type Target = Inner;
@@ -53,14 +53,15 @@ impl AppState {
         Self(Arc::new(inner))
     }
 
-    pub async fn from_config(config: &Config) -> Result<Self> {
+    #[cfg(test)]
+    pub(crate) async fn from_config(config: &Config) -> Result<Self> {
         Self::build(config, Arc::new(SystemClock), Vec::new()).await
     }
 
     /// Everything that happens before the first request: validate the
     /// configuration, load clients from the registry if that is enabled,
     /// and open the store.
-    pub async fn start(config: &Config, clock: Option<Arc<dyn Clock>>) -> Result<Self> {
+    pub(crate) async fn start(config: &Config, clock: Option<Arc<dyn Clock>>) -> Result<Self> {
         config.validate()?;
         // Load clients from the registry before accepting any request, so
         // the provider never runs with a partial list.
@@ -77,7 +78,7 @@ impl AppState {
     /// Build the state. `synced_clients` are clients loaded from outside the
     /// configuration file (see [`crate::client_sync`]); they are added to
     /// the configured ones, which win if a client id appears in both.
-    pub async fn build(
+    pub(crate) async fn build(
         config: &Config,
         clock: Arc<dyn Clock>,
         synced_clients: Vec<crate::client::Client>,
@@ -205,17 +206,17 @@ impl AppState {
         })))
     }
 
-    pub fn now(&self) -> i64 {
+    pub(crate) fn now(&self) -> i64 {
         self.clock.now()
     }
 
     /// URL of an endpoint on the public listener.
-    pub fn url(&self, path: &str) -> String {
+    pub(crate) fn url(&self, path: &str) -> String {
         format!("{}{path}", self.issuer)
     }
 
     /// URL of an endpoint on the mTLS listener.
-    pub fn mtls_url(&self, path: &str) -> String {
+    pub(crate) fn mtls_url(&self, path: &str) -> String {
         format!("{}{path}", self.mtls_base_url)
     }
 }
@@ -250,7 +251,7 @@ async fn open_store(config: &Config) -> Result<Store> {
 }
 
 /// Host names a self-signed development certificate should cover.
-pub fn certificate_names(config: &Config) -> Vec<String> {
+pub(crate) fn certificate_names(config: &Config) -> Vec<String> {
     let mut names = vec!["localhost".to_owned(), "127.0.0.1".to_owned()];
     for base in [&config.issuer, &config.mtls_base_url] {
         if let Some(host) = Url::parse(base)

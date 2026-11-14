@@ -20,8 +20,17 @@ use crate::util::Secret;
 use jiff::tz::TimeZone;
 
 /// Username of the built-in demo user.
+#[cfg_attr(
+    not(feature = "test-util"),
+    expect(unreachable_pub, reason = "the integration tests use it")
+)]
 pub const DEMO_USERNAME: &str = "demo";
 /// Password of the built-in demo user. Development only.
+#[cfg_attr(
+    not(feature = "test-util"),
+    expect(unreachable_pub, reason = "the integration tests use it")
+)]
+#[cfg(any(test, feature = "test-util"))]
 pub const DEMO_PASSWORD: &str = "demo-password";
 
 /// The kind of a `PayID`, in the notation ConnectID uses.
@@ -125,19 +134,19 @@ impl BankAccount {
 /// The time zone in which ages are worked out when neither the
 /// configuration nor the user's `zoneinfo` claim says otherwise: ConnectID
 /// serves Australia.
-pub const DEFAULT_TIME_ZONE: &str = "Australia/Sydney";
+pub(crate) const DEFAULT_TIME_ZONE: &str = "Australia/Sydney";
 
 /// The time zone named [`DEFAULT_TIME_ZONE`].
 #[expect(
     clippy::expect_used,
     reason = "the time zone database is compiled in and always has this zone"
 )]
-pub fn default_time_zone() -> TimeZone {
+pub(crate) fn default_time_zone() -> TimeZone {
     TimeZone::get(DEFAULT_TIME_ZONE).expect("the bundled time zone database has Australia/Sydney")
 }
 
 #[derive(Debug, Clone)]
-pub struct User {
+pub(crate) struct User {
     /// Stable internal identifier; clients only ever see a pairwise value
     /// derived from it.
     pub subject: String,
@@ -155,7 +164,7 @@ pub struct User {
 }
 
 impl User {
-    pub fn new(
+    pub(crate) fn new(
         subject: impl Into<String>,
         username: impl Into<String>,
         password_hash: Option<String>,
@@ -205,7 +214,7 @@ impl User {
     /// Work out ages in `zone`, unless the user's `zoneinfo` claim names
     /// their own.
     #[must_use]
-    pub fn with_default_time_zone(mut self, zone: &TimeZone) -> Self {
+    pub(crate) fn with_default_time_zone(mut self, zone: &TimeZone) -> Self {
         self.time_zone = self
             .zoneinfo()
             .and_then(|name| TimeZone::get(name).ok())
@@ -214,12 +223,12 @@ impl User {
     }
 
     /// The time zone in which the user's birthdays start.
-    pub fn time_zone(&self) -> &TimeZone {
+    pub(crate) fn time_zone(&self) -> &TimeZone {
         &self.time_zone
     }
 
     /// Attach the user's bank account.
-    pub fn with_bank_account(mut self, account: BankAccount) -> Result<Self> {
+    pub(crate) fn with_bank_account(mut self, account: BankAccount) -> Result<Self> {
         account
             .validate()
             .map_err(|e| anyhow!("user '{}': {e}", self.username))?;
@@ -227,7 +236,7 @@ impl User {
         Ok(self)
     }
 
-    pub fn from_config(config: &UserConfig) -> Result<Self> {
+    pub(crate) fn from_config(config: &UserConfig) -> Result<Self> {
         let user = Self::new(
             &config.subject,
             &config.username,
@@ -245,7 +254,7 @@ impl User {
 
     /// A name to show for this user: their `name` claim, else given and
     /// family names, else the username.
-    pub fn display_name(&self) -> String {
+    pub(crate) fn display_name(&self) -> String {
         let claim = |name: &str| self.claims.get(name).and_then(Value::as_str);
         if let Some(name) = claim("name") {
             return name.to_owned();
@@ -292,7 +301,7 @@ pub fn hash_password(password: &str) -> Result<String> {
 }
 
 /// Authentication and lookup of end users.
-pub trait UserStore: Send + Sync + Debug {
+pub(crate) trait UserStore: Send + Sync + Debug {
     /// Check credentials. This is deliberately slow (password hashing), so
     /// async callers should run it on a blocking thread.
     fn authenticate(&self, username: &str, password: &str) -> Option<Arc<User>>;
@@ -306,14 +315,14 @@ pub trait UserStore: Send + Sync + Debug {
 
 /// A fixed set of users held in memory.
 #[derive(Debug)]
-pub struct StaticUserStore {
+pub(crate) struct StaticUserStore {
     by_username: HashMap<String, Arc<User>>,
     /// Users in the order they were defined.
     ordered: Vec<Arc<User>>,
 }
 
 impl StaticUserStore {
-    pub fn new(users: impl IntoIterator<Item = User>) -> Result<Self> {
+    pub(crate) fn new(users: impl IntoIterator<Item = User>) -> Result<Self> {
         let mut by_username = HashMap::new();
         let mut ordered = Vec::new();
         let mut subjects = std::collections::HashSet::new();
@@ -339,7 +348,7 @@ impl StaticUserStore {
 
     /// The configured users, whose ages are worked out in `time_zone`
     /// unless their `zoneinfo` claim says otherwise.
-    pub fn from_config(configs: &[UserConfig], time_zone: &TimeZone) -> Result<Self> {
+    pub(crate) fn from_config(configs: &[UserConfig], time_zone: &TimeZone) -> Result<Self> {
         Self::new(
             configs
                 .iter()
@@ -350,7 +359,7 @@ impl StaticUserStore {
 
     /// The built-in customers, used when none are configured. They all
     /// share [`DEMO_PASSWORD`].
-    pub fn demo(time_zone: &TimeZone) -> Result<Self> {
+    pub(crate) fn demo(time_zone: &TimeZone) -> Result<Self> {
         Self::new(
             demo_users()?
                 .into_iter()
@@ -358,12 +367,9 @@ impl StaticUserStore {
         )
     }
 
-    pub fn len(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
         self.by_username.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.by_username.is_empty()
     }
 }
 

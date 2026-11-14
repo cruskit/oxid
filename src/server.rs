@@ -162,6 +162,7 @@ impl ServerBuilder {
             public_addr,
             mtls_addr,
             certificate: identity.certs[0].clone(),
+            #[cfg(feature = "test-util")]
             state,
             shutdown,
             tasks,
@@ -204,12 +205,45 @@ async fn bind(addr: SocketAddr) -> Result<TcpListener> {
         .with_context(|| format!("binding {addr}"))
 }
 
+/// Inspection of a running provider, for the integration tests.
+#[cfg(feature = "test-util")]
+impl Server {
+    /// The consent record of the transaction `txn`, as stored.
+    pub async fn consent_record(&self, txn: &str) -> Option<serde_json::Value> {
+        let record = self.state.store.consent(txn).await.ok()??;
+        serde_json::to_value(record).ok()
+    }
+
+    /// The claims of the user who signs in as `username`.
+    pub fn user_claims(
+        &self,
+        username: &str,
+    ) -> Option<serde_json::Map<String, serde_json::Value>> {
+        self.state
+            .users
+            .list()
+            .into_iter()
+            .find(|user| user.username == username)
+            .map(|user| user.claims.clone())
+    }
+
+    /// The name of the registered client `client_id`, if it is registered.
+    pub fn client_name(&self, client_id: &str) -> Option<String> {
+        self.state
+            .clients
+            .get(client_id)
+            .map(|client| client.name.clone())
+    }
+}
+
 /// A running provider.
 #[derive(Debug)]
 pub struct Server {
     public_addr: SocketAddr,
     mtls_addr: SocketAddr,
     certificate: CertificateDer<'static>,
+    /// For the inspection methods the integration tests use.
+    #[cfg(feature = "test-util")]
     state: AppState,
     shutdown: watch::Sender<bool>,
     tasks: Vec<JoinHandle<()>>,
@@ -227,10 +261,6 @@ impl Server {
     /// The server's leaf certificate, so tests can trust a generated one.
     pub fn certificate(&self) -> &CertificateDer<'static> {
         &self.certificate
-    }
-
-    pub fn state(&self) -> &AppState {
-        &self.state
     }
 
     /// Stop accepting connections, let in-flight requests finish, and wait.

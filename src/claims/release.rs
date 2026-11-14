@@ -20,7 +20,7 @@ use crate::user::User;
 /// provisioned for it, the user agreed to share it (`shared`) and the user
 /// has it. Anything else is omitted rather than being an error, including
 /// claims requested as essential (ConnectID identity assurance §5.1).
-pub fn release(
+pub(crate) fn release(
     user: &User,
     client: &Client,
     requested: &Map<String, Value>,

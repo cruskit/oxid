@@ -147,9 +147,9 @@ impl TestOp {
         }
     }
 
-    /// The running provider's state, for assertions on what it recorded.
-    pub fn state(&self) -> &oxid::state::AppState {
-        self.server.as_ref().expect("server is running").state()
+    /// The running provider, for assertions on what it recorded.
+    pub fn server(&self) -> &Server {
+        self.server.as_ref().expect("server is running")
     }
 
     /// The provider's TLS certificate.

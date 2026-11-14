@@ -5,6 +5,10 @@
     clippy::expect_used,
     reason = "test code panics on purpose"
 )]
+#![allow(
+    unreachable_pub,
+    reason = "the shared harness is public to each test binary"
+)]
 
 mod common;
 
@@ -342,15 +346,13 @@ async fn unedited_success_is_sent_for_the_selected_customer() {
     assert_eq!(claims["at_hash"].as_str().unwrap().len(), 22);
     // The transaction is recorded like any other.
     let record = op
-        .state()
-        .store
-        .consent(claims["txn"].as_str().unwrap())
+        .server()
+        .consent_record(claims["txn"].as_str().unwrap())
         .await
-        .unwrap()
         .unwrap();
-    assert_eq!(record.user_subject.as_deref(), Some(RILEY));
+    assert_eq!(record["user_subject"].as_str(), Some(RILEY));
     assert_eq!(
-        record.purpose.as_deref(),
+        record["purpose"].as_str(),
         Some("Checking <your> identity & age")
     );
     op.stop().await;

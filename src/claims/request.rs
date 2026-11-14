@@ -16,7 +16,7 @@ use crate::user::User;
 /// Individual claim requests are kept as raw JSON: a request is either `null`
 /// or an object, and members we do not understand must be ignored.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClaimsRequest {
+pub(crate) struct ClaimsRequest {
     #[serde(default)]
     pub id_token: Map<String, Value>,
     #[serde(default)]
@@ -26,7 +26,7 @@ pub struct ClaimsRequest {
 impl ClaimsRequest {
     /// Parse the parameter. Inside a request object it is a JSON object; as a
     /// plain parameter it is that object serialised to a string.
-    pub fn parse(value: &Value) -> Result<Self, String> {
+    pub(crate) fn parse(value: &Value) -> Result<Self, String> {
         let owned;
         let object = match value {
             Value::Object(object) => object,
@@ -64,14 +64,15 @@ impl ClaimsRequest {
         })
     }
 
-    pub fn is_empty(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
         self.id_token.is_empty() && self.userinfo.is_empty()
     }
 }
 
 /// One claim the user is asked to share.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConsentItem {
+pub(crate) struct ConsentItem {
     pub name: String,
     /// A short description for the consent page.
     pub label: String,
@@ -85,7 +86,7 @@ impl ClaimsRequest {
     /// `scopes`, sorted by name. This is what the user is asked to consent
     /// to; requests that will be ignored are left out. A claim is essential
     /// if any part of the request marks it so.
-    pub fn consentable(&self, client: &Client, scopes: &[String]) -> Vec<ConsentItem> {
+    pub(crate) fn consentable(&self, client: &Client, scopes: &[String]) -> Vec<ConsentItem> {
         let mut found: Vec<(&str, bool)> = Vec::new();
         for location in [&self.id_token, &self.userinfo] {
             found.extend(
@@ -129,7 +130,7 @@ impl ClaimsRequest {
     /// [`ClaimsRequest::consentable`], for showing on the consent page.
     /// Verified claims are listed under their own names. A claim the user
     /// does not have is absent: it would not be released.
-    pub fn shareable_values(
+    pub(crate) fn shareable_values(
         &self,
         user: &User,
         client: &Client,
@@ -160,7 +161,7 @@ impl ClaimsRequest {
 
 /// The claims the user agreed to share, given the names they left selected.
 /// Essential claims are always included: they cannot be declined one by one.
-pub fn shared_claims(
+pub(crate) fn shared_claims(
     items: &[ConsentItem],
     mut selected: impl FnMut(&str) -> bool,
 ) -> BTreeSet<String> {

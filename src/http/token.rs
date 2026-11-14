@@ -18,7 +18,7 @@ use crate::pkce;
 use crate::state::AppState;
 use crate::store::{AccessToken, CodeRedemption, Grant, RefreshToken};
 
-pub async fn token(
+pub(super) async fn token(
     State(state): State<AppState>,
     Extension(conn): Extension<ConnInfo>,
     OAuthForm(params): OAuthForm,

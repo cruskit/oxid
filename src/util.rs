@@ -4,6 +4,7 @@
 //! implements an algorithm itself.
 
 use std::fmt::Debug;
+#[cfg(any(test, feature = "test-util"))]
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -42,16 +43,24 @@ impl<T> Debug for Secret<T> {
 }
 
 /// Encode bytes as unpadded base64url (RFC 4648 §5).
+#[cfg_attr(
+    not(feature = "test-util"),
+    expect(unreachable_pub, reason = "the integration tests use it")
+)]
 pub fn b64url(data: impl AsRef<[u8]>) -> String {
     URL_SAFE_NO_PAD.encode(data)
 }
 
 /// Decode unpadded base64url, returning `None` on malformed input.
-pub fn b64url_decode(data: impl AsRef<[u8]>) -> Option<Vec<u8>> {
+pub(crate) fn b64url_decode(data: impl AsRef<[u8]>) -> Option<Vec<u8>> {
     URL_SAFE_NO_PAD.decode(data).ok()
 }
 
 /// SHA-256 digest of `data`.
+#[cfg_attr(
+    not(feature = "test-util"),
+    expect(unreachable_pub, reason = "the integration tests use it")
+)]
 pub fn sha256(data: impl AsRef<[u8]>) -> [u8; 32] {
     let digest = digest::digest(&digest::SHA256, data.as_ref());
     let mut out = [0u8; 32];
@@ -67,6 +76,10 @@ pub fn sha256(data: impl AsRef<[u8]>) -> [u8; 32] {
     clippy::expect_used,
     reason = "without a working random number generator no credential can be issued safely"
 )]
+#[cfg_attr(
+    not(feature = "test-util"),
+    expect(unreachable_pub, reason = "the integration tests use it")
+)]
 pub fn random_token(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
     rand::fill(&mut buf).expect("system random number generator failed");
@@ -74,7 +87,7 @@ pub fn random_token(bytes: usize) -> String {
 }
 
 /// Constant-time byte comparison.
-pub fn ct_eq(a: impl AsRef<[u8]>, b: impl AsRef<[u8]>) -> bool {
+pub(crate) fn ct_eq(a: impl AsRef<[u8]>, b: impl AsRef<[u8]>) -> bool {
     constant_time::verify_slices_are_equal(a.as_ref(), b.as_ref()).is_ok()
 }
 
@@ -97,10 +110,12 @@ impl Clock for SystemClock {
     }
 }
 
-/// A clock that only moves when told to. Intended for tests.
+/// A clock that only moves when told to. For tests only.
+#[cfg(any(test, feature = "test-util"))]
 #[derive(Debug, Default)]
 pub struct ManualClock(AtomicI64);
 
+#[cfg(any(test, feature = "test-util"))]
 impl ManualClock {
     pub fn new(now: i64) -> Self {
         Self(AtomicI64::new(now))
@@ -115,6 +130,7 @@ impl ManualClock {
     }
 }
 
+#[cfg(any(test, feature = "test-util"))]
 impl Clock for ManualClock {
     fn now(&self) -> i64 {
         self.0.load(Ordering::SeqCst)

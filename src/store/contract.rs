@@ -6,14 +6,14 @@ use crate::testing::client_with_key;
 use crate::testing::shared_key;
 use crate::testing::{CHALLENGE, valid_params};
 
-pub const NOW: i64 = 1_800_000_000;
+pub(crate) const NOW: i64 = 1_800_000_000;
 
-pub fn request() -> AuthorizationRequest {
+pub(crate) fn request() -> AuthorizationRequest {
     AuthorizationRequest::from_params(&client_with_key("rp", shared_key()), &valid_params())
         .unwrap()
 }
 
-pub fn grant(id: &str) -> Grant {
+pub(crate) fn grant(id: &str) -> Grant {
     Grant {
         id: id.to_owned(),
         client_id: "rp".to_owned(),
@@ -28,7 +28,7 @@ pub fn grant(id: &str) -> Grant {
     }
 }
 
-pub fn consent(txn: &str, user: Option<&str>, decided_at: i64) -> ConsentRecord {
+pub(crate) fn consent(txn: &str, user: Option<&str>, decided_at: i64) -> ConsentRecord {
     ConsentRecord {
         txn: txn.to_owned(),
         client_id: "rp".to_owned(),
@@ -45,7 +45,7 @@ pub fn consent(txn: &str, user: Option<&str>, decided_at: i64) -> ConsentRecord 
     }
 }
 
-pub fn code(grant_id: &str) -> AuthorizationCode {
+pub(crate) fn code(grant_id: &str) -> AuthorizationCode {
     AuthorizationCode {
         grant: grant(grant_id),
         redirect_uri: "https://rp.example.com/cb".to_owned(),
@@ -56,7 +56,7 @@ pub fn code(grant_id: &str) -> AuthorizationCode {
 }
 
 /// `tag` keeps runs against a shared table apart.
-pub async fn consent_history(store: &Store, tag: &str) {
+pub(crate) async fn consent_history(store: &Store, tag: &str) {
     let (u1, u2) = (format!("{tag}-u1"), format!("{tag}-u2"));
     let txn = |n: u8| format!("{tag}-t{n}");
     store
@@ -102,7 +102,7 @@ pub async fn consent_history(store: &Store, tag: &str) {
     assert_eq!(store.consent_history(&u1).await.unwrap().len(), 2);
 }
 
-pub async fn pushed_requests(store: &Store) {
+pub(crate) async fn pushed_requests(store: &Store) {
     let a = store
         .push_request(request(), "object".to_owned(), NOW + 60)
         .await
@@ -139,7 +139,7 @@ pub async fn pushed_requests(store: &Store) {
 
 /// A planned response is kept per `request_uri` until it expires, and
 /// the last one set wins.
-pub async fn planned_responses(store: &Store) {
+pub(crate) async fn planned_responses(store: &Store) {
     let uri = format!("{REQUEST_URI_PREFIX}planned");
     assert_eq!(store.planned_response(&uri, NOW).await.unwrap(), None);
 
@@ -180,7 +180,7 @@ pub async fn planned_responses(store: &Store) {
 
 /// Arriving in time starts a session, which then outlives the
 /// `request_uri` and is what the user is held to.
-pub async fn sessions(store: &Store) {
+pub(crate) async fn sessions(store: &Store) {
     let ttl = DEFAULT_SESSION_TTL;
     let uri = store
         .push_request(request(), String::new(), NOW + 60)
@@ -247,7 +247,7 @@ pub async fn sessions(store: &Store) {
     assert!(store.resume(&uri, NOW).await.unwrap().is_none());
 }
 
-pub async fn failed_logins(store: &Store) {
+pub(crate) async fn failed_logins(store: &Store) {
     let uri = store
         .push_request(request(), String::new(), NOW + 60)
         .await
@@ -262,7 +262,7 @@ pub async fn failed_logins(store: &Store) {
     assert!(!store.record_failed_login("unknown").await.unwrap());
 }
 
-pub async fn code_replay(store: &Store) {
+pub(crate) async fn code_replay(store: &Store) {
     // A grant id unique to this run, for shared tables.
     let grant_id = format!("g-{}", random_token(8));
     let mut unique = code("g1");
@@ -325,7 +325,7 @@ pub async fn code_replay(store: &Store) {
     );
 }
 
-pub async fn code_binding(store: &Store) {
+pub(crate) async fn code_binding(store: &Store) {
     let value = store.create_code(code("g1")).await.unwrap();
     assert!(matches!(
         store.redeem_code(&value, "other", NOW).await.unwrap(),
@@ -348,7 +348,7 @@ pub async fn code_binding(store: &Store) {
     ));
 }
 
-pub async fn concurrent_redemption(store: &Store) {
+pub(crate) async fn concurrent_redemption(store: &Store) {
     let value = store.create_code(code("g1")).await.unwrap();
     let attempts = (0..8).map(|_| {
         let store = store.clone();
@@ -364,7 +364,7 @@ pub async fn concurrent_redemption(store: &Store) {
     assert_eq!(valid, 1, "exactly one presentation redeems the code");
 }
 
-pub async fn tokens(store: &Store) {
+pub(crate) async fn tokens(store: &Store) {
     // Not a grant another check revokes.
     let id = format!("g-{}", random_token(8));
     let access = store
@@ -407,7 +407,7 @@ pub async fn tokens(store: &Store) {
     assert!(store.refresh_token(&access, NOW).await.unwrap().is_none());
 }
 
-pub async fn jti_replay(store: &Store, tag: &str) {
+pub(crate) async fn jti_replay(store: &Store, tag: &str) {
     let (rp, other) = (format!("{tag}-rp"), format!("{tag}-other"));
     assert!(store.record_jti(&rp, "j1", NOW + 60, NOW).await.unwrap());
     assert!(
@@ -430,7 +430,7 @@ pub async fn jti_replay(store: &Store, tag: &str) {
     );
 }
 
-pub async fn secrets(store: &Store, tag: &str) {
+pub(crate) async fn secrets(store: &Store, tag: &str) {
     let name = format!("{tag}-secret");
     let first = store.secret(&name, || Ok("one".to_owned())).await.unwrap();
     assert_eq!(first, "one");
@@ -454,7 +454,7 @@ pub async fn secrets(store: &Store, tag: &str) {
 }
 
 /// Every check, in turn.
-pub async fn all(store: &Store, tag: &str) {
+pub(crate) async fn all(store: &Store, tag: &str) {
     // Purging runs inside these, so they go before anything transient.
     consent_history(store, tag).await;
     secrets(store, tag).await;

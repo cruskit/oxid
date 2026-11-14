@@ -49,7 +49,7 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     (scheme.eq_ignore_ascii_case("bearer") && !token.is_empty()).then_some(token)
 }
 
-pub async fn userinfo(
+pub(super) async fn userinfo(
     State(state): State<AppState>,
     Extension(conn): Extension<ConnInfo>,
     headers: HeaderMap,

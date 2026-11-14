@@ -14,8 +14,8 @@ use url::Url;
 
 use crate::config::ClientConfig;
 
-pub const GRANT_AUTHORIZATION_CODE: &str = "authorization_code";
-pub const GRANT_REFRESH_TOKEN: &str = "refresh_token";
+pub(crate) const GRANT_AUTHORIZATION_CODE: &str = "authorization_code";
+pub(crate) const GRANT_REFRESH_TOKEN: &str = "refresh_token";
 
 /// Which set of identity claims a client works with. The security profile
 /// (FAPI 2.0 with the ConnectID restrictions) is the same for both.
@@ -33,6 +33,10 @@ pub enum Profile {
 
 /// A confidential client. FAPI 2.0 §5.3.2.1-3 permits no other kind.
 #[derive(Debug, Clone)]
+#[cfg_attr(
+    not(feature = "test-util"),
+    expect(unreachable_pub, reason = "the integration tests use it")
+)]
 pub struct Client {
     pub id: String,
     pub name: String,
@@ -51,7 +55,7 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn from_config(config: &ClientConfig) -> Result<Self> {
+    pub(crate) fn from_config(config: &ClientConfig) -> Result<Self> {
         let id = config.client_id.trim();
         ensure!(!id.is_empty(), "client_id must not be empty");
         ensure!(
@@ -122,6 +126,10 @@ impl Client {
 
     /// Whether this client may be given the claim `name`: its profile must
     /// define the claim and the client must be provisioned for it.
+    #[cfg_attr(
+        not(feature = "test-util"),
+        expect(unreachable_pub, reason = "the integration tests use it")
+    )]
     pub fn allows_claim(&self, name: &str) -> bool {
         crate::claims::profile_allows(self.profile, name)
             && self
@@ -131,12 +139,20 @@ impl Client {
     }
 
     /// Exact string comparison, as required by RFC 9700 §2.1.
+    #[cfg_attr(
+        not(feature = "test-util"),
+        expect(unreachable_pub, reason = "the integration tests use it")
+    )]
     pub fn has_redirect_uri(&self, uri: &str) -> bool {
         self.redirect_uris
             .iter()
             .any(|registered| registered == uri)
     }
 
+    #[cfg_attr(
+        not(feature = "test-util"),
+        expect(unreachable_pub, reason = "the integration tests use it")
+    )]
     pub fn allows_refresh_tokens(&self) -> bool {
         self.grant_types.contains(GRANT_REFRESH_TOKEN)
     }
@@ -163,7 +179,7 @@ fn validate_redirect_uri(uri: &str) -> Result<String> {
 }
 
 /// Lookup of registered clients.
-pub trait ClientRegistry: Send + Sync + Debug {
+pub(crate) trait ClientRegistry: Send + Sync + Debug {
     fn get(&self, client_id: &str) -> Option<Arc<Client>>;
 
     /// The profiles registered clients use. Discovery advertises the claims
@@ -174,12 +190,12 @@ pub trait ClientRegistry: Send + Sync + Debug {
 
 /// A fixed set of clients held in memory.
 #[derive(Debug, Default)]
-pub struct StaticClientRegistry {
+pub(crate) struct StaticClientRegistry {
     clients: HashMap<String, Arc<Client>>,
 }
 
 impl StaticClientRegistry {
-    pub fn new(clients: impl IntoIterator<Item = Client>) -> Result<Self> {
+    pub(crate) fn new(clients: impl IntoIterator<Item = Client>) -> Result<Self> {
         let mut map = HashMap::new();
         for client in clients {
             let id = client.id.clone();
@@ -191,7 +207,8 @@ impl StaticClientRegistry {
         Ok(Self { clients: map })
     }
 
-    pub fn from_config(configs: &[ClientConfig]) -> Result<Self> {
+    #[cfg(test)]
+    pub(crate) fn from_config(configs: &[ClientConfig]) -> Result<Self> {
         let clients = configs
             .iter()
             .map(Client::from_config)
@@ -199,11 +216,7 @@ impl StaticClientRegistry {
         Self::new(clients)
     }
 
-    pub fn len(&self) -> usize {
-        self.clients.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.clients.is_empty()
     }
 }

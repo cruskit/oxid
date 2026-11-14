@@ -16,6 +16,10 @@ use crate::jose::{self, JoseError, SigningAlg};
 ///
 /// PS256 is the only algorithm the ConnectID profile permits (§5), so the
 /// provider's key is always RSA.
+#[cfg_attr(
+    not(feature = "test-util"),
+    expect(unreachable_pub, reason = "the integration tests use it")
+)]
 pub struct SigningKey {
     kid: String,
     encoding_key: EncodingKey,
@@ -32,15 +36,19 @@ impl fmt::Debug for SigningKey {
 }
 
 impl SigningKey {
-    pub const ALG: SigningAlg = SigningAlg::PS256;
+    pub(crate) const ALG: SigningAlg = SigningAlg::PS256;
 
     /// Load a PEM-encoded RSA private key (PKCS#1 or PKCS#8).
-    pub fn from_pem_file(path: &Path) -> Result<Self> {
+    pub(crate) fn from_pem_file(path: &Path) -> Result<Self> {
         let pem = std::fs::read(path)
             .with_context(|| format!("reading signing key {}", path.display()))?;
         Self::from_pem(&pem).with_context(|| format!("loading signing key {}", path.display()))
     }
 
+    #[cfg_attr(
+        not(feature = "test-util"),
+        expect(unreachable_pub, reason = "the integration tests use it")
+    )]
     pub fn from_pem(pem: &[u8]) -> Result<Self> {
         let key = EncodingKey::from_rsa_pem(pem).context("not a PEM-encoded RSA private key")?;
         Self::from_encoding_key(key)
@@ -48,12 +56,21 @@ impl SigningKey {
 
     /// Generate a fresh 2048-bit key. Used for development and tests; a real
     /// deployment configures a persistent key so tokens survive restarts.
+    #[cfg(any(test, feature = "test-util"))]
+    #[cfg_attr(
+        not(feature = "test-util"),
+        expect(unreachable_pub, reason = "the integration tests use it")
+    )]
     pub fn generate() -> Result<Self> {
         Self::from_pem(Self::generate_pem()?.as_bytes())
     }
 
     /// Generate a fresh 2048-bit private key as PKCS#8 PEM, for writing to a
     /// file that [`SigningKey::from_pem_file`] can load.
+    #[cfg_attr(
+        not(feature = "test-util"),
+        expect(unreachable_pub, reason = "the integration tests use it")
+    )]
     pub fn generate_pem() -> Result<String> {
         let pair = KeyPair::generate(KeySize::Rsa2048)
             .map_err(|_| anyhow::anyhow!("RSA key generation failed"))?;
@@ -82,15 +99,21 @@ impl SigningKey {
         })
     }
 
-    pub fn kid(&self) -> &str {
+    #[cfg(test)]
+    pub(crate) fn kid(&self) -> &str {
         &self.kid
     }
 
-    pub fn public_jwk(&self) -> &Jwk {
+    #[cfg(test)]
+    pub(crate) fn public_jwk(&self) -> &Jwk {
         &self.public_jwk
     }
 
     /// The JWK Set served from `jwks_uri`. Contains public material only.
+    #[cfg_attr(
+        not(feature = "test-util"),
+        expect(unreachable_pub, reason = "the integration tests use it")
+    )]
     pub fn jwks(&self) -> JwkSet {
         JwkSet {
             keys: vec![self.public_jwk.clone()],
@@ -98,13 +121,17 @@ impl SigningKey {
     }
 
     /// Sign `claims` as a compact JWS with this key.
+    #[cfg_attr(
+        not(feature = "test-util"),
+        expect(unreachable_pub, reason = "the integration tests use it")
+    )]
     pub fn sign(&self, typ: Option<&str>, claims: &impl Serialize) -> Result<String, JoseError> {
         jose::sign(Self::ALG, Some(&self.kid), typ, claims, &self.encoding_key)
     }
 
     /// Sign with an externally assigned key id in the header, for keys that
     /// are registered elsewhere under an id that is not their thumbprint.
-    pub fn sign_with_kid(
+    pub(crate) fn sign_with_kid(
         &self,
         kid: &str,
         typ: Option<&str>,

@@ -126,7 +126,7 @@ fn needs_keys_and_supported_grants() {
 #[test]
 fn registry_looks_up_by_id_and_rejects_duplicates() {
     let registry = StaticClientRegistry::from_config(&[config()]).unwrap();
-    assert_eq!(registry.len(), 1);
+    assert!(!registry.is_empty());
     assert!(registry.get("rp").is_some());
     assert!(registry.get("unknown").is_none());
     assert!(StaticClientRegistry::from_config(&[config(), config()]).is_err());

@@ -6,6 +6,10 @@
     clippy::expect_used,
     reason = "test code panics on purpose"
 )]
+#![allow(
+    unreachable_pub,
+    reason = "the shared harness is public to each test binary"
+)]
 
 mod common;
 

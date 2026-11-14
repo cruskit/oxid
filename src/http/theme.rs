@@ -13,12 +13,12 @@ use crate::state::AppState;
 use crate::theme::Logo;
 
 /// `GET /theme/logo`
-pub async fn logo(State(state): State<AppState>) -> Response {
+pub(super) async fn logo(State(state): State<AppState>) -> Response {
     serve(state.theme.logo.as_ref())
 }
 
 /// `GET /theme/logo-dark`
-pub async fn logo_dark(State(state): State<AppState>) -> Response {
+pub(super) async fn logo_dark(State(state): State<AppState>) -> Response {
     serve(state.theme.logo_dark.as_ref())
 }
 

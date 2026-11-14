@@ -24,6 +24,10 @@ const MIN_RSA_BITS: usize = 2048;
 
 /// Signature algorithms permitted by FAPI 2.0 §5.4.1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(
+    not(feature = "test-util"),
+    expect(unreachable_pub, reason = "the integration tests use it")
+)]
 pub enum SigningAlg {
     PS256,
     ES256,
@@ -31,7 +35,7 @@ pub enum SigningAlg {
 }
 
 impl SigningAlg {
-    pub fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::PS256 => "PS256",
             Self::ES256 => "ES256",
@@ -68,6 +72,10 @@ impl FromStr for SigningAlg {
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[cfg_attr(
+    not(feature = "test-util"),
+    expect(unreachable_pub, reason = "the integration tests use it")
+)]
 pub enum JoseError {
     #[error("malformed JWS: {0}")]
     Malformed(&'static str),
@@ -83,6 +91,10 @@ pub enum JoseError {
 
 /// A parsed, not-yet-verified compact JWS whose payload is a JSON object.
 #[derive(Debug, Clone)]
+#[cfg_attr(
+    not(feature = "test-util"),
+    expect(unreachable_pub, reason = "the integration tests use it")
+)]
 pub struct Jws {
     pub alg: SigningAlg,
     pub kid: Option<String>,
@@ -97,6 +109,10 @@ impl Jws {
     ///
     /// No signature verification happens here; call [`Jws::verify`] before
     /// trusting any claim.
+    #[cfg_attr(
+        not(feature = "test-util"),
+        expect(unreachable_pub, reason = "the integration tests use it")
+    )]
     pub fn parse(token: &str, allowed: &[SigningAlg]) -> Result<Self, JoseError> {
         let mut parts = token.split('.');
         let (Some(header_b64), Some(payload_b64), Some(signature), None) =
@@ -149,6 +165,10 @@ impl Jws {
     /// Key selection follows FAPI 2.0 §5.4.3: match on `kid` when the JWS has
     /// one, then narrow by `alg`, `use` and key type. Every remaining
     /// candidate is tried.
+    #[cfg_attr(
+        not(feature = "test-util"),
+        expect(unreachable_pub, reason = "the integration tests use it")
+    )]
     pub fn verify(&self, keys: &JwkSet) -> Result<(), JoseError> {
         let mut tried_any = false;
         for jwk in keys.keys.iter().filter(|jwk| self.key_is_candidate(jwk)) {
@@ -192,6 +212,10 @@ impl Jws {
     }
 
     /// A string claim, if present and a string.
+    #[cfg_attr(
+        not(feature = "test-util"),
+        expect(unreachable_pub, reason = "the integration tests use it")
+    )]
     pub fn str_claim(&self, name: &str) -> Option<&str> {
         self.claims.get(name).and_then(Value::as_str)
     }
@@ -200,6 +224,10 @@ impl Jws {
     #[expect(
         clippy::cast_possible_truncation,
         reason = "JSON numbers are floats; whole seconds fit an i64"
+    )]
+    #[cfg_attr(
+        not(feature = "test-util"),
+        expect(unreachable_pub, reason = "the integration tests use it")
     )]
     pub fn time_claim(&self, name: &str) -> Option<i64> {
         let value = self.claims.get(name)?;
@@ -213,7 +241,7 @@ impl Jws {
 }
 
 /// Whether `jwk` is the right kind of key, and strong enough, for `alg`.
-pub fn key_supports_alg(jwk: &Jwk, alg: SigningAlg) -> bool {
+pub(crate) fn key_supports_alg(jwk: &Jwk, alg: SigningAlg) -> bool {
     match (&jwk.algorithm, alg) {
         (AlgorithmParameters::RSA(rsa), SigningAlg::PS256) => {
             b64url_decode(&rsa.n).is_some_and(|n| {
@@ -232,7 +260,7 @@ pub fn key_supports_alg(jwk: &Jwk, alg: SigningAlg) -> bool {
 }
 
 /// Produce a compact JWS over `claims`.
-pub fn sign(
+pub(crate) fn sign(
     alg: SigningAlg,
     kid: Option<&str>,
     typ: Option<&str>,
@@ -257,7 +285,7 @@ pub fn sign(
 mod erased {
     /// Object-safe "serialise to JSON bytes", so one closure can handle both
     /// the header map and the caller's claims type.
-    pub trait Json {
+    pub(super) trait Json {
         fn to_vec(&self) -> serde_json::Result<Vec<u8>>;
     }
 

@@ -6,7 +6,7 @@
 use crate::util::{b64url, ct_eq, sha256};
 
 /// The only challenge method this provider accepts.
-pub const METHOD_S256: &str = "S256";
+pub(crate) const METHOD_S256: &str = "S256";
 
 /// A base64url SHA-256 digest is always 43 characters.
 const CHALLENGE_LEN: usize = 43;
@@ -18,7 +18,7 @@ fn is_unreserved(value: &str) -> bool {
 }
 
 /// Whether `challenge` is syntactically an S256 code challenge.
-pub fn is_valid_challenge(challenge: &str) -> bool {
+pub(crate) fn is_valid_challenge(challenge: &str) -> bool {
     challenge.len() == CHALLENGE_LEN
         && challenge
             .bytes()
@@ -26,12 +26,12 @@ pub fn is_valid_challenge(challenge: &str) -> bool {
 }
 
 /// Whether `verifier` meets RFC 7636 §4.1 (43-128 unreserved characters).
-pub fn is_valid_verifier(verifier: &str) -> bool {
+pub(crate) fn is_valid_verifier(verifier: &str) -> bool {
     (43..=128).contains(&verifier.len()) && is_unreserved(verifier)
 }
 
 /// Check a code verifier against the stored S256 challenge.
-pub fn verify(verifier: &str, challenge: &str) -> bool {
+pub(crate) fn verify(verifier: &str, challenge: &str) -> bool {
     is_valid_verifier(verifier) && ct_eq(b64url(sha256(verifier)), challenge)
 }
 

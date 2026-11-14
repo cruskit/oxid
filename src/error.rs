@@ -7,7 +7,7 @@ use serde_json::json;
 
 /// Error codes from RFC 6749, RFC 9101, RFC 9126 and OpenID Connect Core.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ErrorCode {
+pub(crate) enum ErrorCode {
     InvalidRequest,
     InvalidClient,
     InvalidGrant,
@@ -26,7 +26,7 @@ pub enum ErrorCode {
 }
 
 impl ErrorCode {
-    pub fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::InvalidRequest => "invalid_request",
             Self::InvalidClient => "invalid_client",
@@ -59,41 +59,41 @@ impl ErrorCode {
 /// An error returned to the client as `{"error": ..., "error_description": ...}`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{}: {description}", code.as_str())]
-pub struct OAuthError {
+pub(crate) struct OAuthError {
     pub code: ErrorCode,
     pub description: String,
 }
 
 impl OAuthError {
-    pub fn new(code: ErrorCode, description: impl Into<String>) -> Self {
+    pub(crate) fn new(code: ErrorCode, description: impl Into<String>) -> Self {
         Self {
             code,
             description: description.into(),
         }
     }
 
-    pub fn invalid_request(description: impl Into<String>) -> Self {
+    pub(crate) fn invalid_request(description: impl Into<String>) -> Self {
         Self::new(ErrorCode::InvalidRequest, description)
     }
 
-    pub fn invalid_client(description: impl Into<String>) -> Self {
+    pub(crate) fn invalid_client(description: impl Into<String>) -> Self {
         Self::new(ErrorCode::InvalidClient, description)
     }
 
-    pub fn invalid_grant(description: impl Into<String>) -> Self {
+    pub(crate) fn invalid_grant(description: impl Into<String>) -> Self {
         Self::new(ErrorCode::InvalidGrant, description)
     }
 
-    pub fn invalid_request_object(description: impl Into<String>) -> Self {
+    pub(crate) fn invalid_request_object(description: impl Into<String>) -> Self {
         Self::new(ErrorCode::InvalidRequestObject, description)
     }
 
-    pub fn invalid_scope(description: impl Into<String>) -> Self {
+    pub(crate) fn invalid_scope(description: impl Into<String>) -> Self {
         Self::new(ErrorCode::InvalidScope, description)
     }
 
     /// An internal failure. The detail is logged, never sent to the client.
-    pub fn server_error(detail: impl std::fmt::Display) -> Self {
+    pub(crate) fn server_error(detail: impl std::fmt::Display) -> Self {
         tracing::error!(%detail, "internal error");
         Self::new(ErrorCode::ServerError, "internal server error")
     }

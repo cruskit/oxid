@@ -22,13 +22,13 @@ use axum::body::Bytes;
 use serde::Deserialize;
 
 /// The name of the built-in theme.
-pub const DEFAULT_NAME: &str = "oxID";
+pub(crate) const DEFAULT_NAME: &str = "oxID";
 
 /// Longest theme name accepted. It is shown in headings and the page title.
-pub const MAX_NAME_LENGTH: usize = 60;
+pub(crate) const MAX_NAME_LENGTH: usize = 60;
 
 /// Largest logo file accepted.
-pub const MAX_LOGO_BYTES: u64 = 512 * 1024;
+pub(crate) const MAX_LOGO_BYTES: u64 = 512 * 1024;
 
 /// A colour, written in hexadecimal: `#rgb`, `#rgba`, `#rrggbb` or
 /// `#rrggbbaa`.
@@ -81,7 +81,7 @@ impl fmt::Display for Color {
 /// `templates/shell.html`; the softer tints and outlines the pages also use
 /// are mixed from these in `templates/shell.css`, so they follow the theme.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Palette {
+pub(crate) struct Palette {
     /// The page, behind everything.
     pub background: Color,
     /// Cards and panels, and the inside of form fields.
@@ -110,7 +110,7 @@ pub struct Palette {
 
 impl Palette {
     /// oxID in light mode.
-    pub fn light() -> Self {
+    pub(crate) fn light() -> Self {
         Self {
             background: Color::builtin("#f3f4f8"),
             surface: Color::builtin("#ffffff"),
@@ -128,7 +128,7 @@ impl Palette {
     }
 
     /// oxID in dark mode.
-    pub fn dark() -> Self {
+    pub(crate) fn dark() -> Self {
         Self {
             background: Color::builtin("#0b0e16"),
             surface: Color::builtin("#161b27"),
@@ -270,7 +270,7 @@ fn logo_content_type(path: &Path) -> Result<&'static str> {
 
 /// A logo image, held in memory and served at a path of its own.
 #[derive(Clone, PartialEq, Eq)]
-pub struct Logo {
+pub(crate) struct Logo {
     pub content_type: &'static str,
     pub bytes: Bytes,
 }
@@ -308,7 +308,7 @@ impl Logo {
 
 /// The look of the pages: what the templates are rendered with.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Theme {
+pub(crate) struct Theme {
     /// What the provider is called.
     pub name: String,
     /// Shown at the top of every page in place of the built-in mark.
@@ -338,7 +338,7 @@ impl Default for Theme {
 impl Theme {
     /// The theme a configuration describes: the oxID theme, with whatever
     /// the configuration sets replaced. Reads the logo files.
-    pub fn from_config(config: &ThemeConfig) -> Result<Self> {
+    pub(crate) fn from_config(config: &ThemeConfig) -> Result<Self> {
         config.validate()?;
         let logo = |path: &Option<PathBuf>| path.as_deref().map(Logo::load).transpose();
         Ok(Self {
@@ -356,13 +356,13 @@ impl Theme {
     }
 
     /// Whether this is oxID by name, which gets its two-tone wordmark.
-    pub fn is_oxid(&self) -> bool {
+    pub(crate) fn is_oxid(&self) -> bool {
         self.name == DEFAULT_NAME
     }
 
     /// Whether the pages load an image, which their content security policy
     /// must then allow.
-    pub fn has_logo(&self) -> bool {
+    pub(crate) fn has_logo(&self) -> bool {
         self.logo.is_some()
     }
 }

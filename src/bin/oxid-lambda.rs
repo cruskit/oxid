@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use oxid::config::Config;
+use oxid::Config;
 
 fn main() -> ExitCode {
     tracing_subscriber::fmt()

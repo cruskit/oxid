@@ -10,9 +10,9 @@ use std::collections::BTreeSet;
 use crate::client::{Client, Profile};
 
 /// The trust framework ConnectID identity assurance is issued under.
-pub const TRUST_FRAMEWORK: &str = "au_connectid";
+pub(crate) const TRUST_FRAMEWORK: &str = "au_connectid";
 
-pub const VERIFIED_CLAIMS: &str = "verified_claims";
+pub(crate) const VERIFIED_CLAIMS: &str = "verified_claims";
 
 /// A standard claim (OpenID Connect Core §5.1).
 #[derive(Debug, Clone, Copy)]
@@ -87,14 +87,14 @@ pub(crate) const STANDARD: &[ClaimDef] = &[
 ];
 
 /// Scopes that imply claims (OpenID Connect Core §5.4).
-pub const CLAIM_SCOPES: &[&str] = &["profile", "email", "phone", "address"];
+pub(crate) const CLAIM_SCOPES: &[&str] = &["profile", "email", "phone", "address"];
 
 /// Age thresholds available as `over{N}` verified claims (§5.3.3).
 pub(crate) const AGE_THRESHOLDS: &[u8] = &[16, 18, 21, 25, 65];
 
-pub const BENEFICIARY_ACCOUNT_AU: &str = "beneficiary_account_au";
-pub const BENEFICIARY_ACCOUNT_AU_PAYID: &str = "beneficiary_account_au_payid";
-pub const BENEFICIARY_ACCOUNT_INTERNATIONAL: &str = "beneficiary_account_international";
+pub(crate) const BENEFICIARY_ACCOUNT_AU: &str = "beneficiary_account_au";
+pub(crate) const BENEFICIARY_ACCOUNT_AU_PAYID: &str = "beneficiary_account_au_payid";
+pub(crate) const BENEFICIARY_ACCOUNT_INTERNATIONAL: &str = "beneficiary_account_international";
 
 /// The bank account verified claims (§5.3.3.1) and their labels.
 pub(crate) const BENEFICIARY: &[(&str, &str)] = &[
@@ -123,12 +123,13 @@ pub(crate) fn is_standard(name: &str) -> bool {
 }
 
 /// The names of the standard claims of OpenID Connect Core §5.1.
-pub fn oidc_standard_claims() -> impl Iterator<Item = &'static str> {
+pub(crate) fn oidc_standard_claims() -> impl Iterator<Item = &'static str> {
     STANDARD.iter().map(|def| def.name)
 }
 
+#[cfg(test)]
 /// The names of the standard claims of the ConnectID profile (§5.3.2).
-pub fn connectid_standard_claims() -> impl Iterator<Item = &'static str> {
+pub(crate) fn connectid_standard_claims() -> impl Iterator<Item = &'static str> {
     STANDARD
         .iter()
         .filter(|def| def.connectid)
@@ -137,7 +138,7 @@ pub fn connectid_standard_claims() -> impl Iterator<Item = &'static str> {
 
 /// Names advertised in `claims_supported` when clients of `profiles` are
 /// registered.
-pub fn claims_supported(profiles: &BTreeSet<Profile>) -> Vec<&'static str> {
+pub(crate) fn claims_supported(profiles: &BTreeSet<Profile>) -> Vec<&'static str> {
     let mut claims = vec!["sub", "txn", "auth_time"];
     claims.extend(
         oidc_standard_claims().filter(|name| profiles.iter().any(|&p| profile_allows(p, name))),
@@ -147,7 +148,7 @@ pub fn claims_supported(profiles: &BTreeSet<Profile>) -> Vec<&'static str> {
 
 /// Names advertised in `scopes_supported`. The claim scopes exist only for
 /// the `oidc` profile.
-pub fn scopes_supported(profiles: &BTreeSet<Profile>) -> Vec<&'static str> {
+pub(crate) fn scopes_supported(profiles: &BTreeSet<Profile>) -> Vec<&'static str> {
     let mut scopes = vec!["openid"];
     if profiles.contains(&Profile::Oidc) {
         scopes.extend_from_slice(CLAIM_SCOPES);
@@ -156,7 +157,7 @@ pub fn scopes_supported(profiles: &BTreeSet<Profile>) -> Vec<&'static str> {
 }
 
 /// Names advertised in `claims_in_verified_claims_supported`.
-pub fn verified_claims_supported() -> Vec<String> {
+pub(crate) fn verified_claims_supported() -> Vec<String> {
     AGE_THRESHOLDS
         .iter()
         .map(|n| format!("over{n}"))
@@ -176,7 +177,7 @@ pub(crate) fn is_verified_claim(name: &str) -> bool {
 }
 
 /// Whether clients of `profile` can be given the claim `name`.
-pub fn profile_allows(profile: Profile, name: &str) -> bool {
+pub(crate) fn profile_allows(profile: Profile, name: &str) -> bool {
     match profile {
         Profile::Connectid => {
             standard(name).is_some_and(|def| def.connectid) || is_verified_claim(name)

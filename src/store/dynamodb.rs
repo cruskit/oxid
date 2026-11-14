@@ -25,9 +25,9 @@ use aws_sdk_dynamodb::types::{AttributeValue, ReturnValue};
 use super::{Backend, BackendFuture, Record, StoreError, StoreResult};
 use crate::config::StoreConfig;
 
-pub const HASH_KEY: &str = "pk";
-pub const RANGE_KEY: &str = "sk";
-pub const TTL_ATTRIBUTE: &str = "expires_at";
+pub(crate) const HASH_KEY: &str = "pk";
+pub(crate) const RANGE_KEY: &str = "sk";
+pub(crate) const TTL_ATTRIBUTE: &str = "expires_at";
 const VALUE: &str = "data";
 const COUNT: &str = "n";
 
@@ -37,7 +37,7 @@ const SOLE: &str = "#";
 type Item = HashMap<String, AttributeValue>;
 
 #[derive(Debug, Clone)]
-pub struct DynamoBackend {
+pub(crate) struct DynamoBackend {
     client: Client,
     table: String,
 }
@@ -45,7 +45,7 @@ pub struct DynamoBackend {
 impl DynamoBackend {
     /// Connect using the environment's AWS credentials and region, and
     /// check that the table can be read.
-    pub async fn connect(config: &StoreConfig) -> anyhow::Result<Self> {
+    pub(crate) async fn connect(config: &StoreConfig) -> anyhow::Result<Self> {
         let table = config
             .table
             .clone()
@@ -67,7 +67,7 @@ impl DynamoBackend {
         Ok(backend)
     }
 
-    pub fn from_client(client: Client, table: String) -> Self {
+    pub(crate) fn from_client(client: Client, table: String) -> Self {
         Self { client, table }
     }
 }

@@ -12,11 +12,11 @@ use crate::error::OAuthError;
 use crate::jose::{Jws, SigningAlg};
 
 /// The only algorithm accepted for request objects (ConnectID §4.2-3.8).
-pub const ALLOWED_ALGS: &[SigningAlg] = &[SigningAlg::PS256];
+pub(crate) const ALLOWED_ALGS: &[SigningAlg] = &[SigningAlg::PS256];
 
 /// Verify a request object and return its claims (the authorization
 /// parameters).
-pub fn verify(
+pub(crate) fn verify(
     request: &str,
     client: &Client,
     issuer: &str,

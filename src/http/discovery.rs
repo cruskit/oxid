@@ -11,7 +11,7 @@ use crate::keys::SigningKey;
 use crate::pkce;
 use crate::state::AppState;
 
-pub async fn metadata(State(state): State<AppState>) -> Json<Value> {
+pub(super) async fn metadata(State(state): State<AppState>) -> Json<Value> {
     let alg = [SigningKey::ALG.as_str()];
     // Advertise what the registered clients' profiles offer, no more.
     let profiles = state.clients.profiles();
@@ -65,7 +65,7 @@ pub async fn metadata(State(state): State<AppState>) -> Json<Value> {
     Json(metadata)
 }
 
-pub async fn jwks(State(state): State<AppState>) -> Json<jsonwebtoken::jwk::JwkSet> {
+pub(super) async fn jwks(State(state): State<AppState>) -> Json<jsonwebtoken::jwk::JwkSet> {
     Json(state.signing_key.jwks())
 }
 

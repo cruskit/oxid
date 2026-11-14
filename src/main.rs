@@ -6,8 +6,8 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use oxid::config::Config;
-use oxid::server::ServerBuilder;
+use oxid::Config;
+use oxid::ServerBuilder;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -30,7 +30,7 @@ enum Command {
         /// User experience at the authorization endpoint, overriding the
         /// configuration file: `technical` or `login`.
         #[arg(long, env = "OXID_EXPERIENCE")]
-        experience: Option<oxid::experience::Kind>,
+        experience: Option<oxid::Kind>,
     },
     /// Read a password from standard input and print its Argon2 hash, for
     /// use as a user's `password_hash`.
@@ -61,10 +61,7 @@ fn main() -> ExitCode {
 }
 
 #[tokio::main]
-async fn serve(
-    config_path: &std::path::Path,
-    experience: Option<oxid::experience::Kind>,
-) -> Result<()> {
+async fn serve(config_path: &std::path::Path, experience: Option<oxid::Kind>) -> Result<()> {
     let mut config = Config::load(config_path)?;
     if let Some(experience) = experience {
         config.experience = experience;
@@ -110,10 +107,6 @@ fn hash_password() -> Result<()> {
         !password.is_empty(),
         "no password supplied on standard input"
     );
-    writeln!(
-        std::io::stdout(),
-        "{}",
-        oxid::user::hash_password(password)?
-    )?;
+    writeln!(std::io::stdout(), "{}", oxid::hash_password(password)?)?;
     Ok(())
 }

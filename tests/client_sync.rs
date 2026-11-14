@@ -10,6 +10,10 @@
     clippy::expect_used,
     reason = "test code panics on purpose"
 )]
+#![allow(
+    unreachable_pub,
+    reason = "the shared harness is public to each test binary"
+)]
 
 mod common;
 
@@ -387,15 +391,18 @@ async fn provider_starts_with_configured_and_synchronised_clients() {
     let sync = registry.config.clone();
     let op = TestOp::start_with(move |config| config.client_sync = Some(sync)).await;
 
-    let clients = &op.state().clients;
+    let server = op.server();
     for id in ["rp-one", "rp-two", "rp-three", "rp-four"] {
-        assert!(clients.get(id).is_some(), "{id}");
+        assert!(server.client_name(id).is_some(), "{id}");
     }
     for id in ["rp-inactive", "rp-no-keys", "rp-bad"] {
-        assert!(clients.get(id).is_none(), "{id}");
+        assert!(server.client_name(id).is_none(), "{id}");
     }
     // The registry also lists `test-rp`; the configured definition wins.
-    assert_eq!(clients.get("test-rp").unwrap().name, "Integration Test RP");
+    assert_eq!(
+        server.client_name("test-rp").unwrap(),
+        "Integration Test RP"
+    );
 
     // The configured client still works end to end.
     let tokens = op.tokens(&json!({})).await;
@@ -412,7 +419,7 @@ async fn synchronisation_is_off_unless_enabled_and_failure_prevents_startup() {
     let mut disabled = registry.config.clone();
     disabled.enabled = false;
     let op = TestOp::start_with(move |config| config.client_sync = Some(disabled)).await;
-    assert!(op.state().clients.get("rp-one").is_none());
+    assert!(op.server().client_name("rp-one").is_none());
     assert_eq!(*registry.registry.token_requests.lock().unwrap(), 0);
     op.stop().await;
 
