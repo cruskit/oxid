@@ -441,3 +441,26 @@ async fn the_endpoints_exist_only_under_the_ci_experience() {
         assert_eq!(options.status(), StatusCode::NOT_FOUND);
     }
 }
+
+#[tokio::test]
+async fn an_experience_that_fails_sends_the_browser_back_with_server_error() {
+    let harness = Harness::ci(0);
+    let uri = harness.push(&request()).await;
+    // A stored choice naming a user who does not exist: the experience
+    // cannot answer, and says so with an error rather than a decision.
+    let plan = crate::store::PlannedResponse::Success {
+        user_subject: "nobody-by-this-name".to_owned(),
+        shared_claims: names(&[]),
+        declined: Vec::new(),
+    };
+    harness
+        .state
+        .store
+        .plan_response(&uri, &plan, harness.state.now() + 60)
+        .await
+        .unwrap();
+    let params = arrive(&harness, &uri).await;
+    assert_eq!(params["error"], "server_error");
+    assert_eq!(params["error_description"], "internal server error");
+    assert_eq!(params["state"], "s-1");
+}

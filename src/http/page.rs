@@ -112,7 +112,7 @@ pub(super) struct Shell<'a> {
 }
 
 impl Shell<'_> {
-    pub(super) fn render(&self, theme: &Theme) -> Response {
+    pub(super) fn render(&self, theme: &Theme) -> askama::Result<Response> {
         // A page's own script runs under a nonce; nothing else can. The nonce
         // is unguessable, so markup injected into the page could not carry it.
         let nonce = random_token(16);
@@ -138,12 +138,12 @@ impl Shell<'_> {
             nonce: &nonce,
             scripts,
             reload,
-        });
+        })?;
         let mut response = no_store((self.status, Html(html)).into_response());
         response
             .headers_mut()
             .insert(header::CONTENT_SECURITY_POLICY, policy);
-        response
+        Ok(response)
     }
 }
 
@@ -154,20 +154,27 @@ struct ErrorTemplate<'a> {
     message: &'a str,
 }
 
-/// An error shown to the user because it is not safe to redirect.
+/// An error shown to the user because it is not safe to redirect. This is
+/// the last resort, so it cannot fail: if even this page cannot be
+/// rendered, the user gets the message as plain text.
 pub(super) fn error_page(state: &AppState, status: StatusCode, message: &str) -> Response {
-    tracing::info!(message, "authorization request rejected with an error page");
-    Shell {
-        status,
-        title: "Request error",
-        body: &render(&ErrorTemplate { message }),
-        style: "",
-        script: None,
-        redirect_to: None,
-        refresh: None,
-        wide: false,
-    }
-    .render(&state.theme)
+    let page = render(&ErrorTemplate { message }).and_then(|body| {
+        Shell {
+            status,
+            title: "Request error",
+            body: &body,
+            style: "",
+            script: None,
+            redirect_to: None,
+            refresh: None,
+            wide: false,
+        }
+        .render(&state.theme)
+    });
+    page.unwrap_or_else(|error| {
+        tracing::error!(%error, "the error page could not be rendered");
+        no_store((status, message.to_owned()).into_response())
+    })
 }
 
 pub(super) fn is_csrf_token(value: &str) -> bool {

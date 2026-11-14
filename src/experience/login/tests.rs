@@ -63,7 +63,7 @@ fn the_consent_template_escapes_what_it_shows() {
         ],
         limit: "5 minutes".to_owned(),
     };
-    let html = render(&template);
+    let html = render(&template).unwrap();
     for raw in ["<b>", "<i>", "<this>", "<1>", "c\"srf"] {
         assert!(!html.contains(raw), "{raw} in {html}");
     }

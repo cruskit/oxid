@@ -33,7 +33,7 @@ use uuid::Uuid;
 use crate::cookie::{SameSite, SetCookie};
 use super::{
     Approval, Decision, ERROR_CONDITIONS, ErrorCondition, Experience, Form, FormTarget,
-    Interaction, Kind, MAX_ERROR_DESCRIPTION, Page, Step, StepFuture, error_condition,
+    Interaction, Kind, MAX_ERROR_DESCRIPTION, Page, Step, StepFuture, StepResult, error_condition,
     everything_requested, is_error_description, render,
 };
 use crate::id_token::{self, ClaimEdits};
@@ -159,7 +159,7 @@ impl Experience for Technical {
     }
 
     fn start<'a>(&'a self, interaction: &'a Interaction<'a>) -> StepFuture<'a> {
-        Box::pin(async move { self.page(interaction, &View::default()).into() })
+        Box::pin(async move { Ok(self.page(interaction, &View::default())?.into()) })
     }
 
     fn submit<'a>(&'a self, interaction: &'a Interaction<'a>, form: &'a Form) -> StepFuture<'a> {
@@ -187,7 +187,7 @@ impl Technical {
             .cloned()
     }
 
-    fn handle(&self, interaction: &Interaction<'_>, form: &Form) -> Step {
+    fn handle(&self, interaction: &Interaction<'_>, form: &Form) -> StepResult {
         let subject = form.get("customer").unwrap_or_default();
         let error_outcome = form.get("outcome") == Some(OUTCOME_ERROR);
         let view = View {
@@ -197,15 +197,16 @@ impl Technical {
             error_description: form.get("error_description"),
             ..View::default()
         };
-        let again = |view: View<'_>, error: &str| -> Step {
-            self.page(
-                interaction,
-                &View {
-                    error: Some(error.to_owned()),
-                    ..view
-                },
-            )
-            .into()
+        let again = |view: View<'_>, error: &str| -> StepResult {
+            Ok(self
+                .page(
+                    interaction,
+                    &View {
+                        error: Some(error.to_owned()),
+                        ..view
+                    },
+                )?
+                .into())
         };
 
         if form.get("action") != Some("send") {
@@ -214,7 +215,7 @@ impl Technical {
 
         if error_outcome {
             return match form.get("error").and_then(error_condition) {
-                Some(condition) => deny(condition, form.get("error_description")),
+                Some(condition) => Ok(deny(condition, form.get("error_description"))),
                 None => again(view, "Choose one of the listed error conditions."),
             };
         }
@@ -231,15 +232,15 @@ impl Technical {
                 "The claims have been regenerated for {}. Review them and send again.",
                 user.display_name()
             );
-            return self
+            return Ok(self
                 .page(
                     interaction,
                     &View {
                         notice: Some(notice),
                         ..view
                     },
-                )
-                .into();
+                )?
+                .into());
         }
 
         let txn = form.get("txn").unwrap_or_default();
@@ -253,19 +254,20 @@ impl Technical {
         };
 
         let text = form.get("id_token").unwrap_or_default();
-        let keep_text = |error: String| -> Step {
-            self.page(
-                interaction,
-                &View {
-                    customer: Some(user.subject.clone()),
-                    txn: Some(txn),
-                    base: Some(base_text),
-                    claims_text: Some(text),
-                    error: Some(error),
-                    ..View::default()
-                },
-            )
-            .into()
+        let keep_text = |error: String| -> StepResult {
+            Ok(self
+                .page(
+                    interaction,
+                    &View {
+                        customer: Some(user.subject.clone()),
+                        txn: Some(txn),
+                        base: Some(base_text),
+                        claims_text: Some(text),
+                        error: Some(error),
+                        ..View::default()
+                    },
+                )?
+                .into())
         };
         let edited = match serde_json::from_str::<Value>(text) {
             Ok(Value::Object(edited)) => edited,
@@ -284,7 +286,7 @@ impl Technical {
                 "ID token claims were edited by hand"
             );
         }
-        Step {
+        Ok(Step {
             decision: Decision::Approve(Approval {
                 user_subject: user.subject.clone(),
                 shared_claims: everything_requested(interaction),
@@ -293,11 +295,11 @@ impl Technical {
                 txn: Some(txn.to_owned()),
             }),
             set_cookies: vec![remember(&user)],
-        }
+        })
     }
 
     /// The whole experience: request on one side, response on the other.
-    fn page(&self, interaction: &Interaction<'_>, view: &View<'_>) -> Page {
+    fn page(&self, interaction: &Interaction<'_>, view: &View<'_>) -> askama::Result<Page> {
         let client = interaction.client;
         let request = interaction.request();
         let users = self.users.list();
@@ -432,13 +434,13 @@ impl Technical {
             data: data.to_string().replace('<', "\\u003c"),
         };
 
-        Page {
+        Ok(Page {
             title: "Authorization request".to_owned(),
-            body: render(&template),
+            body: render(&template)?,
             style: STYLE,
             script: Some(SCRIPT),
             wide: true,
-        }
+        })
     }
 }
 

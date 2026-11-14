@@ -35,3 +35,18 @@ fn display_includes_code_and_description() {
         "invalid_scope: nope"
     );
 }
+
+#[test]
+fn server_error_keeps_its_cause_for_the_log_only() {
+    let store = crate::store::StoreError::Corrupt("bad json".into());
+    let err = OAuthError::server_error(store);
+    // The cause chain is there for the log line...
+    let cause = std::error::Error::source(&err).unwrap();
+    assert_eq!(
+        Report(cause).to_string(),
+        "a stored item is corrupt: bad json"
+    );
+    // ...and the client sees only the generic error.
+    assert_eq!(err, OAuthError::new(ErrorCode::ServerError, "internal server error"));
+    assert_eq!(err.to_string(), "server_error: internal server error");
+}

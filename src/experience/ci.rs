@@ -31,10 +31,9 @@ use askama::Template;
 use tokio::time::Instant;
 
 use super::{
-    Approval, Decision, Experience, Form, Interaction, Kind, Page, Step, StepFuture,
-    error_condition, everything_requested, render,
+    Approval, Decision, Experience, ExperienceError, Form, Interaction, Kind, Page, StepFuture,
+    StepResult, error_condition, everything_requested, render,
 };
-use crate::error::ErrorCode;
 use crate::store::PlannedResponse;
 use crate::theme::Theme;
 use crate::user::{User, UserStore};
@@ -50,15 +49,6 @@ pub(crate) struct Ci {
 /// The user a response is about when the client does not name one.
 pub(crate) fn default_user(users: &dyn UserStore) -> Option<Arc<User>> {
     users.list().first().cloned()
-}
-
-fn server_error(error: &dyn std::fmt::Display, what: &str) -> Step {
-    tracing::error!(%error, "{what}");
-    Decision::Deny {
-        code: ErrorCode::ServerError,
-        description: "internal server error".to_owned(),
-    }
-    .into()
 }
 
 impl Experience for Ci {
@@ -86,7 +76,7 @@ impl Ci {
     ///
     /// The delay runs from when the session started, that is from the
     /// browser's first arrival, so a retry does not wait all over again.
-    async fn respond(&self, interaction: &Interaction<'_>) -> Step {
+    async fn respond(&self, interaction: &Interaction<'_>) -> StepResult {
         let state = interaction.state;
         let arrived = interaction.session.expires_at - state.security.session_ttl;
         let left = (arrived + state.ci.response_delay - state.now()).max(0);
@@ -95,22 +85,18 @@ impl Ci {
             match state
                 .store
                 .planned_response(interaction.request_uri, state.now())
-                .await
+                .await?
             {
-                Ok(Some(PlannedResponse::Abandon)) => {
+                Some(PlannedResponse::Abandon) => {
                     // One visit only: the next one is answered as usual.
-                    return match state
+                    state
                         .store
                         .clear_planned_response(interaction.request_uri)
-                        .await
-                    {
-                        Ok(()) => abandoned_page(interaction).into(),
-                        Err(error) => server_error(&error, "could not clear the planned response"),
-                    };
+                        .await?;
+                    return Ok(abandoned_page(interaction)?.into());
                 }
-                Ok(Some(plan)) => return self.planned(interaction, plan),
-                Ok(None) => {}
-                Err(error) => return server_error(&error, "could not read the planned response"),
+                Some(plan) => return self.planned(interaction, plan),
+                None => {}
             }
             let now = Instant::now();
             if now >= deadline {
@@ -121,37 +107,37 @@ impl Ci {
     }
 
     /// Nobody chose: the first user shares everything that was requested.
-    fn default_response(&self, interaction: &Interaction<'_>) -> Step {
-        let Some(user) = default_user(self.users.as_ref()) else {
-            return server_error(&"no users are configured", "cannot answer the request");
-        };
+    fn default_response(&self, interaction: &Interaction<'_>) -> StepResult {
+        let user = default_user(self.users.as_ref())
+            .ok_or(ExperienceError::Inconsistent("no users are configured"))?;
         tracing::info!(
             client_id = %interaction.client.id,
             user = %user.username,
             "ci: giving the default response"
         );
-        Decision::Approve(Approval {
+        Ok(Decision::Approve(Approval {
             user_subject: user.subject.clone(),
             shared_claims: everything_requested(interaction),
             declined: Vec::new(),
             id_token_edits: None,
             txn: None,
         })
-        .into()
+        .into())
     }
 
     /// The response the client chose. It was checked when it was set.
-    fn planned(&self, interaction: &Interaction<'_>, plan: PlannedResponse) -> Step {
+    fn planned(&self, interaction: &Interaction<'_>, plan: PlannedResponse) -> StepResult {
         let client_id = &interaction.client.id;
-        match plan {
+        Ok(match plan {
             PlannedResponse::Success {
                 user_subject,
                 shared_claims,
                 declined,
             } => {
-                let Some(user) = self.users.find_by_subject(&user_subject) else {
-                    return server_error(&"the chosen user no longer exists", "ci");
-                };
+                let user = self
+                    .users
+                    .find_by_subject(&user_subject)
+                    .ok_or(ExperienceError::Inconsistent("the chosen user no longer exists"))?;
                 tracing::info!(
                     %client_id,
                     user = %user.username,
@@ -167,11 +153,10 @@ impl Ci {
                 .into()
             }
             // Handled by the caller, which has to clear it.
-            PlannedResponse::Abandon => abandoned_page(interaction).into(),
+            PlannedResponse::Abandon => abandoned_page(interaction)?.into(),
             PlannedResponse::Error { error, description } => {
-                let Some(condition) = error_condition(&error) else {
-                    return server_error(&"the chosen error is not a known one", "ci");
-                };
+                let condition = error_condition(&error)
+                    .ok_or(ExperienceError::Inconsistent("the chosen error is not a known one"))?;
                 tracing::info!(%client_id, %error, "ci: giving the error response the client chose");
                 Decision::Deny {
                     code: condition.code,
@@ -179,7 +164,7 @@ impl Ci {
                 }
                 .into()
             }
-        }
+        })
     }
 }
 
@@ -193,7 +178,7 @@ struct AbandonedTemplate<'a> {
 
 /// What the browser gets when the client chose that the user abandons the
 /// visit: a page, and no redirect.
-fn abandoned_page(interaction: &Interaction<'_>) -> Page {
+fn abandoned_page(interaction: &Interaction<'_>) -> askama::Result<Page> {
     tracing::info!(
         client_id = %interaction.client.id,
         "ci: giving no response, as the client chose"
@@ -202,11 +187,11 @@ fn abandoned_page(interaction: &Interaction<'_>) -> Page {
         theme: interaction.theme(),
         client_name: &interaction.client.name,
     };
-    Page {
+    Ok(Page {
         title: "No response".to_owned(),
-        body: render(&template),
+        body: render(&template)?,
         style: "",
         script: None,
         wide: false,
-    }
+    })
 }

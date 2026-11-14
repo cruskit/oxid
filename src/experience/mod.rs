@@ -68,6 +68,15 @@ pub enum Kind {
 impl Kind {
     pub const ALL: &[Self] = &[Self::Technical, Self::Login, Self::Ci];
 
+    /// Every name, for messages.
+    fn names() -> String {
+        Self::ALL
+            .iter()
+            .map(|kind| kind.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Technical => "technical",
@@ -77,20 +86,23 @@ impl Kind {
     }
 }
 
-impl std::str::FromStr for Kind {
-    type Err = String;
+/// An experience name that is not one of [`Kind::ALL`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown experience '{name}' (expected one of: {known})", known = Kind::names())]
+pub struct UnknownExperience {
+    name: String,
+}
 
-    fn from_str(value: &str) -> Result<Self, String> {
+impl std::str::FromStr for Kind {
+    type Err = UnknownExperience;
+
+    fn from_str(value: &str) -> Result<Self, UnknownExperience> {
         Self::ALL
             .iter()
             .copied()
             .find(|kind| kind.as_str() == value)
-            .ok_or_else(|| {
-                let known: Vec<&str> = Self::ALL.iter().map(|kind| kind.as_str()).collect();
-                format!(
-                    "unknown experience '{value}' (expected one of: {})",
-                    known.join(", ")
-                )
+            .ok_or_else(|| UnknownExperience {
+                name: value.to_owned(),
             })
     }
 }
@@ -174,12 +186,9 @@ impl<'a> FormTarget<'a> {
 
 /// Render a template to HTML. The templates are compiled into the binary and
 /// checked at build time, so rendering fails only if a value cannot be
-/// written; that is logged, and the page comes out empty.
-pub(crate) fn render(template: &impl Template) -> String {
-    template.render().unwrap_or_else(|error| {
-        tracing::error!(%error, "a page could not be rendered");
-        String::new()
-    })
+/// written.
+pub(crate) fn render(template: &impl Template) -> askama::Result<String> {
+    template.render()
 }
 
 /// A length of time in words, for telling the user how long they have.
@@ -358,8 +367,25 @@ pub(crate) fn everything_requested(interaction: &Interaction<'_>) -> BTreeSet<St
         .collect()
 }
 
+/// Why an experience could not take its step. The endpoint logs it and
+/// sends the browser back to the client with `server_error`.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ExperienceError {
+    #[error(transparent)]
+    Store(#[from] crate::store::StoreError),
+    #[error("a page could not be rendered")]
+    Render(#[from] askama::Error),
+    /// The provider's own data does not allow the step, for example a
+    /// stored choice that names a user who no longer exists.
+    #[error("{0}")]
+    Inconsistent(&'static str),
+}
+
+/// What an experience's step produces.
+pub(crate) type StepResult = Result<Step, ExperienceError>;
+
 /// A boxed future, so that [`Experience`] can be used as a trait object.
-pub(crate) type StepFuture<'a> = Pin<Box<dyn Future<Output = Step> + Send + 'a>>;
+pub(crate) type StepFuture<'a> = Pin<Box<dyn Future<Output = StepResult> + Send + 'a>>;
 
 /// Form fields submitted by the browser.
 pub(crate) type Form = crate::http::Params;

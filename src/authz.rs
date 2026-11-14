@@ -163,7 +163,8 @@ impl AuthorizationRequest {
 
         let claims = match params.get("claims") {
             None | Some(Value::Null) => ClaimsRequest::default(),
-            Some(value) => ClaimsRequest::parse(value).map_err(OAuthError::invalid_request)?,
+            Some(value) => ClaimsRequest::parse(value)
+                .map_err(|error| OAuthError::invalid_request(error.to_string()))?,
         };
 
         // OAuth 2 Purpose §3: a violation fails the request with

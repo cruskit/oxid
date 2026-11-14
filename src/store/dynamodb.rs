@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 
 use aws_sdk_dynamodb::Client;
-use aws_sdk_dynamodb::error::{DisplayErrorContext, SdkError};
+use aws_sdk_dynamodb::error::SdkError;
 use aws_sdk_dynamodb::operation::put_item::PutItemError;
 use aws_sdk_dynamodb::operation::update_item::UpdateItemError;
 use aws_sdk_dynamodb::types::{AttributeValue, ReturnValue};
@@ -72,13 +72,12 @@ impl DynamoBackend {
     }
 }
 
-#[expect(clippy::needless_pass_by_value, reason = "used as `map_err(failure)`")]
 fn failure<E, R>(error: SdkError<E, R>) -> StoreError
 where
-    E: std::error::Error + 'static,
-    R: std::fmt::Debug,
+    E: std::error::Error + Send + Sync + 'static,
+    R: std::fmt::Debug + Send + Sync + 'static,
 {
-    StoreError::new(DisplayErrorContext(&error))
+    StoreError::Unavailable(error.into())
 }
 
 fn string(value: impl Into<String>) -> AttributeValue {
@@ -108,7 +107,9 @@ fn item(pk: &str, sk: &str, value: String, expires_at: Option<i64>) -> Item {
 fn value_of(item: &Item) -> StoreResult<String> {
     match item.get(VALUE) {
         Some(AttributeValue::S(value)) => Ok(value.clone()),
-        _ => Err(StoreError::new("item has no string 'data' attribute")),
+        _ => Err(StoreError::Corrupt(
+            "item has no string 'data' attribute".into(),
+        )),
     }
 }
 
@@ -118,10 +119,10 @@ fn number_of<T: std::str::FromStr>(item: &Item, name: &str) -> StoreResult<Optio
         Some(AttributeValue::N(text)) => text
             .parse()
             .map(Some)
-            .map_err(|_| StoreError::new(format!("item attribute '{name}' is out of range"))),
-        Some(_) => Err(StoreError::new(format!(
-            "item attribute '{name}' is not a number"
-        ))),
+            .map_err(|_| StoreError::Corrupt(format!("item attribute '{name}' is out of range").into())),
+        Some(_) => Err(StoreError::Corrupt(
+            format!("item attribute '{name}' is not a number").into(),
+        )),
     }
 }
 

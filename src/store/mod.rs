@@ -23,7 +23,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::authz::AuthorizationRequest;
 use crate::claims::ClaimsRequest;
-use crate::error::OAuthError;
+
+use crate::error::{BoxError, OAuthError};
 use crate::util::{b64url, random_token, sha256};
 
 #[cfg(feature = "aws")]
@@ -232,15 +233,26 @@ pub(crate) enum CodeRedemption {
     Invalid,
 }
 
-/// The backend could not be reached, or held something unreadable.
-#[derive(Debug, Clone, thiserror::Error)]
-#[error("store: {0}")]
-pub(crate) struct StoreError(pub String);
-
-impl StoreError {
-    pub(crate) fn new(detail: impl std::fmt::Display) -> Self {
-        Self(detail.to_string())
-    }
+/// Why the store could not do what was asked. The cause is kept as the
+/// error's source, so a log line shows the whole chain.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum StoreError {
+    /// The backend could not be reached, or refused the operation.
+    #[error("the store is unavailable")]
+    Unavailable(#[source] BoxError),
+    /// Something stored could not be read back.
+    #[error("a stored item is corrupt")]
+    Corrupt(#[source] BoxError),
+    /// A value could not be encoded for storing.
+    #[error("a value could not be encoded for the store")]
+    Encode(#[source] serde_json::Error),
+    /// A secret kept in the store could not be generated.
+    #[error("the secret '{name}' could not be generated")]
+    Generate {
+        name: String,
+        #[source]
+        source: BoxError,
+    },
 }
 
 impl From<StoreError> for OAuthError {
@@ -357,11 +369,11 @@ fn digest(secret: &str) -> String {
 }
 
 fn encode<T: Serialize>(value: &T) -> StoreResult<String> {
-    serde_json::to_string(value).map_err(StoreError::new)
+    serde_json::to_string(value).map_err(StoreError::Encode)
 }
 
 fn decode<T: DeserializeOwned>(value: &str) -> StoreResult<T> {
-    serde_json::from_str(value).map_err(StoreError::new)
+    serde_json::from_str(value).map_err(|error| StoreError::Corrupt(error.into()))
 }
 
 fn request_key(request_uri: &str) -> String {
@@ -817,14 +829,19 @@ impl Store {
         if let Some(record) = self.backend.get(&key).await? {
             return Ok(record.value);
         }
-        let candidate = generate().map_err(|error| StoreError::new(format!("{error:#}")))?;
+        let candidate = generate().map_err(|source| StoreError::Generate {
+            name: name.to_owned(),
+            source: source.into(),
+        })?;
         // Secrets never expire, so `now` is irrelevant to the condition.
         self.backend.put_new(&key, candidate, None, 0).await?;
         self.backend
             .get(&key)
             .await?
             .map(|record| record.value)
-            .ok_or_else(|| StoreError::new(format!("secret '{name}' vanished after being stored")))
+            .ok_or_else(|| {
+                StoreError::Unavailable(format!("secret '{name}' vanished after being stored").into())
+            })
     }
 
     /// Drop everything that has expired. Called periodically.

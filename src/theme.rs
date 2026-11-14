@@ -48,25 +48,28 @@ impl Color {
     }
 }
 
-impl std::str::FromStr for Color {
-    type Err = String;
+/// A theme colour that is not hexadecimal.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("'{0}' is not a colour: use hexadecimal, such as #ff5630")]
+pub struct NotAColor(String);
 
-    fn from_str(value: &str) -> Result<Self, String> {
+impl std::str::FromStr for Color {
+    type Err = NotAColor;
+
+    fn from_str(value: &str) -> Result<Self, NotAColor> {
         let digits = value.strip_prefix('#').unwrap_or_default();
         if matches!(digits.len(), 3 | 4 | 6 | 8) && digits.bytes().all(|b| b.is_ascii_hexdigit()) {
             Ok(Self(value.to_ascii_lowercase()))
         } else {
-            Err(format!(
-                "'{value}' is not a colour: use hexadecimal, such as #ff5630"
-            ))
+            Err(NotAColor(value.to_owned()))
         }
     }
 }
 
 impl TryFrom<String> for Color {
-    type Error = String;
+    type Error = NotAColor;
 
-    fn try_from(value: String) -> Result<Self, String> {
+    fn try_from(value: String) -> Result<Self, NotAColor> {
         value.parse()
     }
 }

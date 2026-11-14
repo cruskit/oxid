@@ -11,6 +11,19 @@ use super::release::{release, verified_request};
 use crate::client::Client;
 use crate::user::User;
 
+/// Why a `claims` parameter was refused (OIDC Core §5.5).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum ClaimsError {
+    #[error("claims is not valid JSON")]
+    NotJson,
+    #[error("claims must be a JSON object")]
+    NotAnObject,
+    #[error("claims.{0} must be a JSON object")]
+    SectionNotAnObject(&'static str),
+    #[error("claims.{section}.{claim} must be null or an object")]
+    BadClaimRequest { section: &'static str, claim: String },
+}
+
 /// The parsed `claims` authorization request parameter (OIDC Core §5.5).
 ///
 /// Individual claim requests are kept as raw JSON: a request is either `null`
@@ -26,19 +39,18 @@ pub(crate) struct ClaimsRequest {
 impl ClaimsRequest {
     /// Parse the parameter. Inside a request object it is a JSON object; as a
     /// plain parameter it is that object serialised to a string.
-    pub(crate) fn parse(value: &Value) -> Result<Self, String> {
+    pub(crate) fn parse(value: &Value) -> Result<Self, ClaimsError> {
         let owned;
         let object = match value {
             Value::Object(object) => object,
             Value::String(text) => {
-                owned = serde_json::from_str::<Value>(text)
-                    .map_err(|_| "claims is not valid JSON".to_owned())?;
-                owned.as_object().ok_or("claims must be a JSON object")?
+                owned = serde_json::from_str::<Value>(text).map_err(|_| ClaimsError::NotJson)?;
+                owned.as_object().ok_or(ClaimsError::NotAnObject)?
             }
-            _ => return Err("claims must be a JSON object".to_owned()),
+            _ => return Err(ClaimsError::NotAnObject),
         };
 
-        let section = |name: &str| -> Result<Map<String, Value>, String> {
+        let section = |name: &'static str| -> Result<Map<String, Value>, ClaimsError> {
             match object.get(name) {
                 None | Some(Value::Null) => Ok(Map::new()),
                 Some(Value::Object(requests)) => {
@@ -50,12 +62,15 @@ impl ClaimsRequest {
                             _ => false,
                         };
                         if !valid {
-                            return Err(format!("claims.{name}.{claim} must be null or an object"));
+                            return Err(ClaimsError::BadClaimRequest {
+                                section: name,
+                                claim: claim.clone(),
+                            });
                         }
                     }
                     Ok(requests.clone())
                 }
-                Some(_) => Err(format!("claims.{name} must be a JSON object")),
+                Some(_) => Err(ClaimsError::SectionNotAnObject(name)),
             }
         };
         Ok(Self {

@@ -11,7 +11,7 @@ fn kinds_parse_from_their_configuration_names() {
         let from_toml: Kind = serde_json::from_value(serde_json::json!(kind.as_str())).unwrap();
         assert_eq!(from_toml, *kind);
     }
-    let err = "wizard".parse::<Kind>().unwrap_err();
+    let err = "wizard".parse::<Kind>().unwrap_err().to_string();
     assert!(
         err.contains("technical") && err.contains("login") && err.contains("ci"),
         "{err}"

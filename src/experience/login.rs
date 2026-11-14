@@ -23,7 +23,7 @@ use serde_json::{Map, Value};
 use crate::cookie::{SameSite, SetCookie};
 use super::{
     Approval, Decision, Experience, Form, FormTarget, Interaction, Kind, Page, Step, StepFuture,
-    duration_text, render,
+    StepResult, duration_text, render,
 };
 use crate::claims::{self, ConsentItem};
 use crate::error::ErrorCode;
@@ -67,16 +67,16 @@ impl Experience for Login {
     fn start<'a>(&'a self, interaction: &'a Interaction<'a>) -> StepFuture<'a> {
         // A reload after signing in comes back to the consent page.
         Box::pin(async move {
-            match self.signed_in(interaction) {
-                Some(user) => consent_page(interaction, &user, false).into(),
-                None => login_page(interaction, None).into(),
-            }
+            Ok(match self.signed_in(interaction) {
+                Some(user) => consent_page(interaction, &user, false)?.into(),
+                None => login_page(interaction, None)?.into(),
+            })
         })
     }
 
     fn submit<'a>(&'a self, interaction: &'a Interaction<'a>, form: &'a Form) -> StepFuture<'a> {
         Box::pin(async move {
-            match (form.get("action"), self.signed_in(interaction)) {
+            Ok(match (form.get("action"), self.signed_in(interaction)) {
                 (Some(ACTION_DENY), _) => Step {
                     decision: Decision::Deny {
                         code: ErrorCode::AccessDenied,
@@ -84,18 +84,18 @@ impl Experience for Login {
                     },
                     set_cookies: vec![forget_browser()],
                 },
-                (Some(ACTION_SIGN_IN), _) => self.sign_in(interaction, form).await,
+                (Some(ACTION_SIGN_IN), _) => self.sign_in(interaction, form).await?,
                 (Some(ACTION_APPROVE), Some(user)) => approve(interaction, form, &user),
                 (Some(ACTION_SHARE_ALL), Some(user)) => {
-                    consent_page(interaction, &user, true).into()
+                    consent_page(interaction, &user, true)?.into()
                 }
                 // Consent is only ever taken from the browser that signed in.
                 (Some(ACTION_APPROVE), None) => {
-                    login_page(interaction, Some("Log in to continue.")).into()
+                    login_page(interaction, Some("Log in to continue."))?.into()
                 }
-                (_, Some(user)) => consent_page(interaction, &user, false).into(),
-                (_, None) => login_page(interaction, None).into(),
-            }
+                (_, Some(user)) => consent_page(interaction, &user, false)?.into(),
+                (_, None) => login_page(interaction, None)?.into(),
+            })
         })
     }
 }
@@ -112,15 +112,7 @@ impl Login {
         self.users.find_by_subject(&signed_in.user_subject)
     }
 
-    async fn sign_in(&self, interaction: &Interaction<'_>, form: &Form) -> Step {
-        let server_error = |error: &dyn std::fmt::Display, what: &str| -> Step {
-            tracing::error!(%error, "{what}");
-            Decision::Deny {
-                code: ErrorCode::ServerError,
-                description: "internal server error".to_owned(),
-            }
-            .into()
-        };
+    async fn sign_in(&self, interaction: &Interaction<'_>, form: &Form) -> StepResult {
         let store = &interaction.state.store;
 
         let username = form.get("username").unwrap_or_default().to_owned();
@@ -133,11 +125,10 @@ impl Login {
             .flatten();
 
         let Some(user) = user else {
-            return match store.record_failed_login(interaction.request_uri).await {
-                Ok(true) => {
-                    login_page(interaction, Some("The username or password is incorrect.")).into()
-                }
-                Ok(false) => {
+            return Ok(if store.record_failed_login(interaction.request_uri).await? {
+                login_page(interaction, Some("The username or password is incorrect."))?.into()
+            } else {
+                {
                     tracing::warn!(
                         client_id = %interaction.client.id,
                         "too many failed sign-in attempts"
@@ -148,23 +139,19 @@ impl Login {
                     }
                     .into()
                 }
-                Err(error) => server_error(&error, "could not record a failed sign-in"),
-            };
+            });
         };
 
         let secret = random_token(32);
         let session = interaction.session;
-        if let Err(error) = store
+        store
             .sign_in(interaction.request_uri, session, &user.subject, &secret)
-            .await
-        {
-            return server_error(&error, "could not record a sign-in");
-        }
+            .await?;
         let remaining = (session.expires_at - interaction.state.now()).max(1);
-        Step {
-            decision: Decision::Page(consent_page(interaction, &user, false)),
+        Ok(Step {
+            decision: Decision::Page(consent_page(interaction, &user, false)?),
             set_cookies: vec![SetCookie::host(LOGIN_COOKIE, secret, SameSite::Lax).max_age(remaining)],
-        }
+        })
     }
 }
 
@@ -221,7 +208,7 @@ struct LoginTemplate<'a> {
 
 /// The first page. It names the client and says only that it wants
 /// information shared; what and why is for the signed-in user to see.
-fn login_page(interaction: &Interaction<'_>, error: Option<&str>) -> Page {
+fn login_page(interaction: &Interaction<'_>, error: Option<&str>) -> askama::Result<Page> {
     let name = &interaction.client.name;
     let template = LoginTemplate {
         theme: interaction.theme(),
@@ -234,13 +221,13 @@ fn login_page(interaction: &Interaction<'_>, error: Option<&str>) -> Page {
             .unwrap_or_default(),
         error,
     };
-    Page {
+    Ok(Page {
         title: "Log in".to_owned(),
-        body: render(&template),
+        body: render(&template)?,
         style: STYLE,
         script: None,
         wide: false,
-    }
+    })
 }
 
 /// The consent page: `templates/login/consent.html`.
@@ -347,7 +334,7 @@ impl ClaimValue {
 
 /// The second page: who is asking, why, and exactly what would be shared.
 /// Voluntary claims are off unless the user asked for them all (`all_on`).
-fn consent_page(interaction: &Interaction<'_>, user: &User, all_on: bool) -> Page {
+fn consent_page(interaction: &Interaction<'_>, user: &User, all_on: bool) -> askama::Result<Page> {
     let client = interaction.client;
     let request = interaction.request();
 
@@ -376,13 +363,13 @@ fn consent_page(interaction: &Interaction<'_>, user: &User, all_on: bool) -> Pag
         optional: rows(false),
         limit: duration_text(interaction.state.security.session_ttl),
     };
-    Page {
+    Ok(Page {
         title: format!("Share with {}", client.name),
-        body: render(&template),
+        body: render(&template)?,
         style: STYLE,
         script: None,
         wide: false,
-    }
+    })
 }
 
 fn members_text(members: &Map<String, Value>) -> String {
