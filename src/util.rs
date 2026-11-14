@@ -11,6 +11,36 @@ use aws_lc_rs::{constant_time, digest, rand};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
+/// A value that must never be printed: its `Debug` output is redacted, so a
+/// `?config` or `dbg!` cannot leak it into logs. Read it with
+/// [`Secret::expose`].
+#[derive(Clone, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(transparent)]
+pub struct Secret<T>(T);
+
+impl<T> Secret<T> {
+    pub const fn new(value: T) -> Self {
+        Self(value)
+    }
+
+    /// The secret value. Do not log it.
+    pub const fn expose(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<T> From<T> for Secret<T> {
+    fn from(value: T) -> Self {
+        Self(value)
+    }
+}
+
+impl<T> Debug for Secret<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret([redacted])")
+    }
+}
+
 /// Encode bytes as unpadded base64url (RFC 4648 §5).
 pub fn b64url(data: impl AsRef<[u8]>) -> String {
     URL_SAFE_NO_PAD.encode(data)

@@ -119,7 +119,7 @@ pub struct KeysConfig {
     pub signing_key: Option<PathBuf>,
     /// Secret mixed into pairwise subject identifiers. When unset, a random
     /// value is generated at startup, so subjects change across restarts.
-    pub pairwise_salt: Option<String>,
+    pub pairwise_salt: Option<crate::util::Secret<String>>,
 }
 
 /// Which backend holds server-side state.
@@ -266,7 +266,7 @@ pub struct UserConfig {
     /// Argon2 PHC string, as produced by `oxid hash-password`. A user
     /// without one cannot sign in under the `login` experience, but can be
     /// selected in the `technical` one.
-    pub password_hash: Option<String>,
+    pub password_hash: Option<crate::util::Secret<String>>,
     /// Stable internal identifier. Never sent to clients directly; clients
     /// receive a pairwise identifier derived from it.
     pub subject: String,
@@ -393,7 +393,7 @@ impl Config {
 
         if let Some(salt) = &self.keys.pairwise_salt {
             ensure!(
-                salt.len() >= 16,
+                salt.expose().len() >= 16,
                 "keys.pairwise_salt must be at least 16 characters"
             );
         }
@@ -615,7 +615,7 @@ mod tests {
     #[test]
     fn short_pairwise_salt_is_rejected() {
         let mut config = minimal();
-        config.keys.pairwise_salt = Some("short".into());
+        config.keys.pairwise_salt = Some(String::from("short").into());
         assert!(config.validate().is_err());
     }
 

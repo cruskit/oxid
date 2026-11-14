@@ -15,7 +15,7 @@ use crate::util::{b64url, sha256};
 /// The `sub` that `client` sees for `user`.
 pub fn subject_for(state: &AppState, client: &Client, user: &User) -> String {
     subject::pairwise(
-        &state.pairwise_salt,
+        state.pairwise_salt.expose(),
         &client.sector_identifier,
         &user.subject,
     )

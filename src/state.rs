@@ -13,7 +13,7 @@ use crate::keys::SigningKey;
 use crate::store::{MemoryBackend, Store};
 use crate::theme::Theme;
 use crate::user::{StaticUserStore, UserStore};
-use crate::util::{Clock, SystemClock, random_token};
+use crate::util::{Clock, Secret, SystemClock, random_token};
 
 #[derive(Debug)]
 pub struct Inner {
@@ -31,7 +31,7 @@ pub struct Inner {
     pub theme: Theme,
     pub store: Store,
     pub clock: Arc<dyn Clock>,
-    pub pairwise_salt: Vec<u8>,
+    pub pairwise_salt: Secret<Vec<u8>>,
 }
 
 /// Cheaply cloneable handle to the provider's state.
@@ -141,7 +141,7 @@ impl AppState {
         };
 
         let pairwise_salt = if let Some(salt) = &config.keys.pairwise_salt {
-            salt.clone().into_bytes()
+            Secret::new(salt.expose().clone().into_bytes())
         } else {
             if shared {
                 tracing::info!("keys.pairwise_salt is not set: using the salt in the store");
@@ -153,8 +153,8 @@ impl AppState {
             store
                 .secret("pairwise-salt", || Ok(random_token(32)))
                 .await
-                .context("pairwise salt")?
-                .into_bytes()
+                .context("pairwise salt")
+                .map(|salt| Secret::new(salt.into_bytes()))?
         };
 
         let users: Arc<dyn UserStore> = Arc::new(users);
@@ -318,7 +318,7 @@ pub(crate) mod test_support {
             theme,
             store: Store::default(),
             clock: Arc::clone(&clock) as Arc<dyn Clock>,
-            pairwise_salt: b"unit-test-pairwise-salt".to_vec(),
+            pairwise_salt: Secret::new(b"unit-test-pairwise-salt".to_vec()),
         }));
         (state, clock)
     }
@@ -358,7 +358,42 @@ mod tests {
         let state = AppState::from_config(&config("[keys]\npairwise_salt = \"0123456789abcdef\""))
             .await
             .unwrap();
-        assert_eq!(state.pairwise_salt, b"0123456789abcdef");
+        assert_eq!(state.pairwise_salt.expose(), b"0123456789abcdef");
+    }
+
+    #[tokio::test]
+    async fn secrets_are_not_in_debug_output() {
+        let config_without_salt = || config("");
+        let salt = "0123456789abcdef";
+        let hash = crate::user::hash_password("pw").unwrap();
+        let config = config(&format!(
+            "[keys]\npairwise_salt = \"{salt}\"\n\
+             [[users]]\nusername = \"sam\"\nsubject = \"s\"\npassword_hash = \"{hash}\"\n"
+        ));
+        let salt_bytes = format!("{:?}", salt.as_bytes());
+        let salt_bytes = salt_bytes.trim_matches(['[', ']']);
+
+        let printed = format!("{config:?}");
+        assert!(
+            !printed.contains(salt) && !printed.contains(&hash),
+            "{printed}"
+        );
+
+        let state = AppState::from_config(&config).await.unwrap();
+        let printed = format!("{state:?}");
+        assert!(!printed.contains(salt), "{printed}");
+        assert!(!printed.contains(salt_bytes), "{printed}");
+        assert!(!printed.contains(&hash), "{printed}");
+
+        // A generated salt lives in the store, which must not print it either.
+        let state = AppState::from_config(&config_without_salt()).await.unwrap();
+        let generated = state
+            .store
+            .secret("pairwise-salt", || unreachable!("already generated"))
+            .await
+            .unwrap();
+        let printed = format!("{state:?}");
+        assert!(!printed.contains(&generated), "{printed}");
     }
 
     #[tokio::test]

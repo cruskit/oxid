@@ -53,7 +53,7 @@ pub const DEFAULT_SESSION_TTL: i64 = 300;
 pub const MAX_CONSENT_RECORDS: usize = 10_000;
 
 /// A pushed authorization request awaiting the user.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PushedRequest {
     pub request: AuthorizationRequest,
     /// The signed request object exactly as the client sent it.
@@ -64,6 +64,18 @@ pub struct PushedRequest {
     /// Kept by the backend as the record's counter, not in the stored value.
     #[serde(skip)]
     pub failed_logins: u32,
+}
+
+impl std::fmt::Debug for PushedRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The request object carries the client's signed claims (and may
+        // carry personal data in a claims request); keep it out of logs.
+        f.debug_struct("PushedRequest")
+            .field("request", &self.request)
+            .field("expires_at", &self.expires_at)
+            .field("failed_logins", &self.failed_logins)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A user's visit to the authorization endpoint for one pushed request.

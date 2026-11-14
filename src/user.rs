@@ -16,6 +16,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::config::UserConfig;
+use crate::util::Secret;
 
 /// Username of the built-in demo user.
 pub const DEMO_USERNAME: &str = "demo";
@@ -128,7 +129,7 @@ pub struct User {
     pub username: String,
     /// `None` for a user who cannot sign in with a password. Such users can
     /// still be selected in the technical experience.
-    password_hash: Option<String>,
+    password_hash: Option<Secret<String>>,
     /// Identity claims, keyed by OpenID Connect claim name.
     pub claims: Map<String, Value>,
     /// Source of the beneficiary account verified claims.
@@ -145,14 +146,14 @@ impl User {
         let user = Self {
             subject: subject.into(),
             username: username.into(),
-            password_hash,
+            password_hash: password_hash.map(Secret::new),
             claims,
             bank_account: None,
         };
         ensure!(!user.subject.is_empty(), "user subject must not be empty");
         ensure!(!user.username.is_empty(), "username must not be empty");
         if let Some(hash) = &user.password_hash {
-            PasswordHash::new(hash)
+            PasswordHash::new(hash.expose())
                 .map_err(|e| anyhow!("user '{}': invalid password_hash: {e}", user.username))?;
         }
         Ok(user)
@@ -171,7 +172,10 @@ impl User {
         let user = Self::new(
             &config.subject,
             &config.username,
-            config.password_hash.clone(),
+            config
+                .password_hash
+                .as_ref()
+                .map(|hash| hash.expose().clone()),
             config.claims.clone(),
         )?;
         match &config.bank_account {
@@ -202,7 +206,7 @@ impl User {
         let Some(hash) = &self.password_hash else {
             return false;
         };
-        PasswordHash::new(hash).is_ok_and(|hash| {
+        PasswordHash::new(hash.expose()).is_ok_and(|hash| {
             Argon2::default()
                 .verify_password(password.as_bytes(), &hash)
                 .is_ok()
@@ -592,7 +596,7 @@ mod tests {
     fn loads_users_from_config() {
         let config = UserConfig {
             username: "sam".into(),
-            password_hash: Some(hash_password("pw").unwrap()),
+            password_hash: Some(hash_password("pw").unwrap().into()),
             subject: "u-9".into(),
             claims: Map::new(),
             bank_account: None,

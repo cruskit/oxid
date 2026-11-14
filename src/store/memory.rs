@@ -21,9 +21,21 @@ struct Inner {
 
 /// Keeps everything in this process. Nothing survives a restart, and nothing
 /// is shared with other instances.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct MemoryBackend {
     inner: Mutex<Inner>,
+}
+
+impl std::fmt::Debug for MemoryBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Records include the generated signing key and pairwise salt, so
+        // only their number is shown.
+        let inner = self.lock();
+        f.debug_struct("MemoryBackend")
+            .field("records", &inner.records.len())
+            .field("log", &inner.log.len())
+            .finish()
+    }
 }
 
 impl MemoryBackend {
