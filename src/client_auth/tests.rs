@@ -1,13 +1,12 @@
-
 use serde_json::json;
 
-use super::test_support::valid_assertion;
 use super::*;
 use crate::client::StaticClientRegistry;
-use crate::client::test_support::client_with_key;
 use crate::error::ErrorCode;
 use crate::keys::SigningKey;
-use crate::keys::test_support::shared_key;
+use crate::testing::client_with_key;
+use crate::testing::shared_key;
+use crate::testing::valid_assertion;
 use crate::util::b64url;
 
 const ISSUER: &str = "https://op.example.com";

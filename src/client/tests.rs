@@ -1,6 +1,5 @@
-
 use super::*;
-use crate::keys::test_support::shared_key;
+use crate::testing::shared_key;
 
 fn config() -> ClientConfig {
     ClientConfig {

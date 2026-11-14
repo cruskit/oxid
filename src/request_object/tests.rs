@@ -1,12 +1,11 @@
-
 use serde_json::json;
 
-use super::test_support::{ISSUER, valid_claims};
 use super::*;
-use crate::client::test_support::client_with_key;
 use crate::error::ErrorCode;
 use crate::keys::SigningKey;
-use crate::keys::test_support::shared_key;
+use crate::testing::client_with_key;
+use crate::testing::shared_key;
+use crate::testing::{ISSUER, valid_claims};
 use crate::util::b64url;
 
 const NOW: i64 = 1_800_000_000;

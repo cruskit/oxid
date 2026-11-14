@@ -1,8 +1,7 @@
-
 use super::*;
-use crate::client::test_support::client_with_key;
-use crate::keys::test_support::shared_key;
-use crate::user::test_support::demo_store;
+use crate::testing::client_with_key;
+use crate::testing::demo_store;
+use crate::testing::shared_key;
 use crate::user::{BankAccount, DEMO_PASSWORD, DEMO_USERNAME, UserStore};
 
 /// 2026-11-11T00:00:00Z. The demo user was born 1985-04-12, so is 41.
@@ -37,7 +36,7 @@ fn release(
         client,
         requested,
         &[],
-        &test_support::everything(),
+        &crate::testing::everything(),
         now,
     )
 }
@@ -548,7 +547,7 @@ fn oidc_profile_has_no_connectid_verified_claims() {
 #[test]
 fn claim_scopes_apply_to_the_oidc_profile_only() {
     let scopes = ["openid".to_owned(), "email".to_owned(), "phone".to_owned()];
-    let everything = test_support::everything();
+    let everything = crate::testing::everything();
     let released = super::release(
         &user(),
         &oidc_client(),

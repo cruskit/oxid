@@ -1,12 +1,11 @@
-
 use axum::http::StatusCode;
 use lambda_http::aws_lambda_events::apigw::ApiGatewayV2httpRequest;
 use lambda_http::request::LambdaRequest;
 use serde_json::{Value, json};
 
 use super::*;
-use crate::http::test_support::body_text;
-use crate::state::test_support::state;
+use crate::testing::http::body_text;
+use crate::testing::state::state;
 use crate::tls::TlsIdentity;
 
 /// An HTTP API (payload format 2.0) event, as API Gateway sends it.
@@ -94,7 +93,7 @@ async fn events_are_served_by_the_router() {
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     let metadata: Value = serde_json::from_str(&body_text(response).await).unwrap();
-    assert_eq!(metadata["issuer"], crate::state::test_support::ISSUER);
+    assert_eq!(metadata["issuer"], crate::testing::state::ISSUER);
 
     // The token endpoint without a certificate is refused before
     // anything else is looked at... after client authentication.

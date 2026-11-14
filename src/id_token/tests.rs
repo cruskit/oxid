@@ -1,8 +1,7 @@
-
 use super::*;
 use crate::claims::ClaimsRequest;
 use crate::jose::{Jws, SigningAlg};
-use crate::state::test_support::{ISSUER, NOW, state};
+use crate::testing::state::{ISSUER, NOW, state};
 use crate::user::{DEMO_PASSWORD, DEMO_USERNAME};
 
 #[expect(clippy::needless_pass_by_value, reason = "called with json! literals")]
@@ -13,7 +12,7 @@ fn grant(claims: Value) -> Grant {
         user_subject: "demo-user-0001".to_owned(),
         scope: vec!["openid".to_owned()],
         claims: ClaimsRequest::parse(&claims).unwrap(),
-        shared_claims: claims::test_support::everything(),
+        shared_claims: crate::testing::everything(),
         auth_time: NOW - 5,
         txn: "txn-123".to_owned(),
         purpose: None,

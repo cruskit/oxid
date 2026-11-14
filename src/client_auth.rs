@@ -110,21 +110,4 @@ pub fn authenticate(
 }
 
 #[cfg(test)]
-pub(crate) mod test_support {
-    use serde_json::{Value, json};
-
-    /// Claims of a valid assertion from client `rp`.
-    pub fn valid_assertion(issuer: &str, now: i64) -> Value {
-        json!({
-            "iss": "rp",
-            "sub": "rp",
-            "aud": issuer,
-            "jti": "jti-1",
-            "iat": now,
-            "exp": now + 60,
-        })
-    }
-}
-
-#[cfg(test)]
 mod tests;

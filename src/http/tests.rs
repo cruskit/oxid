@@ -1,9 +1,8 @@
-
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 
-use super::test_support::Harness;
 use super::*;
+use crate::testing::http::Harness;
 
 #[test]
 fn params_reject_duplicates_and_treat_empty_as_absent() {
@@ -76,7 +75,7 @@ async fn non_form_bodies_get_an_oauth_error() {
     let response = harness.send(None, request).await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(
-        test_support::json_body(response).await["error"],
+        crate::testing::http::json_body(response).await["error"],
         "invalid_request"
     );
 }

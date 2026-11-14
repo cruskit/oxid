@@ -1,9 +1,8 @@
-
 use axum::body::Bytes;
 use axum::http::{StatusCode, header};
 
-use crate::http::test_support::{Harness, body_text};
 use crate::http::{PATH_THEME_LOGO, PATH_THEME_LOGO_DARK};
+use crate::testing::http::{Harness, body_text};
 use crate::theme::{Logo, Theme};
 
 const SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\"/>";

@@ -1,15 +1,14 @@
-
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 
-use super::test_support::{exchange, tokens};
-use crate::authz::test_support::VERIFIER;
 use crate::client_auth::ASSERTION_TYPE;
 use crate::http::PATH_TOKEN;
-use crate::http::authorize::test_support::approve;
-use crate::http::test_support::{CERT, Harness, json_body};
 use crate::jose::{Jws, SigningAlg};
-use crate::state::test_support::ISSUER;
+use crate::testing::VERIFIER;
+use crate::testing::http::approve;
+use crate::testing::http::{CERT, Harness, json_body};
+use crate::testing::http::{exchange, tokens};
+use crate::testing::state::ISSUER;
 
 async fn error_of(response: axum::http::Response<axum::body::Body>) -> (StatusCode, String) {
     let status = response.status();
@@ -104,7 +103,7 @@ async fn requested_id_token_claims_are_returned() {
 
 #[tokio::test]
 async fn declined_claims_are_left_out_of_tokens_and_userinfo() {
-    use crate::http::authorize::test_support::approve_declining;
+    use crate::testing::http::approve_declining;
     let harness = Harness::new();
     let uri = harness
         .push(&json!({"claims": {

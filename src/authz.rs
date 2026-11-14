@@ -194,30 +194,4 @@ impl AuthorizationRequest {
 }
 
 #[cfg(test)]
-pub(crate) mod test_support {
-    use serde_json::{Map, Value, json};
-
-    /// S256 challenge for [`VERIFIER`].
-    pub const CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
-    pub const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
-
-    /// A complete, valid set of parameters for client `rp`.
-    pub fn valid_params() -> Map<String, Value> {
-        json!({
-            "client_id": "rp",
-            "redirect_uri": "https://rp.example.com/cb",
-            "response_type": "code",
-            "scope": "openid",
-            "state": "st-1",
-            "nonce": "n-1",
-            "code_challenge": CHALLENGE,
-            "code_challenge_method": "S256",
-        })
-        .as_object()
-        .unwrap()
-        .clone()
-    }
-}
-
-#[cfg(test)]
 mod tests;

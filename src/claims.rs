@@ -583,18 +583,4 @@ fn age_on(born: Date, today: Date) -> Option<i32> {
 }
 
 #[cfg(test)]
-pub(crate) mod test_support {
-    use std::collections::BTreeSet;
-
-    /// A consent in which the user shares every claim that exists.
-    pub fn everything() -> BTreeSet<String> {
-        super::OIDC_STANDARD_CLAIMS
-            .iter()
-            .map(|&name| name.to_owned())
-            .chain(super::verified_claims_supported())
-            .collect()
-    }
-}
-
-#[cfg(test)]
 mod tests;

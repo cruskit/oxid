@@ -1,11 +1,10 @@
-
 use jsonwebtoken::jwk::AlgorithmParameters;
 
 use super::*;
 
 #[test]
 fn generated_key_publishes_only_public_rsa_material() {
-    let key = test_support::shared_key();
+    let key = crate::testing::shared_key();
     let jwks = serde_json::to_value(key.jwks()).unwrap();
     let jwk = &jwks["keys"][0];
     assert_eq!(jwk["kty"], "RSA");
@@ -26,7 +25,7 @@ fn generated_key_publishes_only_public_rsa_material() {
 
 #[test]
 fn debug_output_does_not_leak_key_material() {
-    let key = test_support::shared_key();
+    let key = crate::testing::shared_key();
     let debug = format!("{key:?}");
     assert!(debug.contains(key.kid()));
     assert!(!debug.contains("encoding_key"));

@@ -203,43 +203,4 @@ async fn issue_tokens(
 }
 
 #[cfg(test)]
-pub(crate) mod test_support {
-    use axum::body::Body;
-    use axum::http::Response;
-    use serde_json::Value;
-
-    use crate::authz::test_support::VERIFIER;
-    use crate::client_auth::ASSERTION_TYPE;
-    use crate::http::PATH_TOKEN;
-    use crate::http::authorize::test_support::approve;
-    use crate::http::test_support::{CERT, Harness, json_body};
-
-    pub async fn exchange(harness: &Harness, cert: Option<&str>, code: &str) -> Response<Body> {
-        harness
-            .post_form(
-                cert,
-                PATH_TOKEN,
-                &[
-                    ("grant_type", "authorization_code"),
-                    ("code", code),
-                    ("code_verifier", VERIFIER),
-                    ("redirect_uri", "https://rp.example.com/cb"),
-                    ("client_assertion_type", ASSERTION_TYPE),
-                    ("client_assertion", &harness.assertion()),
-                ],
-            )
-            .await
-    }
-
-    /// Run the whole flow and return the token response.
-    pub async fn tokens(harness: &Harness, request_overrides: &Value) -> Value {
-        let uri = harness.push(request_overrides).await;
-        let code = approve(harness, &uri).await;
-        let response = exchange(harness, Some(CERT), &code).await;
-        assert_eq!(response.status(), 200);
-        json_body(response).await
-    }
-}
-
-#[cfg(test)]
 mod tests;

@@ -1,6 +1,5 @@
-
-use super::test_support::demo_store;
 use super::*;
+use crate::testing::demo_store;
 
 #[test]
 fn demo_user_authenticates_with_the_right_password_only() {

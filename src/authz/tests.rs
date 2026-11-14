@@ -1,10 +1,9 @@
-
 use serde_json::json;
 
-use super::test_support::valid_params;
 use super::*;
-use crate::client::test_support::client_with_key;
-use crate::keys::test_support::shared_key;
+use crate::testing::client_with_key;
+use crate::testing::shared_key;
+use crate::testing::valid_params;
 
 fn client() -> Client {
     client_with_key("rp", shared_key())

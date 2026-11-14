@@ -21,6 +21,8 @@ pub mod server;
 pub mod state;
 pub mod store;
 pub mod subject;
+#[cfg(test)]
+pub(crate) mod testing;
 pub mod theme;
 pub mod tls;
 pub mod user;

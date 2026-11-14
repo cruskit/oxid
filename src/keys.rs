@@ -122,19 +122,5 @@ fn pkcs8_pem(der: &[u8]) -> String {
     format!("-----BEGIN PRIVATE KEY-----\n{body}\n-----END PRIVATE KEY-----\n")
 }
 
-/// Helpers for other modules' unit tests.
-#[cfg(test)]
-pub(crate) mod test_support {
-    use std::sync::OnceLock;
-
-    use super::SigningKey;
-
-    /// RSA generation is slow in debug builds, so tests share one key.
-    pub fn shared_key() -> &'static SigningKey {
-        static KEY: OnceLock<SigningKey> = OnceLock::new();
-        KEY.get_or_init(|| SigningKey::generate().expect("generate test key"))
-    }
-}
-
 #[cfg(test)]
 mod tests;

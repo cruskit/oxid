@@ -222,32 +222,4 @@ impl ClientRegistry for StaticClientRegistry {
 }
 
 #[cfg(test)]
-pub(crate) mod test_support {
-    use super::*;
-    use crate::keys::SigningKey;
-
-    /// A client whose JWK Set holds `key`'s public half.
-    pub fn client_with_key(id: &str, key: &SigningKey) -> Client {
-        Client::from_config(&ClientConfig {
-            client_id: id.to_owned(),
-            client_name: Some("Test RP".to_owned()),
-            redirect_uris: vec!["https://rp.example.com/cb".to_owned()],
-            jwks_file: None,
-            jwks: Some(key.jwks()),
-            // A second scope, so scope handling can be exercised. Scopes
-            // other than `openid` imply no claims.
-            scopes: vec!["openid".to_owned(), "email".to_owned()],
-            grant_types: vec![
-                GRANT_AUTHORIZATION_CODE.to_owned(),
-                GRANT_REFRESH_TOKEN.to_owned(),
-            ],
-            sector_identifier: None,
-            profile: Profile::Connectid,
-            claims: None,
-        })
-        .unwrap()
-    }
-}
-
-#[cfg(test)]
 mod tests;

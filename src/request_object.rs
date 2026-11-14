@@ -88,24 +88,4 @@ fn audience_contains(aud: Option<&Value>, expected: &str) -> bool {
 }
 
 #[cfg(test)]
-pub(crate) mod test_support {
-    use serde_json::{Value, json};
-
-    use crate::authz::test_support::valid_params;
-
-    pub const ISSUER: &str = "https://op.example.com";
-
-    /// Claims of a valid request object issued at `now` by client `rp`.
-    pub fn valid_claims(now: i64) -> Value {
-        let mut claims = valid_params();
-        claims.insert("iss".into(), json!("rp"));
-        claims.insert("aud".into(), json!(ISSUER));
-        claims.insert("nbf".into(), json!(now));
-        claims.insert("iat".into(), json!(now));
-        claims.insert("exp".into(), json!(now + 300));
-        Value::Object(claims)
-    }
-}
-
-#[cfg(test)]
 mod tests;

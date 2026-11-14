@@ -1,17 +1,16 @@
-
 use axum::http::{StatusCode, header};
 use serde_json::json;
 
-use super::test_support::{
-    approve, approve_declining, authorize_path, consent, offered, open_login, redirect_params,
-    set_cookie, sign_in, submit, submit_with, ticked,
-};
 use super::*;
 use crate::experience::login::LOGIN_COOKIE;
 use crate::http::PATH_AUTHORIZE;
-use crate::http::test_support::{Harness, body_text};
-use crate::state::test_support::ISSUER;
 use crate::store::MAX_FAILED_LOGINS;
+use crate::testing::http::{Harness, body_text};
+use crate::testing::http::{
+    approve, approve_declining, authorize_path, consent, offered, open_login, redirect_params,
+    set_cookie, sign_in, submit, submit_with, ticked,
+};
+use crate::testing::state::ISSUER;
 use crate::user::{DEMO_PASSWORD, DEMO_USERNAME};
 
 fn login_fields<'a>(csrf: &'a str, uri: &'a str, password: &'a str) -> [(&'a str, &'a str); 6] {

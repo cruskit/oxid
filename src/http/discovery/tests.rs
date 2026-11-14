@@ -1,10 +1,9 @@
-
 use axum::http::StatusCode;
 use serde_json::json;
 
-use crate::http::test_support::{Harness, json_body};
 use crate::http::{PATH_DISCOVERY, PATH_JWKS, PATH_OAUTH_METADATA};
-use crate::state::test_support::{ISSUER, MTLS};
+use crate::testing::http::{Harness, json_body};
+use crate::testing::state::{ISSUER, MTLS};
 
 #[tokio::test]
 async fn metadata_meets_fapi2_and_connectid_requirements() {

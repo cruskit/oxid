@@ -529,17 +529,4 @@ fn demo_user(password_hash: String) -> Result<User> {
 }
 
 #[cfg(test)]
-pub(crate) mod test_support {
-    use std::sync::OnceLock;
-
-    use super::*;
-
-    /// Hashing is slow, so tests share one demo store.
-    pub fn demo_store() -> &'static StaticUserStore {
-        static STORE: OnceLock<StaticUserStore> = OnceLock::new();
-        STORE.get_or_init(|| StaticUserStore::demo(&default_time_zone()).expect("demo store"))
-    }
-}
-
-#[cfg(test)]
 mod tests;

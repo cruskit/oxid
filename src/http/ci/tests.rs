@@ -1,4 +1,3 @@
-
 use std::time::Duration;
 
 use axum::body::Body;
@@ -7,10 +6,10 @@ use serde_json::{Value, json};
 use url::Url;
 
 use crate::client_auth::ASSERTION_TYPE;
-use crate::http::authorize::test_support::authorize_path;
-use crate::http::test_support::{CERT, Harness, json_body};
 use crate::http::{PATH_CI, PATH_CI_RESPONSE};
 use crate::store::{CodeRedemption, ConsentOutcome, Grant};
+use crate::testing::http::authorize_path;
+use crate::testing::http::{CERT, Harness, json_body};
 
 /// `given_name` and `over18` voluntary, `beneficiary_account_au`
 /// essential.
@@ -272,7 +271,7 @@ async fn an_abandoned_visit_gets_a_page_and_leaves_the_request_pending() {
     let response = harness.get(None, &authorize_path(&uri)).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert!(!response.headers().contains_key(header::LOCATION));
-    let html = crate::http::test_support::body_text(response).await;
+    let html = crate::testing::http::body_text(response).await;
     assert!(html.contains("id=\"abandoned\""), "{html}");
 
     // That was for one visit. The next is answered.
@@ -358,10 +357,7 @@ async fn only_a_pending_request_can_be_given_a_response() {
 
     // Pushed by another client.
     let uri = harness.push(&request()).await;
-    let other = crate::client::test_support::client_with_key(
-        "other",
-        crate::keys::test_support::shared_key(),
-    );
+    let other = crate::testing::client_with_key("other", crate::testing::shared_key());
     let now = harness.state.now();
     assert!(
         super::pending_request(&harness.state, &other, &uri, now)

@@ -1,4 +1,3 @@
-
 use super::*;
 
 const SALT: &[u8] = b"0123456789abcdef";

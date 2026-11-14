@@ -1,7 +1,6 @@
-
 use super::*;
 use crate::jose::{Jws, SigningAlg};
-use crate::keys::test_support::shared_key;
+use crate::testing::shared_key;
 
 fn config() -> ClientSyncConfig {
     toml::from_str(

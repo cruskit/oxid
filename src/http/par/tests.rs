@@ -1,11 +1,10 @@
-
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 
 use crate::client_auth::ASSERTION_TYPE;
 use crate::http::PATH_PAR;
-use crate::http::test_support::{CERT, Harness, json_body};
 use crate::store::REQUEST_URI_PREFIX;
+use crate::testing::http::{CERT, Harness, json_body};
 
 async fn push(harness: &Harness, fields: &[(&str, &str)]) -> (StatusCode, Value) {
     let response = harness.post_form(Some(CERT), PATH_PAR, fields).await;
@@ -96,7 +95,7 @@ async fn rejects_unsigned_parameters_without_a_request_object() {
             ("response_type", "code"),
             ("redirect_uri", "https://rp.example.com/cb"),
             ("scope", "openid"),
-            ("code_challenge", crate::authz::test_support::CHALLENGE),
+            ("code_challenge", crate::testing::CHALLENGE),
             ("code_challenge_method", "S256"),
         ],
     )

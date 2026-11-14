@@ -1,4 +1,3 @@
-
 use super::*;
 
 // RFC 7636 appendix B.

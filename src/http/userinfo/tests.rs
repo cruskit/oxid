@@ -1,13 +1,12 @@
-
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use serde_json::json;
 
 use super::*;
 use crate::http::PATH_USERINFO;
-use crate::http::test_support::{CERT, Harness, json_body};
-use crate::http::token::test_support::tokens;
 use crate::jose::{Jws, SigningAlg};
+use crate::testing::http::tokens;
+use crate::testing::http::{CERT, Harness, json_body};
 
 async fn call(harness: &Harness, cert: Option<&str>, authorization: Option<&str>) -> Response {
     let mut request = Request::get(PATH_USERINFO);

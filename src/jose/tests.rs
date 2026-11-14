@@ -1,4 +1,3 @@
-
 use serde_json::json;
 
 use super::*;
@@ -7,7 +6,7 @@ use crate::keys::SigningKey;
 const PS256: &[SigningAlg] = &[SigningAlg::PS256];
 
 fn key() -> &'static SigningKey {
-    crate::keys::test_support::shared_key()
+    crate::testing::shared_key()
 }
 
 fn jwks(key: &SigningKey) -> JwkSet {
