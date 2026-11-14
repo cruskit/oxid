@@ -25,6 +25,10 @@ pub const MAX_SESSION_TTL: i64 = 60 * 60;
 pub const MAX_CI_RESPONSE_DELAY: i64 = 25;
 /// ConnectID §4.2-3.10/11: request object `exp - nbf` and `nbf` age limits.
 pub const MAX_REQUEST_OBJECT_WINDOW: i64 = 600;
+/// The longest a listener waits for a request's headers, in seconds.
+pub const MAX_HEADER_READ_TIMEOUT: u64 = 60;
+/// The longest a listener lets one request take, in seconds.
+pub const MAX_REQUEST_TIMEOUT: u64 = 300;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -79,6 +83,17 @@ pub struct ServerConfig {
     /// any certificate the client proves possession of is accepted, which is
     /// what RFC 8705 calls self-signed certificate mutual TLS.
     pub client_ca: Option<PathBuf>,
+    /// Seconds an HTTP/1 client has to send a request's headers, counted
+    /// from the end of the TLS handshake or of the previous response. An
+    /// idle keep-alive connection is closed when it elapses.
+    pub header_read_timeout: u64,
+    /// Seconds a request may take, body included, before it is answered with
+    /// `503`. Must exceed `ci.response_delay`, which is spent inside a
+    /// request.
+    pub request_timeout: u64,
+    /// Connections each listener holds open at once. Further clients wait
+    /// in the kernel's accept queue.
+    pub max_connections: usize,
 }
 
 impl Default for ServerConfig {
@@ -89,6 +104,9 @@ impl Default for ServerConfig {
             tls_cert: None,
             tls_key: None,
             client_ca: None,
+            header_read_timeout: 10,
+            request_timeout: 30,
+            max_connections: 1024,
         }
     }
 }
@@ -311,6 +329,18 @@ impl Config {
             self.server.tls_cert.is_some() == self.server.tls_key.is_some(),
             "server.tls_cert and server.tls_key must be set together"
         );
+        ensure!(
+            (1..=MAX_HEADER_READ_TIMEOUT).contains(&self.server.header_read_timeout),
+            "server.header_read_timeout must be between 1 and {MAX_HEADER_READ_TIMEOUT} seconds"
+        );
+        ensure!(
+            (1..=MAX_REQUEST_TIMEOUT).contains(&self.server.request_timeout),
+            "server.request_timeout must be between 1 and {MAX_REQUEST_TIMEOUT} seconds"
+        );
+        ensure!(
+            self.server.max_connections > 0,
+            "server.max_connections must be positive"
+        );
 
         let s = &self.security;
         ensure!(
@@ -350,6 +380,10 @@ impl Config {
         ensure!(
             (0..=MAX_CI_RESPONSE_DELAY).contains(&self.ci.response_delay),
             "ci.response_delay must be between 0 and {MAX_CI_RESPONSE_DELAY} seconds"
+        );
+        ensure!(
+            self.server.request_timeout.cast_signed() > self.ci.response_delay,
+            "server.request_timeout must be longer than ci.response_delay"
         );
 
         if let Some(sync) = &self.client_sync {

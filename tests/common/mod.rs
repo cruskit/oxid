@@ -147,6 +147,44 @@ impl TestOp {
         self.server.as_ref().expect("server is running").state()
     }
 
+    /// The provider's TLS certificate.
+    pub fn certificate(&self) -> rustls::pki_types::CertificateDer<'static> {
+        self.server
+            .as_ref()
+            .expect("server is running")
+            .certificate()
+            .clone()
+    }
+
+    /// Open a TLS connection to the public listener, offering `alpn`, and
+    /// send nothing.
+    pub async fn raw_tls(
+        &self,
+        alpn: &[&[u8]],
+    ) -> tokio_rustls::client::TlsStream<tokio::net::TcpStream> {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(self.certificate()).unwrap();
+        let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+        config.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
+        let address = Url::parse(&self.issuer).unwrap();
+        let tcp = tokio::net::TcpStream::connect((
+            "127.0.0.1",
+            address.port().expect("issuer has a port"),
+        ))
+        .await
+        .unwrap();
+        tokio_rustls::TlsConnector::from(Arc::new(config))
+            .connect("localhost".try_into().unwrap(), tcp)
+            .await
+            .unwrap()
+    }
+
     pub fn now(&self) -> i64 {
         self.clock.now()
     }

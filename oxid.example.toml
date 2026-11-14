@@ -91,6 +91,17 @@ mtls_listen = "127.0.0.1:9444"
 # are bound to its thumbprint (self-signed certificate mutual TLS, RFC 8705).
 # client_ca = "tls/client-ca.pem"
 
+# Limits that protect an internet-facing listener. They do not apply on AWS
+# Lambda, where API Gateway handles connections.
+# Seconds an HTTP/1 client has to send a request's headers; idle keep-alive
+# connections are closed after the same time.
+# header_read_timeout = 10
+# Seconds a request may take before it is answered with 503. Must exceed
+# ci.response_delay.
+# request_timeout = 30
+# Connections each listener holds open at once.
+# max_connections = 1024
+
 [keys]
 # RSA private key (PEM) used to sign ID tokens with PS256. If unset, a key is
 # generated and kept in the store: with the memory store that means a new key

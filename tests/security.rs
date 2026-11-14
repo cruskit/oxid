@@ -582,3 +582,69 @@ async fn server_shuts_down_cleanly() {
         "nothing is listening after shutdown"
     );
 }
+
+/// Reads until the server closes the connection, failing after `limit`.
+async fn closed_within(
+    stream: &mut tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
+    limit: std::time::Duration,
+) -> bool {
+    use tokio::io::AsyncReadExt;
+    let mut buffer = [0_u8; 1024];
+    tokio::time::timeout(limit, async {
+        loop {
+            match stream.read(&mut buffer).await {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {}
+            }
+        }
+    })
+    .await
+    .is_ok()
+}
+
+#[tokio::test]
+async fn silent_connections_are_closed() {
+    let op = TestOp::start_with(|config| config.server.header_read_timeout = 1).await;
+    // With and without ALPN, so neither the HTTP/1 path nor the fallback
+    // when no protocol is negotiated can be held open by saying nothing.
+    for alpn in [&[b"http/1.1".as_slice()][..], &[]] {
+        let mut stream = op.raw_tls(alpn).await;
+        assert!(
+            closed_within(&mut stream, std::time::Duration::from_secs(5)).await,
+            "a connection that sends nothing is closed (ALPN {alpn:?})"
+        );
+    }
+    op.stop().await;
+}
+
+#[tokio::test]
+async fn connections_are_capped_per_listener() {
+    let op = TestOp::start_with(|config| {
+        config.server.max_connections = 1;
+        config.server.header_read_timeout = 2;
+    })
+    .await;
+    let url = op.url("/healthz");
+    let idle = op.raw_tls(&[b"http/1.1"]).await;
+
+    // The only slot is held by the idle connection.
+    let blocked = op
+        .browser
+        .get(&url)
+        .timeout(std::time::Duration::from_millis(500))
+        .send()
+        .await;
+    assert!(blocked.is_err(), "no slot is free: {blocked:?}");
+
+    // Once the idle connection is closed, the slot is free again.
+    drop(idle);
+    let response = op
+        .browser
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    op.stop().await;
+}
