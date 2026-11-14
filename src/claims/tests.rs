@@ -1,7 +1,11 @@
+use std::collections::BTreeSet;
+
+use serde_json::{Map, Value, json};
+
 use super::*;
-use crate::testing::client_with_key;
-use crate::testing::demo_store;
-use crate::testing::shared_key;
+use crate::client::{Client, Profile};
+use crate::testing::{client_with_key, demo_store, shared_key};
+use crate::user::User;
 use crate::user::{BankAccount, DEMO_PASSWORD, DEMO_USERNAME, UserStore};
 
 /// 2026-11-11T00:00:00Z. The demo user was born 1985-04-12, so is 41.
@@ -103,14 +107,13 @@ fn unknown_request_members_are_ignored() {
 
 #[test]
 fn releases_every_standard_claim_of_the_profile() {
-    let request: Map<String, Value> = CONNECTID_STANDARD_CLAIMS
-        .iter()
-        .map(|&name| (name.to_owned(), Value::Null))
+    let request: Map<String, Value> = connectid_standard_claims()
+        .map(|name| (name.to_owned(), Value::Null))
         .collect();
     let released = release(&user(), &client(), &request, NOW);
     assert_eq!(
         released.len(),
-        CONNECTID_STANDARD_CLAIMS.len(),
+        connectid_standard_claims().count(),
         "{released:?}"
     );
     assert_eq!(released["given_name"], "Alex");
@@ -510,13 +513,12 @@ fn only_shared_claims_are_released() {
 
 #[test]
 fn oidc_profile_releases_every_standard_claim() {
-    let request: Map<String, Value> = OIDC_STANDARD_CLAIMS
-        .iter()
-        .map(|&name| (name.to_owned(), Value::Null))
+    let request: Map<String, Value> = oidc_standard_claims()
+        .map(|name| (name.to_owned(), Value::Null))
         .collect();
     let released = release(&user(), &oidc_client(), &request, NOW);
-    for name in OIDC_STANDARD_CLAIMS {
-        assert!(released.contains_key(*name), "{name}");
+    for name in oidc_standard_claims() {
+        assert!(released.contains_key(name), "{name}");
     }
     assert_eq!(released["name"], "Alex Jordan Citizen");
     assert_eq!(released["email_verified"], true);
@@ -528,7 +530,7 @@ fn oidc_profile_releases_every_standard_claim() {
 
     // The same request from a ConnectID client yields only its subset.
     let connectid = release(&user(), &client(), &request, NOW);
-    assert_eq!(connectid.len(), CONNECTID_STANDARD_CLAIMS.len());
+    assert_eq!(connectid.len(), connectid_standard_claims().count());
     assert!(!connectid.contains_key("name"));
     assert!(!connectid.contains_key("email_verified"));
 }
@@ -600,7 +602,7 @@ fn claim_scopes_apply_to_the_oidc_profile_only() {
 
 #[test]
 fn profiles_define_which_claims_exist() {
-    for name in CONNECTID_STANDARD_CLAIMS {
+    for name in connectid_standard_claims() {
         assert!(profile_allows(Profile::Connectid, name), "{name}");
         assert!(profile_allows(Profile::Oidc, name), "{name}");
     }
@@ -700,11 +702,8 @@ fn discovery_lists_follow_the_profiles_in_use() {
     assert_eq!(scopes_supported(&connectid), ["openid"]);
 
     let supported = claims_supported(&both);
-    for name in OIDC_STANDARD_CLAIMS
-        .iter()
-        .chain(&["sub", "txn", "auth_time"])
-    {
-        assert!(supported.contains(name), "{name}");
+    for name in oidc_standard_claims().chain(["sub", "txn", "auth_time"]) {
+        assert!(supported.contains(&name), "{name}");
     }
     assert!(!supported.contains(&"acr"));
     assert_eq!(

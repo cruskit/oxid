@@ -108,9 +108,8 @@ pub fn valid_assertion(issuer: &str, now: i64) -> Value {
 
 /// A consent in which the user shares every claim that exists.
 pub fn everything() -> BTreeSet<String> {
-    crate::claims::OIDC_STANDARD_CLAIMS
-        .iter()
-        .map(|&name| name.to_owned())
+    crate::claims::oidc_standard_claims()
+        .map(str::to_owned)
         .chain(crate::claims::verified_claims_supported())
         .collect()
 }

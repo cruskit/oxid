@@ -67,7 +67,8 @@ mise run build        # check + release build + conformance
 - `src/http/` holds the endpoints: discovery/JWKS, PAR, authorize, token and
   UserInfo. The protocol rules sit in `authz.rs`, `request_object.rs` (JAR),
   `client_auth.rs` (private_key_jwt only), `pkce.rs` (S256 only),
-  `claims.rs` (the claims parameter, `verified_claims`, release decisions),
+  `claims/` (the claim catalogue, the claims parameter and consent,
+  release decisions and `verified_claims`),
   `id_token.rs` and `subject.rs` (pairwise subjects).
 - `src/experience/` holds the pluggable UI at the authorization endpoint (the
   `Experience` trait, a state machine over HTML forms):
