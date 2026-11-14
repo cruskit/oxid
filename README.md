@@ -61,7 +61,7 @@ The ConnectID claims:
 - A requested claim the user does not have is left out without an error, even
   when it was requested as essential.
 - `txn` is in every ID token whether requested or not.
-- A user reaches each age at 00:00 UTC on their birthday.
+- A user reaches each age at local midnight on their birthday: in the time zone of their `zoneinfo` claim, or else the configured `time_zone` (default `Australia/Sydney`). A `birthdate` that is not `YYYY-MM-DD`, or an unknown `zoneinfo`, stops the provider from starting.
 - Discovery is one document for the whole server. It advertises the claims
   and scopes of the profiles that registered clients actually use, so a
   server with only `connectid` clients advertises exactly the ConnectID

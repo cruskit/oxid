@@ -20,7 +20,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use time::{Date, Month, OffsetDateTime};
+use time::{Date, Month};
 
 use crate::client::{Client, Profile};
 use crate::user::User;
@@ -464,7 +464,7 @@ fn verified_claims(
         .get("birthdate")
         .and_then(Value::as_str)
         .and_then(parse_date)
-        .and_then(|born| age_on(born, date_of(now)?));
+        .and_then(|born| age_on(born, local_date(now, user.time_zone())?));
 
     let mut claims = Map::new();
     for name in requested.keys() {
@@ -554,14 +554,20 @@ pub(crate) fn one_line_address(address: &Value) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(", "))
 }
 
-fn date_of(unix_seconds: i64) -> Option<Date> {
-    OffsetDateTime::from_unix_timestamp(unix_seconds)
-        .ok()
-        .map(OffsetDateTime::date)
+/// The calendar date in `zone` at `unix_seconds`. Ages turn over at local
+/// midnight, not at midnight UTC, which in Australia is 8 to 11 hours later.
+fn local_date(unix_seconds: i64, zone: &jiff::tz::TimeZone) -> Option<Date> {
+    let date = jiff::Timestamp::from_second(unix_seconds)
+        .ok()?
+        .to_zoned(zone.clone())
+        .date();
+    let month = Month::try_from(u8::try_from(date.month()).ok()?).ok()?;
+    let day = u8::try_from(date.day()).ok()?;
+    Date::from_calendar_date(i32::from(date.year()), month, day).ok()
 }
 
 /// Parse an OpenID Connect `birthdate` (`YYYY-MM-DD`).
-fn parse_date(text: &str) -> Option<Date> {
+pub(crate) fn parse_date(text: &str) -> Option<Date> {
     let mut parts = text.splitn(3, '-');
     let year: i32 = parts.next()?.parse().ok()?;
     let month: u8 = parts.next()?.parse().ok()?;
@@ -1220,6 +1226,46 @@ mod tests {
         assert_eq!(age_on(born, day_before), Some(17));
         assert_eq!(age_on(born, birthday), Some(18));
         assert_eq!(age_on(birthday, born), None, "born in the future");
+    }
+
+    /// A user born on 15 June 2008, who turns 18 on 15 June 2026.
+    fn born_2008_06_15(zoneinfo: Option<&str>) -> User {
+        let mut claims = obj(json!({"birthdate": "2008-06-15"}));
+        if let Some(zone) = zoneinfo {
+            claims.insert("zoneinfo".to_owned(), zone.into());
+        }
+        User::new("minor", "minor", None, claims).unwrap()
+    }
+
+    fn over18(user: &User, now: i64) -> Value {
+        let request = verified(json!({"over18": null}));
+        release(user, &client(), &request, now)[VERIFIED_CLAIMS]["claims"]["over18"].clone()
+    }
+
+    #[test]
+    fn age_turns_over_at_local_midnight() {
+        // 2026-06-14T14:00:00Z is midnight on the 15th in Sydney (AEST, +10).
+        let sydney_midnight = 1_781_445_600;
+        let user = born_2008_06_15(None);
+        assert_eq!(over18(&user, sydney_midnight - 1), json!(false));
+        assert_eq!(over18(&user, sydney_midnight), json!(true));
+        // Still the 14th in UTC: the old UTC reading would have said false.
+        assert_eq!(over18(&user, sydney_midnight + 9 * 3600), json!(true));
+    }
+
+    #[test]
+    fn age_uses_the_users_own_time_zone() {
+        // Perth (AWST, +8) reaches the 15th two hours after Sydney.
+        let perth_midnight = 1_781_452_800;
+        let user = born_2008_06_15(Some("Australia/Perth"));
+        assert_eq!(over18(&user, perth_midnight - 1), json!(false));
+        assert_eq!(over18(&user, perth_midnight), json!(true));
+
+        // A configured default applies to users without `zoneinfo`.
+        let utc = jiff::tz::TimeZone::UTC;
+        let user = born_2008_06_15(None).with_default_time_zone(&utc);
+        assert_eq!(over18(&user, perth_midnight), json!(false));
+        assert_eq!(over18(&user, 1_781_481_600), json!(true));
     }
 
     #[test]

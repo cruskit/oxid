@@ -21,6 +21,11 @@ mtls_base_url = "https://localhost:9444"
 # Can be overridden with --experience or the OXID_EXPERIENCE variable.
 experience = "technical"
 
+# The IANA time zone in which users' ages are worked out for the
+# verified_claims age attestations (over18 and so on). A user's own zoneinfo
+# claim takes precedence.
+# time_zone = "Australia/Sydney"
+
 # Settings of the "ci" experience.
 # [ci]
 # Seconds the default response is held back after the browser arrives, to

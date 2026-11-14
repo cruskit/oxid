@@ -131,13 +131,15 @@ impl AppState {
             tracing::warn!("no clients are configured; no client will be able to authenticate");
         }
 
+        let time_zone = jiff::tz::TimeZone::get(&config.time_zone)
+            .with_context(|| format!("time_zone '{}'", config.time_zone))?;
         let users = if config.users.is_empty() {
             tracing::warn!(
                 "no users are configured: using the built-in demo customers (development only)"
             );
-            StaticUserStore::demo()?
+            StaticUserStore::demo(&time_zone)?
         } else {
-            StaticUserStore::from_config(&config.users).context("users")?
+            StaticUserStore::from_config(&config.users, &time_zone).context("users")?
         };
 
         let pairwise_salt = if let Some(salt) = &config.keys.pairwise_salt {

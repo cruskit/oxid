@@ -17,6 +17,7 @@ use serde_json::{Map, Value, json};
 
 use crate::config::UserConfig;
 use crate::util::Secret;
+use jiff::tz::TimeZone;
 
 /// Username of the built-in demo user.
 pub const DEMO_USERNAME: &str = "demo";
@@ -121,6 +122,16 @@ impl BankAccount {
     }
 }
 
+/// The time zone in which ages are worked out when neither the
+/// configuration nor the user's `zoneinfo` claim says otherwise: ConnectID
+/// serves Australia.
+pub const DEFAULT_TIME_ZONE: &str = "Australia/Sydney";
+
+/// The time zone named [`DEFAULT_TIME_ZONE`].
+pub fn default_time_zone() -> TimeZone {
+    TimeZone::get(DEFAULT_TIME_ZONE).expect("the bundled time zone database has Australia/Sydney")
+}
+
 #[derive(Debug, Clone)]
 pub struct User {
     /// Stable internal identifier; clients only ever see a pairwise value
@@ -134,6 +145,9 @@ pub struct User {
     pub claims: Map<String, Value>,
     /// Source of the beneficiary account verified claims.
     pub bank_account: Option<BankAccount>,
+    /// Where the user's birthdays start: their `zoneinfo` claim, else the
+    /// provider's configured `time_zone`.
+    time_zone: TimeZone,
 }
 
 impl User {
@@ -143,20 +157,61 @@ impl User {
         password_hash: Option<String>,
         claims: Map<String, Value>,
     ) -> Result<Self> {
-        let user = Self {
+        let mut user = Self {
             subject: subject.into(),
             username: username.into(),
             password_hash: password_hash.map(Secret::new),
+            time_zone: default_time_zone(),
             claims,
             bank_account: None,
         };
         ensure!(!user.subject.is_empty(), "user subject must not be empty");
+        if let Some(birthdate) = user.claims.get("birthdate") {
+            ensure!(
+                birthdate
+                    .as_str()
+                    .and_then(crate::claims::parse_date)
+                    .is_some(),
+                "user '{}': birthdate must be a date as YYYY-MM-DD",
+                user.username
+            );
+        }
+        if let Some(zone) = user.zoneinfo() {
+            let zone = TimeZone::get(zone).map_err(|e| {
+                anyhow!(
+                    "user '{}': zoneinfo '{zone}' is not a known time zone: {e}",
+                    user.username
+                )
+            })?;
+            user.time_zone = zone;
+        }
         ensure!(!user.username.is_empty(), "username must not be empty");
         if let Some(hash) = &user.password_hash {
             PasswordHash::new(hash.expose())
                 .map_err(|e| anyhow!("user '{}': invalid password_hash: {e}", user.username))?;
         }
         Ok(user)
+    }
+
+    /// The user's `zoneinfo` claim, if they have one.
+    fn zoneinfo(&self) -> Option<&str> {
+        self.claims.get("zoneinfo").and_then(Value::as_str)
+    }
+
+    /// Work out ages in `zone`, unless the user's `zoneinfo` claim names
+    /// their own.
+    #[must_use]
+    pub fn with_default_time_zone(mut self, zone: &TimeZone) -> Self {
+        self.time_zone = self
+            .zoneinfo()
+            .and_then(|name| TimeZone::get(name).ok())
+            .unwrap_or_else(|| zone.clone());
+        self
+    }
+
+    /// The time zone in which the user's birthdays start.
+    pub fn time_zone(&self) -> &TimeZone {
+        &self.time_zone
     }
 
     /// Attach the user's bank account.
@@ -272,19 +327,25 @@ impl StaticUserStore {
         })
     }
 
-    pub fn from_config(configs: &[UserConfig]) -> Result<Self> {
+    /// The configured users, whose ages are worked out in `time_zone`
+    /// unless their `zoneinfo` claim says otherwise.
+    pub fn from_config(configs: &[UserConfig], time_zone: &TimeZone) -> Result<Self> {
         Self::new(
             configs
                 .iter()
-                .map(User::from_config)
+                .map(|config| Ok(User::from_config(config)?.with_default_time_zone(time_zone)))
                 .collect::<Result<Vec<_>>>()?,
         )
     }
 
     /// The built-in customers, used when none are configured. They all
     /// share [`DEMO_PASSWORD`].
-    pub fn demo() -> Result<Self> {
-        Self::new(demo_users()?)
+    pub fn demo(time_zone: &TimeZone) -> Result<Self> {
+        Self::new(
+            demo_users()?
+                .into_iter()
+                .map(|user| user.with_default_time_zone(time_zone)),
+        )
     }
 
     pub fn len(&self) -> usize {
@@ -466,7 +527,7 @@ pub(crate) mod test_support {
     /// Hashing is slow, so tests share one demo store.
     pub fn demo_store() -> &'static StaticUserStore {
         static STORE: OnceLock<StaticUserStore> = OnceLock::new();
-        STORE.get_or_init(|| StaticUserStore::demo().expect("demo store"))
+        STORE.get_or_init(|| StaticUserStore::demo(&default_time_zone()).expect("demo store"))
     }
 }
 
@@ -593,6 +654,16 @@ mod tests {
     }
 
     #[test]
+    fn malformed_birthdates_and_time_zones_are_refused() {
+        let with = |claims: Value| User::new("s", "u", None, claims.as_object().unwrap().clone());
+        assert!(with(json!({"birthdate": "1985-04-12"})).is_ok());
+        assert!(with(json!({"birthdate": "12/04/1985"})).is_err());
+        assert!(with(json!({"birthdate": 1985})).is_err());
+        assert!(with(json!({"zoneinfo": "Australia/Perth"})).is_ok());
+        assert!(with(json!({"zoneinfo": "Mars/Olympus_Mons"})).is_err());
+    }
+
+    #[test]
     fn loads_users_from_config() {
         let config = UserConfig {
             username: "sam".into(),
@@ -601,7 +672,9 @@ mod tests {
             claims: Map::new(),
             bank_account: None,
         };
-        let store = StaticUserStore::from_config(std::slice::from_ref(&config)).unwrap();
+        let store =
+            StaticUserStore::from_config(std::slice::from_ref(&config), &default_time_zone())
+                .unwrap();
         let user = store.authenticate("sam", "pw").unwrap();
         assert!(user.bank_account.is_none());
 
@@ -609,7 +682,7 @@ mod tests {
             bank_account: Some(account()),
             ..config.clone()
         };
-        let store = StaticUserStore::from_config(&[with_account]).unwrap();
+        let store = StaticUserStore::from_config(&[with_account], &default_time_zone()).unwrap();
         let user = store.authenticate("sam", "pw").unwrap();
         assert_eq!(user.bank_account.as_ref().unwrap().bsb, "100200");
 
@@ -620,7 +693,7 @@ mod tests {
             }),
             ..config
         };
-        let err = StaticUserStore::from_config(&[invalid]).unwrap_err();
+        let err = StaticUserStore::from_config(&[invalid], &default_time_zone()).unwrap_err();
         assert!(err.to_string().contains("sam"), "{err}");
     }
 

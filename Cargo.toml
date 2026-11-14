@@ -38,6 +38,7 @@ aws-config = { version = "1", optional = true, default-features = false, feature
 aws-sdk-dynamodb = { version = "1", optional = true, default-features = false, features = ["rt-tokio", "default-https-client"] }
 lambda_http = { version = "1", optional = true, default-features = false, features = ["apigw_http"] }
 askama = "0.16"
+jiff = { version = "0.2.44", default-features = false, features = ["std", "tzdb-bundle-always"] }
 
 [features]
 # Amazon DynamoDB as the store, and the `oxid-lambda` binary for AWS Lambda.

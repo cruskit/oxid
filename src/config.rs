@@ -65,6 +65,15 @@ pub struct Config {
     /// the oxID theme.
     #[serde(default)]
     pub theme: crate::theme::ThemeConfig,
+    /// The IANA time zone in which a user's age is worked out, for the
+    /// `verified_claims` age attestations, unless the user's own `zoneinfo`
+    /// claim names one. A birthday starts at midnight there.
+    #[serde(default = "default_time_zone")]
+    pub time_zone: String,
+}
+
+fn default_time_zone() -> String {
+    crate::user::DEFAULT_TIME_ZONE.to_owned()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -324,6 +333,8 @@ impl Config {
         validate_base_url(&self.issuer).context("issuer")?;
         validate_base_url(&self.mtls_base_url).context("mtls_base_url")?;
         self.theme.validate().context("theme")?;
+        jiff::tz::TimeZone::get(&self.time_zone)
+            .with_context(|| format!("time_zone '{}' is not a known time zone", self.time_zone))?;
 
         ensure!(
             self.server.tls_cert.is_some() == self.server.tls_key.is_some(),
