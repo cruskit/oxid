@@ -1,0 +1,28 @@
+{#-
+  The `login` experience, page 1: log in.
+
+  It names the client and says only that it wants information shared. What
+  is being requested, and why, is for the signed-in user to see, so nothing
+  about the request appears here.
+-#}
+<h1>Log in to {{ theme.name }}</h1>
+<p class="lead" id="login-reason">Log in to review this request:</p>
+<div class="rp">
+  <div class="avatar" aria-hidden="true">{{ client_initial }}</div>
+  <div>
+    <strong id="client-name">{{ client_name }}</strong>
+    <span>is asking you to share some of your information.</span>
+  </div>
+</div>
+{%- if let Some(error) = error %}
+<p id="error" class="alert" role="alert">{{ error }}</p>
+{%- endif %}
+{% include "form_open.html" %}
+  <label class="field" for="username">Username</label>
+  <input id="username" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" autofocus>
+  <label class="field" for="password">Password</label>
+  <input id="password" name="password" type="password" autocomplete="current-password">
+  <button id="sign-in" class="primary" type="submit" name="action" value="sign-in">Log in</button>
+  <button id="deny" class="ghost" type="submit" name="action" value="deny" formnovalidate>Cancel and return to {{ client_name }}</button>
+</form>
+<p class="fine">You'll choose what to share after you log in.</p>

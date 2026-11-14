@@ -1,5 +1,6 @@
-# Only the manifest and sources are needed to build the image.
+# Only the manifest, sources and page templates are needed to build the image.
 *
 !Cargo.toml
 !Cargo.lock
 !src/
+!templates/

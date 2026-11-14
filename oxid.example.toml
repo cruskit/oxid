@@ -27,6 +27,56 @@ experience = "technical"
 # give the client time to choose another. 0 to 25.
 # response_delay = 5
 
+# The theme: the name, logo and colours of the pages users see, under every
+# experience. Everything here is optional, and anything left out keeps the
+# value of the built-in oxID theme.
+#
+# Every theme has a light and a dark set of colours. The browser picks
+# between them from the user's system setting, so set both: a colour set for
+# one mode only leaves the other mode with oxID's.
+# [theme]
+# What the provider is called on its pages. Up to 60 characters.
+# name = "Acme Bank"
+# An image shown at the top of every page instead of the built-in mark: a
+# .png, .svg, .jpg or .webp file of at most 512 KiB. It is displayed 36
+# pixels high.
+# logo = "theme/logo.svg"
+# The logo to use in dark mode. Without one, `logo` is used in both.
+# logo_dark = "theme/logo-dark.svg"
+# Show the name beside the logo. Set it to false for a logo that already
+# spells the name out.
+# show_name = true
+#
+# Colours are hexadecimal: #rgb, #rrggbb or #rrggbbaa. The values below are
+# the built-in oxID theme.
+# [theme.light]
+# background = "#f3f4f8"     # the page, behind everything
+# surface = "#ffffff"        # cards and panels, and inside form fields
+# surface_muted = "#f5f6f9"  # quieter areas on a surface: boxes, code
+# border = "#e1e4eb"         # lines between and around things
+# text = "#0e1320"           # body text
+# text_muted = "#5d6577"     # hints, labels and small print
+# primary = "#0e1320"        # the main button
+# primary_text = "#ffffff"   # text on the main button
+# accent = "#ff5630"         # the brand colour: mark, highlights, focus rings
+# success = "#0a7d55"        # positive states, such as a switch that is on
+# danger = "#b3261e"         # errors
+# warning = "#b7791f"        # cautions
+#
+# [theme.dark]
+# background = "#0b0e16"
+# surface = "#161b27"
+# surface_muted = "#1f2534"
+# border = "#2f3649"
+# text = "#eef0f6"
+# text_muted = "#a3abbd"
+# primary = "#eef0f6"
+# primary_text = "#0e1320"
+# accent = "#ff6b4a"
+# success = "#34c28e"
+# danger = "#ff8f85"
+# warning = "#e9b949"
+
 [server]
 listen = "127.0.0.1:9443"
 mtls_listen = "127.0.0.1:9444"

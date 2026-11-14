@@ -1,0 +1,72 @@
+{#-
+  The page shell: everything around a page's own content.
+
+  `theme` supplies the name, the logo and the colours. The colours become CSS
+  custom properties here, once for light mode and once for dark, and the
+  browser picks between them from the user's system setting. The styles in
+  shell.css, and each page's own, use only those properties.
+
+  `body` is a page that has already been rendered from its own template.
+-#}
+{%- macro palette(colors) -%}
+--background: {{ colors.background }};
+        --surface: {{ colors.surface }};
+        --surface-muted: {{ colors.surface_muted }};
+        --border: {{ colors.border }};
+        --text: {{ colors.text }};
+        --text-muted: {{ colors.text_muted }};
+        --primary: {{ colors.primary }};
+        --primary-text: {{ colors.primary_text }};
+        --accent: {{ colors.accent }};
+        --success: {{ colors.success }};
+        --danger: {{ colors.danger }};
+        --warning: {{ colors.warning }};
+{%- endmacro -%}
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <title>{{ title }} - {{ theme.name }}</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        {% call palette(theme.light) %}{% endcall %}
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+        {% call palette(theme.dark) %}{% endcall %}
+        }
+      }
+{{ base_style|safe }}
+{{ style|safe }}
+    </style>
+  </head>
+  <body>
+    <header class="brand">
+      {%- if theme.has_logo() %}
+      <picture>
+        {%- if theme.logo_dark.is_some() %}
+        <source srcset="{{ crate::http::PATH_THEME_LOGO_DARK }}" media="(prefers-color-scheme: dark)">
+        {%- endif %}
+        <img class="logo" src="{{ crate::http::PATH_THEME_LOGO }}" alt="{% if !theme.show_name %}{{ theme.name }}{% endif %}">
+      </picture>
+      {%- else %}
+      <i class="mark"></i>
+      {%- endif %}
+      {%- if theme.show_name %}
+      <span class="name">{% if theme.is_oxid() %}ox<b>ID</b>{% else %}{{ theme.name }}{% endif %}</span>
+      {%- endif %}
+    </header>
+    <main class="{% if wide %}wide{% else %}card{% endif %}">
+{{ body|safe }}
+    </main>
+    {%- if !wide %}
+    <footer class="legal">Protected by {{ theme.name }}. We never share your details without your say-so.</footer>
+    {%- endif %}
+    {%- for script in scripts %}
+    <script nonce="{{ nonce }}">{{ script|safe }}</script>
+    {%- endfor %}
+  </body>
+</html>

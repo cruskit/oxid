@@ -1,0 +1,101 @@
+{#-
+  The `login` experience, page 2: consent.
+
+  Who is asking, why, and every claim that would be released with the value
+  that would be shared. `required` claims can only be refused by cancelling.
+  `optional` ones each have a switch, which is off unless `row.on`.
+-#}
+
+{#- What a claim is, and the value that would be shared. -#}
+{%- macro what(row) %}
+        <span class="what">
+          <span class="name">{{ row.label }}</span>
+          {%- match row.value %}
+          {%- when Some(ClaimValue::Text(text)) %}
+          <span class="value" id="value-{{ row.name }}">{{ text }}</span>
+          {%- when Some(ClaimValue::Members(members)) %}
+          <span class="value" id="value-{{ row.name }}">
+            {%- for member in members %}
+            <span><em>{{ member.label }}:</em> {{ member.text }}</span>
+            {%- endfor %}
+          </span>
+          {%- when None %}
+          {#- Nothing is released for a claim the user does not have. #}
+          <span class="value none" id="value-{{ row.name }}">Not on file, so it won't be shared</span>
+          {%- endmatch %}
+        </span>
+{%- endmacro -%}
+
+<p class="who" id="signed-in">Logged in as <strong>{{ user_name }}</strong></p>
+<h1>Review this request</h1>
+
+{#-
+  The purpose is written by the client to complete the sentence "... is
+  asking you to share your information for the purpose of ..." (ConnectID
+  identity assurance §5.1), so that is how it is shown: the sentence, with
+  the purpose set apart as the part to read.
+#}
+<div class="ask">
+  {%- if let Some(purpose) = purpose %}
+  <p><strong id="client-name">{{ client_name }}</strong> {{ self.asking() }} for the purpose of</p>
+  <p id="purpose" class="purpose">{{ purpose }}</p>
+  {%- else %}
+  <p><strong id="client-name">{{ client_name }}</strong> {{ self.asking() }}.</p>
+  {%- endif %}
+</div>
+{%- if self.nothing_requested() %}
+<p id="requested-none" class="lead">{{ client_name }} will be told that you logged in with {{ theme.name }}. No personal details will be shared.</p>
+{%- else %}
+<p class="lead">Check what will be shared before you continue.</p>
+{%- endif %}
+
+{% include "form_open.html" %}
+  {%- if !self.nothing_requested() %}
+  <div id="requested">
+    {%- if !required.is_empty() %}
+    <h2>Required by {{ client_name }}</h2>
+    <p id="required-hint" class="hint">{{ client_name }} needs these to continue. If you'd rather not share them, cancel.</p>
+    <ul class="claims">
+      {%- for row in required %}
+      <li data-claim="{{ row.name }}" data-essential="true">
+        <div class="row">
+          {%- call what(row) %}{% endcall %}
+          <span class="tag">Required</span>
+        </div>
+      </li>
+      {%- endfor %}
+    </ul>
+    {%- endif %}
+
+    {%- if !optional.is_empty() %}
+    <div class="head">
+      <h2>Optional</h2>
+      {%- if self.can_share_all() %}
+      <button id="share-all" class="link" type="submit" name="action" value="share-all">Turn all on</button>
+      {%- endif %}
+    </div>
+    <p id="optional-hint" class="hint">Your choice. Turn on anything you're happy to share.</p>
+    <ul class="claims">
+      {%- for row in optional %}
+      <li data-claim="{{ row.name }}">
+        {%- if row.value.is_some() %}
+        <label class="row" for="share-{{ row.name }}">
+          {%- call what(row) %}{% endcall %}
+          <input type="checkbox" class="switch" id="share-{{ row.name }}" name="share_{{ row.name }}" value="1"{% if row.on %} checked{% endif %}>
+        </label>
+        {%- else %}
+        <div class="row">
+          {%- call what(row) %}{% endcall %}
+        </div>
+        {%- endif %}
+      </li>
+      {%- endfor %}
+    </ul>
+    {%- endif %}
+  </div>
+  {%- endif %}
+
+  <button id="approve" class="primary" type="submit" name="action" value="approve">{% if self.nothing_requested() %}Continue{% else %}Share and continue{% endif %}</button>
+  <button id="deny" class="ghost" type="submit" name="action" value="deny" formnovalidate>Cancel</button>
+</form>
+<p class="fine">You'll be taken back to {{ client_name }}. For your security, this request expires {{ limit }} after you arrived.</p>

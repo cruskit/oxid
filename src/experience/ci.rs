@@ -27,16 +27,17 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use askama::Template;
 use tokio::time::Instant;
 
 use super::{
     Approval, Decision, Experience, Form, Interaction, Kind, Page, Step, StepFuture,
-    error_condition, everything_requested,
+    error_condition, everything_requested, render,
 };
 use crate::error::ErrorCode;
 use crate::store::PlannedResponse;
+use crate::theme::Theme;
 use crate::user::{User, UserStore};
-use crate::util::html_escape;
 
 /// How often a waiting request looks for a response chosen by the client.
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -182,6 +183,14 @@ impl Ci {
     }
 }
 
+/// The page of an abandoned visit: `templates/ci/abandoned.html`.
+#[derive(Template)]
+#[template(path = "ci/abandoned.html")]
+struct AbandonedTemplate<'a> {
+    theme: &'a Theme,
+    client_name: &'a str,
+}
+
 /// What the browser gets when the client chose that the user abandons the
 /// visit: a page, and no redirect.
 fn abandoned_page(interaction: &Interaction<'_>) -> Page {
@@ -189,15 +198,13 @@ fn abandoned_page(interaction: &Interaction<'_>) -> Page {
         client_id = %interaction.client.id,
         "ci: giving no response, as the client chose"
     );
+    let template = AbandonedTemplate {
+        theme: interaction.theme(),
+        client_name: &interaction.client.name,
+    };
     Page {
         title: "No response".to_owned(),
-        body: format!(
-            "<h1 id=\"abandoned\">No response was sent</h1>\
-             <p class=\"lead\"><strong id=\"client-name\">{}</strong> asked oxID to act as a \
-             user who leaves without deciding. The request is still pending: opening this \
-             address again answers it.</p>",
-            html_escape(&interaction.client.name)
-        ),
+        body: render(&template),
         style: "",
         script: None,
         wide: false,

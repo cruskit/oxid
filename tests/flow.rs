@@ -509,7 +509,7 @@ async fn purpose_is_shown_escaped_and_recorded_with_the_transaction() {
     let page = op.open_consent(&request_uri).await;
     assert!(
         page.html
-            .contains("Confirm you are over 18 for &lt;Bottle &amp; Co&gt; — order #4521"),
+            .contains("Confirm you are over 18 for &#60;Bottle &#38; Co&#62; — order #4521"),
         "{}",
         page.html
     );
@@ -802,4 +802,55 @@ async fn back_channel_errors_are_json_oauth_errors() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(error, "invalid_client");
     op.stop().await;
+}
+
+#[tokio::test]
+async fn a_configured_theme_names_and_colours_the_pages_and_serves_its_logo() {
+    let dir = std::env::temp_dir().join(format!("oxid-theme-flow-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let logo = dir.join("logo.svg");
+    let svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 1 1\"/>";
+    std::fs::write(&logo, svg).unwrap();
+
+    let op = TestOp::start_with(|config| {
+        config.theme = toml::from_str(
+            "name = \"Acme Bank\"\n[light]\naccent = \"#0055ff\"\n[dark]\naccent = \"#7aa2ff\"",
+        )
+        .unwrap();
+        config.theme.logo = Some(logo.clone());
+    })
+    .await;
+    let request_uri = op.push(&Pkce::new(), &json!({})).await;
+    let page = op.open_login(&request_uri).await;
+    assert!(page.html.contains("<h1>Log in to Acme Bank</h1>"));
+    assert!(page.html.contains("--accent: #0055ff;") && page.html.contains("--accent: #7aa2ff;"));
+    assert!(
+        page.html
+            .contains("<img class=\"logo\" src=\"/theme/logo\"")
+    );
+    assert!(!page.html.contains("oxID"));
+
+    let response = op.browser.get(op.url("/theme/logo")).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "image/svg+xml");
+    assert_eq!(response.text().await.unwrap(), svg);
+    let response = op
+        .browser
+        .get(op.url("/theme/logo-dark"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    // The flow itself is unchanged by a theme.
+    assert!(op.approve(&request_uri).await.contains_key("code"));
+    op.stop().await;
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    // A logo that cannot be read stops the provider from starting.
+    let missing = TestOp::try_start_with(|config| {
+        config.theme.logo = Some("/nonexistent/logo.png".into());
+    })
+    .await;
+    assert!(missing.is_err());
 }

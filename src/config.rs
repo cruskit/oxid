@@ -57,6 +57,10 @@ pub struct Config {
     /// Users. When empty, the built-in demo user is used.
     #[serde(default)]
     pub users: Vec<UserConfig>,
+    /// The name, logo and colours of the pages users see. The default is
+    /// the oxID theme.
+    #[serde(default)]
+    pub theme: crate::theme::ThemeConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -280,6 +284,8 @@ impl Config {
         fix(&mut self.server.tls_key);
         fix(&mut self.server.client_ca);
         fix(&mut self.keys.signing_key);
+        fix(&mut self.theme.logo);
+        fix(&mut self.theme.logo_dark);
         for client in &mut self.clients {
             fix(&mut client.jwks_file);
         }
@@ -299,6 +305,7 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         validate_base_url(&self.issuer).context("issuer")?;
         validate_base_url(&self.mtls_base_url).context("mtls_base_url")?;
+        self.theme.validate().context("theme")?;
 
         ensure!(
             self.server.tls_cert.is_some() == self.server.tls_key.is_some(),
@@ -576,6 +583,58 @@ mod tests {
         let mut config = minimal();
         config.keys.pairwise_salt = Some("short".into());
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn the_theme_is_configured_and_validated() {
+        let config = minimal();
+        assert_eq!(config.theme.name, None, "the default is the oxID theme");
+        assert!(config.theme.show_name && config.theme.logo.is_none());
+
+        let mut config: Config = toml::from_str(
+            r##"
+            issuer = "https://op.example.com"
+            mtls_base_url = "https://mtls.op.example.com"
+            [theme]
+            name = "Acme Bank"
+            logo = "theme/logo.svg"
+            logo_dark = "/abs/logo-dark.png"
+            [theme.light]
+            accent = "#0055ff"
+            [theme.dark]
+            accent = "#7aa2ff"
+            "##,
+        )
+        .unwrap();
+        config.validate().unwrap();
+        config.resolve_paths(Path::new("/etc/oxid"));
+        assert_eq!(
+            config.theme.logo.as_deref().unwrap(),
+            Path::new("/etc/oxid/theme/logo.svg")
+        );
+        assert_eq!(
+            config.theme.logo_dark.as_deref().unwrap(),
+            Path::new("/abs/logo-dark.png")
+        );
+        assert_eq!(
+            config.theme.light.accent.as_ref().unwrap().as_str(),
+            "#0055ff"
+        );
+
+        config.theme.name = Some(String::new());
+        let error = config.validate().unwrap_err();
+        assert!(format!("{error:#}").starts_with("theme: "), "{error:#}");
+
+        // Only hexadecimal colours, and only the colours there are.
+        for bad in [
+            "[theme.light]\naccent = \"blue\"",
+            "[theme]\ncolour = \"#fff\"",
+        ] {
+            let text = format!(
+                "issuer = \"https://a.example\"\nmtls_base_url = \"https://b.example\"\n{bad}"
+            );
+            assert!(toml::from_str::<Config>(&text).is_err(), "{bad}");
+        }
     }
 
     #[test]

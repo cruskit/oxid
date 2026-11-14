@@ -15,60 +15,37 @@
 //! consent.
 
 use std::collections::BTreeSet;
-use std::fmt::Write as _;
 use std::sync::Arc;
 
+use askama::Template;
 use serde_json::{Map, Value};
 
 use super::{
-    Approval, Decision, Experience, Form, Interaction, Kind, Page, Step, StepFuture, duration_text,
-    host_cookie,
+    Approval, Decision, Experience, Form, FormTarget, Interaction, Kind, Page, Step, StepFuture,
+    duration_text, host_cookie, render,
 };
 use crate::claims::{self, ConsentItem};
 use crate::error::ErrorCode;
+use crate::theme::Theme;
 use crate::user::{User, UserStore};
-use crate::util::{html_escape, random_token};
+use crate::util::random_token;
 
-/// Prefix of the consent form's per-claim checkboxes: `share_<claim>`.
+/// Prefix of the consent form's per-claim checkboxes: `share_<claim>`. The
+/// consent template writes the same prefix.
 const SHARE_FIELD_PREFIX: &str = "share_";
 
 /// Holds the secret that ties a signed-in session to this browser.
 pub const LOGIN_COOKIE: &str = "__Host-oxid-login";
 
+// The `action` values of the buttons in the templates.
 const ACTION_SIGN_IN: &str = "sign-in";
 const ACTION_APPROVE: &str = "approve";
 const ACTION_DENY: &str = "deny";
 /// Shows the consent page again with every voluntary claim turned on.
 const ACTION_SHARE_ALL: &str = "share-all";
 
-const STYLE: &str = ".who{display:flex;align-items:center;gap:.5rem;font-size:.85rem;color:#5d6577;\
-margin:0 0 1.25rem}.who::before{content:'';width:.5rem;height:.5rem;border-radius:50%;\
-background:#0a7d55}.who strong{color:#0e1320}\
-.ask{background:#fff7f2;border:1px solid #ffd9c7;border-radius:.9rem;padding:.9rem 1rem;\
-margin:.75rem 0 1rem}.card .ask p{margin:0;color:#5d6577;font-size:.9rem}\
-.card .ask strong{color:#0e1320}.card .ask .purpose{margin-top:.3rem;color:#0e1320;\
-font-size:1.1rem;font-weight:600;line-height:1.35}\
-.head{display:flex;align-items:baseline;justify-content:space-between}\
-.card .link{display:inline;width:auto;min-height:0;margin:0;padding:.2rem .4rem;border-radius:.4rem;\
-background:none;color:#b3400f;font-size:.8rem;font-weight:600}\
-.hint{font-size:.85rem;color:#5d6577;margin:0 0 .5rem}\
-ul.claims{list-style:none;padding:0;margin:0;border:1px solid #e6e8ee;border-radius:.9rem}\
-ul.claims li+li{border-top:1px solid #e6e8ee}\
-ul.claims .row{display:flex;align-items:center;justify-content:space-between;gap:1rem;\
-padding:.85rem 1rem;margin:0}ul.claims label.row{cursor:pointer}\
-.what{min-width:0}.what .name{display:block;font-size:.8rem;color:#5d6577}\
-.what .value{display:block;font-weight:600;word-break:break-word;line-height:1.4;margin-top:.1rem}\
-.what .value span{display:block}.what .value em{font-style:normal;font-weight:400;color:#5d6577}\
-.what .none{font-weight:400;color:#7b8394}\
-.tag{flex:none;font-size:.7rem;font-weight:600;letter-spacing:.03em;border-radius:999px;\
-padding:.25rem .6rem;background:#eef0f4;color:#3c4354}\
-.card .switch{appearance:none;-webkit-appearance:none;flex:none;width:2.75rem;height:1.6rem;\
-padding:0;margin:0;border:0;border-radius:999px;background:#cfd3dc;position:relative;\
-cursor:pointer;transition:background .15s}\
-.card .switch::after{content:'';position:absolute;top:.2rem;left:.2rem;width:1.2rem;height:1.2rem;\
-border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.25);transition:transform .15s}\
-.card .switch:checked{background:#0a7d55}\
-.card .switch:checked::after{transform:translateX(1.15rem)}";
+/// The styles of both pages.
+const STYLE: &str = include_str!("../../templates/login/login.css");
 
 #[derive(Debug)]
 pub struct Login {
@@ -228,66 +205,142 @@ fn user_selection(interaction: &Interaction<'_>, form: &Form) -> (BTreeSet<Strin
     (shared, declined)
 }
 
-/// The client as a small card: an initial, its name and a line about it.
-fn client_card(name: &str, line: &str) -> String {
-    let initial: String = name
-        .chars()
-        .find(|c| c.is_alphanumeric())
-        .map(|c| c.to_uppercase().collect())
-        .unwrap_or_default();
-    format!(
-        "<div class=\"rp\"><div class=\"avatar\" aria-hidden=\"true\">{}</div>\
-         <div><strong id=\"client-name\">{}</strong><span>{}</span></div></div>",
-        html_escape(&initial),
-        html_escape(name),
-        html_escape(line),
-    )
+/// The login page: `templates/login/login.html`.
+#[derive(Template)]
+#[template(path = "login/login.html")]
+struct LoginTemplate<'a> {
+    theme: &'a Theme,
+    form: FormTarget<'a>,
+    client_name: &'a str,
+    /// The first letter or digit of the client's name, for its avatar.
+    client_initial: String,
+    /// Why the page is being shown again, if it is.
+    error: Option<&'a str>,
 }
 
 /// The first page. It names the client and says only that it wants
 /// information shared; what and why is for the signed-in user to see.
 fn login_page(interaction: &Interaction<'_>, error: Option<&str>) -> Page {
     let name = &interaction.client.name;
-    // The user is not logging in to the client: they are logging in to see
-    // what it has asked for. The lead introduces the card that says who.
-    let mut body = String::from(
-        "<h1>Log in to oxID</h1>\
-         <p class=\"lead\" id=\"login-reason\">Log in to review this request:</p>",
-    );
-    body.push_str(&client_card(
-        name,
-        "is asking you to share some of your information.",
-    ));
-    if let Some(error) = error {
-        let _ = write!(
-            body,
-            "<p id=\"error\" class=\"alert\" role=\"alert\">{}</p>",
-            html_escape(error)
-        );
-    }
-    body.push_str(&interaction.form_open());
-    let _ = write!(
-        body,
-        "<label class=\"field\" for=\"username\">Username</label>\
-         <input id=\"username\" name=\"username\" type=\"text\" autocomplete=\"username\" \
-         autocapitalize=\"none\" spellcheck=\"false\" autofocus>\
-         <label class=\"field\" for=\"password\">Password</label>\
-         <input id=\"password\" name=\"password\" type=\"password\" \
-         autocomplete=\"current-password\">\
-         <button id=\"sign-in\" class=\"primary\" type=\"submit\" name=\"action\" \
-         value=\"{ACTION_SIGN_IN}\">Log in</button>\
-         <button id=\"deny\" class=\"ghost\" type=\"submit\" name=\"action\" \
-         value=\"{ACTION_DENY}\" formnovalidate>Cancel and return to {}</button></form>\
-         <p class=\"fine\">You'll choose what to share after you log in.</p>",
-        html_escape(name)
-    );
-
+    let template = LoginTemplate {
+        theme: interaction.theme(),
+        form: interaction.form(),
+        client_name: name,
+        client_initial: name
+            .chars()
+            .find(|c| c.is_alphanumeric())
+            .map(|c| c.to_uppercase().collect())
+            .unwrap_or_default(),
+        error,
+    };
     Page {
         title: "Log in".to_owned(),
-        body,
+        body: render(&template),
         style: STYLE,
         script: None,
         wide: false,
+    }
+}
+
+/// The consent page: `templates/login/consent.html`.
+#[derive(Template)]
+#[template(path = "login/consent.html")]
+struct ConsentTemplate<'a> {
+    theme: &'a Theme,
+    form: FormTarget<'a>,
+    client_name: &'a str,
+    /// The signed-in user's name.
+    user_name: String,
+    /// Why the client is asking, in its own words.
+    purpose: Option<&'a str>,
+    /// Essential claims: shared if the user continues at all.
+    required: Vec<ClaimRow>,
+    /// Voluntary claims: shared only if the user turns them on.
+    optional: Vec<ClaimRow>,
+    /// How long the user has, in words.
+    limit: String,
+}
+
+impl ConsentTemplate<'_> {
+    /// Whether the request asks for no claims at all: a plain login.
+    fn nothing_requested(&self) -> bool {
+        self.required.is_empty() && self.optional.is_empty()
+    }
+
+    /// The middle of the sentence that says what the client wants.
+    fn asking(&self) -> String {
+        if self.nothing_requested() {
+            format!("is asking you to log in with {}", self.theme.name)
+        } else {
+            "is asking you to share your information".to_owned()
+        }
+    }
+
+    /// Whether "Turn all on" has anything to turn on.
+    fn can_share_all(&self) -> bool {
+        self.optional.iter().any(|row| row.value.is_some())
+    }
+}
+
+/// One claim on the consent page: what it is and the value to be shared.
+#[derive(Debug, PartialEq, Eq)]
+struct ClaimRow {
+    /// The claim's name, as in the request.
+    name: String,
+    /// What the claim is, in words.
+    label: String,
+    /// The value that would be shared. `None` when the user has no value
+    /// for the claim, in which case nothing is released for it.
+    value: Option<ClaimValue>,
+    /// For a voluntary claim, whether its switch starts on.
+    on: bool,
+}
+
+impl ClaimRow {
+    fn new(item: &ConsentItem, value: Option<&Value>, on: bool) -> Self {
+        Self {
+            name: item.name.clone(),
+            label: item.label.clone(),
+            value: value.map(|value| ClaimValue::of(&item.name, value)),
+            on,
+        }
+    }
+}
+
+/// A claim value as the user should read it. The value shown is the value
+/// shared; only its presentation differs from the JSON.
+#[derive(Debug, PartialEq, Eq)]
+enum ClaimValue {
+    /// One line of text.
+    Text(String),
+    /// A structured claim, one line per member.
+    Members(Vec<Member>),
+}
+
+/// One member of a structured claim.
+#[derive(Debug, PartialEq, Eq)]
+struct Member {
+    label: String,
+    text: String,
+}
+
+impl ClaimValue {
+    fn of(name: &str, value: &Value) -> Self {
+        match value {
+            Value::Object(members) if name == "address" => {
+                Self::Text(claims::one_line_address(value).unwrap_or_else(|| members_text(members)))
+            }
+            Value::Object(members) => Self::Members(
+                members
+                    .iter()
+                    .map(|(key, member)| Member {
+                        label: member_label(key),
+                        text: scalar_text(member),
+                    })
+                    .collect(),
+            ),
+            other => Self::Text(scalar_text(other)),
+        }
     }
 }
 
@@ -296,12 +349,6 @@ fn login_page(interaction: &Interaction<'_>, error: Option<&str>) -> Page {
 fn consent_page(interaction: &Interaction<'_>, user: &User, all_on: bool) -> Page {
     let client = interaction.client;
     let request = interaction.request();
-    let name = html_escape(&client.name);
-
-    let mut body = format!(
-        "<p class=\"who\" id=\"signed-in\">Logged in as <strong>{}</strong></p>",
-        html_escape(&user.display_name())
-    );
 
     // Only what can actually be released is listed. `txn` is technical and
     // is not shown (ConnectID identity assurance §5.3.2).
@@ -310,169 +357,30 @@ fn consent_page(interaction: &Interaction<'_>, user: &User, all_on: bool) -> Pag
         request
             .claims
             .shareable_values(user, client, &request.scope, interaction.state.now());
-    let (required, optional): (Vec<&ConsentItem>, Vec<&ConsentItem>) =
-        requested.iter().partition(|item| item.essential);
-
-    // The purpose is written by the client to complete the sentence "... is
-    // asking you to share your information for the purpose of ..."
-    // (ConnectID identity assurance §5.1), so that is how it is shown: the
-    // sentence, with the purpose set apart as the part to read.
-    let asking = if requested.is_empty() {
-        "is asking you to log in with oxID"
-    } else {
-        "is asking you to share your information"
+    let rows = |essential: bool| -> Vec<ClaimRow> {
+        requested
+            .iter()
+            .filter(|item| item.essential == essential)
+            .map(|item| ClaimRow::new(item, values.get(&item.name), all_on && !essential))
+            .collect()
     };
-    body.push_str("<h1>Review this request</h1><div class=\"ask\">");
-    match &request.purpose {
-        Some(purpose) => {
-            let _ = write!(
-                body,
-                "<p><strong id=\"client-name\">{name}</strong> {asking} \
-                 for the purpose of</p><p id=\"purpose\" class=\"purpose\">{}</p>",
-                html_escape(purpose)
-            );
-        }
-        None => {
-            let _ = write!(
-                body,
-                "<p><strong id=\"client-name\">{name}</strong> {asking}.</p>"
-            );
-        }
-    }
-    body.push_str("</div>");
-    if requested.is_empty() {
-        let _ = write!(
-            body,
-            "<p id=\"requested-none\" class=\"lead\">{name} will be told that you logged in \
-             with oxID. No personal details will be shared.</p>"
-        );
-    } else {
-        body.push_str("<p class=\"lead\">Check what will be shared before you continue.</p>");
-    }
 
-    body.push_str(&interaction.form_open());
-    if !requested.is_empty() {
-        body.push_str("<div id=\"requested\">");
-        if !required.is_empty() {
-            let _ = write!(
-                body,
-                "<h2>Required by {name}</h2>\
-                 <p id=\"required-hint\" class=\"hint\">{name} needs these to continue. \
-                 If you'd rather not share them, cancel.</p><ul class=\"claims\">"
-            );
-            for item in required {
-                claim_row(&mut body, item, values.get(&item.name), false);
-            }
-            body.push_str("</ul>");
-        }
-        if !optional.is_empty() {
-            body.push_str("<div class=\"head\"><h2>Optional</h2>");
-            if optional.iter().any(|item| values.contains_key(&item.name)) {
-                let _ = write!(
-                    body,
-                    "<button id=\"share-all\" class=\"link\" type=\"submit\" name=\"action\" \
-                     value=\"{ACTION_SHARE_ALL}\">Turn all on</button>"
-                );
-            }
-            body.push_str(
-                "</div><p id=\"optional-hint\" class=\"hint\">\
-                 Your choice. Turn on anything you're happy to share.</p><ul class=\"claims\">",
-            );
-            for item in optional {
-                claim_row(&mut body, item, values.get(&item.name), all_on);
-            }
-            body.push_str("</ul>");
-        }
-        body.push_str("</div>");
-    }
-
-    let allow = if requested.is_empty() {
-        "Continue"
-    } else {
-        "Share and continue"
+    let template = ConsentTemplate {
+        theme: interaction.theme(),
+        form: interaction.form(),
+        client_name: &client.name,
+        user_name: user.display_name(),
+        purpose: request.purpose.as_deref(),
+        required: rows(true),
+        optional: rows(false),
+        limit: duration_text(interaction.state.security.session_ttl),
     };
-    let _ = write!(
-        body,
-        "<button id=\"approve\" class=\"primary\" type=\"submit\" name=\"action\" \
-         value=\"{ACTION_APPROVE}\">{allow}</button>\
-         <button id=\"deny\" class=\"ghost\" type=\"submit\" name=\"action\" \
-         value=\"{ACTION_DENY}\" formnovalidate>Cancel</button></form>\
-         <p class=\"fine\">You'll be taken back to {name}. For your security, this request \
-         expires {limit} after you arrived.</p>",
-        limit = duration_text(interaction.state.security.session_ttl),
-    );
-
     Page {
         title: format!("Share with {}", client.name),
-        body,
+        body: render(&template),
         style: STYLE,
         script: None,
         wide: false,
-    }
-}
-
-/// One claim on the consent page: what it is and the value to be shared.
-/// A voluntary claim has a switch, off until the user turns it on. An
-/// essential one has none: it can only be refused by cancelling.
-fn claim_row(body: &mut String, item: &ConsentItem, value: Option<&Value>, on: bool) {
-    let name = html_escape(&item.name);
-    let what = format!(
-        "<span class=\"what\"><span class=\"name\">{}</span>{}</span>",
-        html_escape(&item.label),
-        match value {
-            Some(value) => format!(
-                "<span class=\"value\" id=\"value-{name}\">{}</span>",
-                value_html(&item.name, value)
-            ),
-            // Nothing is released for a claim the user does not have.
-            None => format!(
-                "<span class=\"value none\" id=\"value-{name}\">\
-                 Not on file, so it won't be shared</span>"
-            ),
-        }
-    );
-    let _ = if item.essential {
-        write!(
-            body,
-            "<li data-claim=\"{name}\" data-essential=\"true\"><div class=\"row\">{what}\
-             <span class=\"tag\">Required</span></div></li>"
-        )
-    } else if value.is_none() {
-        write!(
-            body,
-            "<li data-claim=\"{name}\"><div class=\"row\">{what}</div></li>"
-        )
-    } else {
-        write!(
-            body,
-            "<li data-claim=\"{name}\"><label class=\"row\" for=\"share-{name}\">{what}\
-             <input type=\"checkbox\" class=\"switch\" id=\"share-{name}\" \
-             name=\"{SHARE_FIELD_PREFIX}{name}\" value=\"1\"{checked}></label></li>",
-            checked = if on { " checked" } else { "" }
-        )
-    };
-}
-
-/// A claim value as the user should read it, HTML-escaped. The value shown
-/// is the value shared; only its presentation differs from the JSON.
-fn value_html(name: &str, value: &Value) -> String {
-    match value {
-        Value::Object(members) if name == "address" => {
-            html_escape(&claims::one_line_address(value).unwrap_or_else(|| members_text(members)))
-        }
-        Value::Object(members) => {
-            let mut lines = String::new();
-            for (key, member) in members {
-                let _ = write!(
-                    lines,
-                    "<span><em>{}:</em> {}</span>",
-                    html_escape(&member_label(key)),
-                    html_escape(&scalar_text(member))
-                );
-            }
-            lines
-        }
-        other => html_escape(&scalar_text(other)),
     }
 }
 
@@ -522,25 +430,75 @@ mod tests {
 
     use super::*;
 
+    fn text(value: &str) -> ClaimValue {
+        ClaimValue::Text(value.to_owned())
+    }
+
     #[test]
-    fn values_are_shown_as_text_and_escaped() {
-        assert_eq!(value_html("given_name", &json!("A<b>")), "A&lt;b&gt;");
-        assert_eq!(value_html("over18", &json!(true)), "Yes");
-        assert_eq!(value_html("over65", &json!(false)), "No");
+    fn values_are_shown_as_text() {
+        assert_eq!(ClaimValue::of("given_name", &json!("A<b>")), text("A<b>"));
+        assert_eq!(ClaimValue::of("over18", &json!(true)), text("Yes"));
+        assert_eq!(ClaimValue::of("over65", &json!(false)), text("No"));
         assert_eq!(
-            value_html(
+            ClaimValue::of(
                 "address",
                 &json!({"street_address": "1 Main St", "locality": "Sydney",
                         "region": "NSW", "postal_code": "2000"})
             ),
-            "1 Main St, Sydney, NSW 2000"
+            text("1 Main St, Sydney, NSW 2000")
         );
         assert_eq!(
-            value_html(
+            ClaimValue::of(
                 "beneficiary_account_au",
                 &json!({"account_bsb": "123-456", "some_thing": "<x>"})
             ),
-            "<span><em>BSB:</em> 123-456</span><span><em>Some thing:</em> &lt;x&gt;</span>"
+            ClaimValue::Members(vec![
+                Member {
+                    label: "BSB".to_owned(),
+                    text: "123-456".to_owned()
+                },
+                Member {
+                    label: "Some thing".to_owned(),
+                    text: "<x>".to_owned()
+                },
+            ])
         );
+    }
+
+    #[test]
+    fn the_consent_template_escapes_what_it_shows() {
+        let item = |name: &str, essential: bool| ConsentItem {
+            name: name.to_owned(),
+            label: format!("Label of {name}"),
+            essential,
+        };
+        let theme = Theme::default();
+        let template = ConsentTemplate {
+            theme: &theme,
+            form: FormTarget::new("c\"srf", "rp", "urn:x"),
+            client_name: "R&P <b>",
+            user_name: "Al <i>".to_owned(),
+            purpose: Some("see <this>"),
+            required: vec![ClaimRow::new(
+                &item("beneficiary_account_au", true),
+                Some(&json!({"account_bsb": "<1>"})),
+                false,
+            )],
+            optional: vec![
+                ClaimRow::new(&item("given_name", false), Some(&json!("A<b>")), true),
+                ClaimRow::new(&item("email", false), None, true),
+            ],
+            limit: "5 minutes".to_owned(),
+        };
+        let html = render(&template);
+        for raw in ["<b>", "<i>", "<this>", "<1>", "c\"srf"] {
+            assert!(!html.contains(raw), "{raw} in {html}");
+        }
+        assert!(html.contains("<em>BSB:</em> &#60;1&#62;"), "{html}");
+        assert!(html.contains("name=\"share_given_name\" value=\"1\" checked>"));
+        // A claim the user has no value for is listed, without a switch.
+        assert!(html.contains("id=\"value-email\">Not on file"));
+        assert!(!html.contains("share_email"));
+        assert!(html.contains("id=\"share-all\""));
     }
 }

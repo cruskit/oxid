@@ -20,6 +20,7 @@ mod authorize;
 mod ci;
 mod discovery;
 mod par;
+mod theme;
 mod token;
 mod userinfo;
 
@@ -32,6 +33,10 @@ pub const PATH_DECISION: &str = "/authorize/decision";
 pub const PATH_TOKEN: &str = "/token";
 pub const PATH_USERINFO: &str = "/userinfo";
 pub const PATH_HEALTH: &str = "/healthz";
+/// The theme's logo, when it has one.
+pub const PATH_THEME_LOGO: &str = "/theme/logo";
+/// The theme's logo for dark mode, when it has one of its own.
+pub const PATH_THEME_LOGO_DARK: &str = "/theme/logo-dark";
 /// What the `ci` experience offers. Served only under that experience.
 pub const PATH_CI: &str = "/ci";
 /// Where a client chooses the `ci` experience's response to a request.
@@ -74,6 +79,8 @@ pub fn router(state: AppState) -> Router {
             get(userinfo::userinfo).post(userinfo::userinfo),
         )
         .route(PATH_HEALTH, get(|| async { "ok" }))
+        .route(PATH_THEME_LOGO, get(theme::logo))
+        .route(PATH_THEME_LOGO_DARK, get(theme::logo_dark))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(middleware::from_fn(common_headers))
         .with_state(state)
@@ -274,6 +281,20 @@ pub(crate) mod test_support {
 
         pub fn with_experience(kind: crate::experience::Kind) -> Self {
             Self::from_state(state_with(kind))
+        }
+
+        /// A provider using the `login` experience, with the given theme.
+        pub fn with_theme(theme: crate::theme::Theme) -> Self {
+            Self::themed(crate::experience::Kind::Login, theme)
+        }
+
+        /// A provider with the given experience and theme.
+        pub fn themed(kind: crate::experience::Kind, theme: crate::theme::Theme) -> Self {
+            Self::from_state(crate::state::test_support::state_from(
+                kind,
+                crate::config::CiConfig::default(),
+                theme,
+            ))
         }
 
         /// A provider using the `ci` experience, which holds its default

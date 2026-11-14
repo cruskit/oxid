@@ -16,6 +16,8 @@ RUN curl --proto '=https' --tlsv1.2 --silent --show-error --fail https://sh.rust
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+# The pages: compiled into the binary by askama.
+COPY templates ./templates
 RUN --mount=type=cache,target=/opt/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --release --locked --features aws --bin oxid-lambda \

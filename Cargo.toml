@@ -1,8 +1,8 @@
 [package]
 name = "oxid"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "oxID - an OpenID Provider implementing the FAPI 2.0 and ConnectID security profiles"
 license = "MIT OR Apache-2.0"
 publish = false
@@ -37,6 +37,7 @@ uuid = { version = "1", features = ["v4"] }
 aws-config = { version = "1", optional = true, default-features = false, features = ["rt-tokio", "default-https-client", "credentials-process", "sso"] }
 aws-sdk-dynamodb = { version = "1", optional = true, default-features = false, features = ["rt-tokio", "default-https-client"] }
 lambda_http = { version = "1", optional = true, default-features = false, features = ["apigw_http"] }
+askama = "0.16"
 
 [features]
 # Amazon DynamoDB as the store, and the `oxid-lambda` binary for AWS Lambda.

@@ -37,6 +37,10 @@ client back end ─────────────────────�
   release zip untouched and ships the configuration in a Lambda layer, where
   it appears under `/opt`: set `OXID_CONFIG=/opt/oxid.toml`. Paths inside the
   file are relative to the file. `server.*` settings are ignored on Lambda.
+- **Theme.** A `[theme]` section works on Lambda as anywhere else. A theme's
+  logo is a file beside the configuration, so put it in the same layer. It is
+  served by the function at `/theme/logo`; API Gateway needs no extra route
+  if it already sends every path to the function.
 - **Store.** Set `[store] backend = "dynamodb"` and `table`. Give each oxID
   instance its own table. The function's role needs the actions listed in
   `requirements.json` on that table, and nothing else beyond writing its logs.

@@ -10,7 +10,13 @@
 //! browser has arrived, to get through the experience. When it runs out the
 //! endpoint shows the expiry page itself, whatever the experience.
 //!
-//! An experience is a state machine over HTML forms. The endpoint calls
+//! An experience is a state machine over HTML forms. Its pages are the
+//! templates in `templates/<experience>/`, each rendered from a struct in
+//! the experience's module that holds exactly what the page shows. The
+//! templates escape what they are given, and take their colours, name and
+//! logo from the [`Theme`](crate::theme::Theme).
+//!
+//! An experience drives the pages like this. The endpoint calls
 //! [`Experience::start`] when the browser arrives and [`Experience::submit`]
 //! for every form post, until a submission produces a final
 //! [`Decision::Approve`] or [`Decision::Deny`]. Which experience runs is
@@ -25,6 +31,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use askama::Template;
 use axum::http::HeaderMap;
 use serde::Deserialize;
 
@@ -34,8 +41,8 @@ use crate::error::ErrorCode;
 use crate::id_token::ClaimEdits;
 use crate::state::AppState;
 use crate::store::{PushedRequest, Session};
+use crate::theme::Theme;
 use crate::user::UserStore;
-use crate::util::html_escape;
 
 pub mod ci;
 pub mod login;
@@ -113,7 +120,7 @@ pub struct Interaction<'a> {
     /// The user's session for this request: how long they have left, and
     /// whether they have signed in.
     pub session: &'a Session,
-    /// CSRF token to embed in forms; [`Interaction::form_open`] does this.
+    /// CSRF token to embed in forms; [`Interaction::form`] carries it.
     pub csrf: &'a str,
     /// The browser's request headers, for reading cookies.
     pub headers: &'a HeaderMap,
@@ -129,26 +136,49 @@ impl Interaction<'_> {
         cookie(self.headers, name)
     }
 
-    /// An opening `<form>` tag that posts back to this experience, with the
-    /// hidden fields the endpoint needs to route and verify the submission.
-    pub fn form_open(&self) -> String {
-        form_open(self.csrf, &self.client.id, self.request_uri)
+    /// Where a form on a page of this experience posts to. A template with
+    /// this in its `form` field opens the form with
+    /// `{% include "form_open.html" %}`.
+    pub fn form(&self) -> FormTarget<'_> {
+        FormTarget::new(self.csrf, &self.client.id, self.request_uri)
+    }
+
+    /// The name, logo and colours the pages are shown with.
+    pub fn theme(&self) -> &Theme {
+        &self.state.theme
     }
 }
 
-/// An opening `<form>` tag that posts to the decision endpoint with the
-/// hidden fields it needs to route and verify the submission.
-pub fn form_open(csrf: &str, client_id: &str, request_uri: &str) -> String {
-    format!(
-        "<form method=\"post\" action=\"{action}\">\
-         <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
-         <input type=\"hidden\" name=\"client_id\" value=\"{client_id}\">\
-         <input type=\"hidden\" name=\"request_uri\" value=\"{request_uri}\">",
-        action = crate::http::PATH_DECISION,
-        csrf = html_escape(csrf),
-        client_id = html_escape(client_id),
-        request_uri = html_escape(request_uri),
-    )
+/// What `templates/form_open.html` needs to open a form that posts to the
+/// decision endpoint: the hidden fields that route and verify the
+/// submission.
+#[derive(Debug, Clone, Copy)]
+pub struct FormTarget<'a> {
+    pub action: &'static str,
+    pub csrf: &'a str,
+    pub client_id: &'a str,
+    pub request_uri: &'a str,
+}
+
+impl<'a> FormTarget<'a> {
+    pub fn new(csrf: &'a str, client_id: &'a str, request_uri: &'a str) -> Self {
+        Self {
+            action: crate::http::PATH_DECISION,
+            csrf,
+            client_id,
+            request_uri,
+        }
+    }
+}
+
+/// Render a template to HTML. The templates are compiled into the binary and
+/// checked at build time, so rendering fails only if a value cannot be
+/// written; that is logged, and the page comes out empty.
+pub fn render(template: &impl Template) -> String {
+    template.render().unwrap_or_else(|error| {
+        tracing::error!(%error, "a page could not be rendered");
+        String::new()
+    })
 }
 
 /// A length of time in words, for telling the user how long they have.
@@ -187,8 +217,8 @@ pub fn host_cookie(name: &str, value: &str, max_age_seconds: Option<i64>) -> Str
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Page {
     pub title: String,
-    /// The page body, as HTML. The experience is responsible for escaping
-    /// anything it interpolates.
+    /// The page body, as HTML: a template of the experience, rendered with
+    /// [`render`]. Templates escape what they interpolate.
     pub body: String,
     /// Extra CSS for this page, appended to the shared styles.
     pub style: &'static str,

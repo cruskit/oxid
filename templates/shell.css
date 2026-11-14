@@ -1,0 +1,207 @@
+/*
+  Styles shared by every page.
+
+  Colours come only from the theme's custom properties, set in shell.html:
+  --background, --surface, --surface-muted, --border, --text, --text-muted,
+  --primary, --primary-text, --accent, --success, --danger and --warning.
+  The tints below are mixed from those, so they follow the theme in both
+  light and dark mode. Do not write a colour literal in a page's styles: the
+  only ones are the white ring of the mark and knob of a switch, which sit
+  on a colour, and the black of shadows.
+*/
+:root {
+  /* The accent, dark or light enough to read as text on a surface. */
+  --accent-text: color-mix(in srgb, var(--accent) 72%, var(--text));
+  --accent-soft: color-mix(in srgb, var(--accent) 9%, var(--surface));
+  --accent-line: color-mix(in srgb, var(--accent) 30%, var(--surface));
+  --accent-ring: color-mix(in srgb, var(--accent) 35%, transparent);
+  --success-soft: color-mix(in srgb, var(--success) 14%, var(--surface));
+  --success-text: color-mix(in srgb, var(--success) 75%, var(--text));
+  --danger-soft: color-mix(in srgb, var(--danger) 11%, var(--surface));
+  --warning-soft: color-mix(in srgb, var(--warning) 16%, var(--surface));
+  --warning-line: color-mix(in srgb, var(--warning) 50%, var(--surface));
+  --warning-text: color-mix(in srgb, var(--warning) 55%, var(--text));
+  /* The outline of form fields, stronger than a dividing line. */
+  --field-line: color-mix(in srgb, var(--text-muted) 40%, var(--surface));
+  --primary-hover: color-mix(in srgb, var(--primary) 86%, var(--surface));
+}
+
+body {
+  margin: 0;
+  padding: 0 1rem 2.5rem;
+  color: var(--text);
+  background: var(--background);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+/* The name and logo at the top of every page. */
+.brand {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  padding: 2.25rem 0 1.5rem;
+  font-size: 1.35rem;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+}
+.brand .mark {
+  width: 1.9rem;
+  height: 1.9rem;
+  border-radius: 0.6rem;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(
+    135deg,
+    var(--accent),
+    color-mix(in srgb, var(--accent) 55%, var(--warning))
+  );
+  box-shadow: 0 4px 12px var(--accent-ring);
+}
+.brand .mark::after {
+  content: "";
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 50%;
+  border: 0.2rem solid #fff;
+}
+.brand .logo {
+  display: block;
+  height: 2.25rem;
+  width: auto;
+  max-width: 14rem;
+  object-fit: contain;
+}
+.brand b {
+  color: var(--accent);
+}
+
+/* The narrow card that pages for end users sit in. */
+.card {
+  max-width: 27rem;
+  margin: 0 auto;
+  background: var(--surface);
+  border-radius: 1.25rem;
+  padding: 2rem 1.75rem;
+  box-sizing: border-box;
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.06),
+    0 16px 48px rgba(0, 0, 0, 0.09);
+}
+.card h1 {
+  font-size: 1.5rem;
+  line-height: 1.25;
+  letter-spacing: -0.02em;
+  margin: 0 0 0.5rem;
+}
+.card h2 {
+  font-size: 0.75rem;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin: 1.5rem 0 0.5rem;
+}
+.card p {
+  line-height: 1.55;
+  margin: 0.5rem 0;
+}
+.card .lead {
+  color: var(--text-muted);
+  margin: 0 0 1.25rem;
+}
+.card .fine {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  text-align: center;
+  margin: 1.25rem 0 0;
+}
+
+.card .field {
+  display: block;
+  font-size: 0.85rem;
+  font-weight: 600;
+  margin: 1rem 0 0.35rem;
+}
+.card input[type="text"],
+.card input[type="password"] {
+  width: 100%;
+  min-height: 3rem;
+  padding: 0 0.9rem;
+  box-sizing: border-box;
+  border: 1.5px solid var(--field-line);
+  border-radius: 0.75rem;
+  font: inherit;
+  color: inherit;
+  background: var(--surface);
+}
+.card input:focus-visible,
+.card button:focus-visible {
+  outline: none;
+  border-color: var(--text);
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+
+.card button {
+  display: block;
+  width: 100%;
+  min-height: 3.1rem;
+  margin: 0.6rem 0 0;
+  padding: 0 1rem;
+  border: 0;
+  border-radius: 999px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.card .primary {
+  background: var(--primary);
+  color: var(--primary-text);
+  margin-top: 1.5rem;
+}
+.card .primary:hover {
+  background: var(--primary-hover);
+}
+.card .ghost {
+  background: none;
+  color: var(--text);
+}
+.card .ghost:hover {
+  background: var(--surface-muted);
+}
+
+.card .alert {
+  background: var(--danger-soft);
+  color: var(--danger);
+  border-radius: 0.75rem;
+  padding: 0.75rem 0.9rem;
+  font-size: 0.9rem;
+  margin: 0 0 1rem;
+}
+
+/* The round symbol at the top of an error page. */
+.badge {
+  width: 3.25rem;
+  height: 3.25rem;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: 1.6rem;
+  font-weight: 700;
+  margin: 0 0 1.25rem;
+}
+
+.legal {
+  max-width: 27rem;
+  margin: 1.25rem auto 0;
+  text-align: center;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+}

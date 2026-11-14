@@ -87,22 +87,6 @@ impl Clock for ManualClock {
     }
 }
 
-/// Escape text for inclusion in HTML element content or attribute values.
-pub fn html_escape(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for c in input.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#x27;"),
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,13 +138,5 @@ mod tests {
     #[test]
     fn system_clock_is_after_2024() {
         assert!(SystemClock.now() > 1_704_067_200);
-    }
-
-    #[test]
-    fn html_escape_neutralises_markup() {
-        assert_eq!(
-            html_escape(r#"<a href="x" onclick='y'>&</a>"#),
-            "&lt;a href=&quot;x&quot; onclick=&#x27;y&#x27;&gt;&amp;&lt;/a&gt;"
-        );
     }
 }

@@ -79,7 +79,7 @@ issuing the code, recording the transaction and building the redirect.
 | Module | For | What it does |
 | --- | --- | --- |
 | `technical` (default) | Development, debugging, testing relying parties | No sign-in. Shows the request, lets you pick a customer and an outcome, and lets you edit the ID token claims before they are issued. |
-| `login` | Showing an end user's flow | An oxID-branded login page, then a consent page that shows each claim and the value to be shared, described under [Consent](#consent). |
+| `login` | Showing an end user's flow | A login page, in the configured [theme](#themes), then a consent page that shows each claim and the value to be shared, described under [Consent](#consent). |
 | `ci` | Automated tests of a relying party | No user and no pages. Loading the authorization URL is answered with the redirect back to the client, which may choose the response first; see [The `ci` module](#the-ci-module). |
 
 > The `technical` module has no authentication: anyone who can reach the
@@ -123,7 +123,93 @@ configured: `demo` (an adult with every claim), `riley` (under 18), `margaret`
 `password_hash` only to sign in under `login`.
 
 To add a module, implement the `Experience` trait in `src/experience/`, add a
-variant to `experience::Kind`, and construct it in `experience::build`.
+variant to `experience::Kind`, and construct it in `experience::build`. Its
+pages go in `templates/`, as described next.
+
+### Page templates
+
+No page is assembled in code. Each one is a template in `templates/`, written
+as the HTML it produces, with the styles and the one script in files beside
+them:
+
+```
+templates/
+  shell.html             the document around every page: head, theme colours,
+                         name and logo, footer, scripts
+  shell.css              styles shared by every page
+  form_open.html         the opening of a form that posts back, with its
+                         hidden fields; included by the pages that have one
+  error.html             a request that cannot be answered by redirect
+  session_expired.html   the session ran out
+  login/login.html       login experience: log in
+  login/consent.html     login experience: review and share
+  login/login.css
+  technical/page.html    technical experience: its one page
+  technical/technical.css
+  technical/technical.js
+  ci/abandoned.html      ci experience: the visit the client asked to abandon
+```
+
+The templates are [Askama](https://askama.readthedocs.io/) templates
+(Jinja-like syntax). They are compiled into the binary, so there is nothing to
+deploy beside it, and a template that names a value its page does not have
+fails the build rather than the request. Each page template is rendered from
+a struct of the same purpose in the module that shows it (`LoginTemplate`,
+`ConsentTemplate` and so on), which holds exactly what the page displays.
+Everything a template interpolates is HTML-escaped unless it is marked `safe`;
+only the already-rendered page body, the styles and the scripts are.
+
+To change what a page says or how it is laid out, edit its template. To change
+how the pages look for one deployment, use a theme instead.
+
+### Themes
+
+The name, logo and colours of the pages are a theme. The built-in theme is
+oxID's, and the `[theme]` section of the configuration replaces any part of
+it:
+
+```toml
+[theme]
+name = "Acme Bank"
+logo = "theme/logo.svg"            # optional: .png, .svg, .jpg or .webp
+logo_dark = "theme/logo-dark.svg"  # optional: the logo for dark mode
+show_name = false                  # the logo already spells the name
+
+[theme.light]
+accent = "#0055ff"
+primary = "#0b3d91"
+
+[theme.dark]
+accent = "#7aa2ff"
+primary = "#7aa2ff"
+primary_text = "#081226"
+```
+
+- **Light and dark.** Every theme, the built-in one included, has a palette
+  for each mode. Both are on every page, and the browser applies the one
+  matching the user's system setting (`prefers-color-scheme`). There is no
+  switch, and nothing is stored. Set a colour in both `[theme.light]` and
+  `[theme.dark]`: a colour set for one mode leaves the other with oxID's.
+- **Colours.** Twelve per mode: `background`, `surface`, `surface_muted`,
+  `border`, `text`, `text_muted`, `primary`, `primary_text`, `accent`,
+  `success`, `danger` and `warning`. [`oxid.example.toml`](oxid.example.toml)
+  says what each is for and lists the built-in values. The softer tints the
+  pages use (the box around the purpose, alerts, the warning banner) are
+  mixed from these in `templates/shell.css`, so they follow the theme. Only
+  hexadecimal colours are accepted, since the values are written into the
+  page's styles. oxID does not check that your colours contrast enough to be
+  read.
+- **Name.** Used wherever the pages name the provider: the page title,
+  "Log in to …", the footer.
+- **Logo.** Shown at the top of every page in place of the oxID mark, 36
+  pixels high, beside the name unless `show_name = false`. The files are read
+  at startup and served at `/theme/logo` and `/theme/logo-dark`. Pages with a
+  logo allow images from their own origin in their Content Security Policy;
+  without one they load nothing at all.
+
+The theme applies to every experience, and to the error and session expiry
+pages. It does not change the wording or layout of a page; that is the
+template's job.
 
 ### The `ci` module
 
@@ -278,6 +364,7 @@ one and is advertised through `mtls_endpoint_aliases`.
 | `/token` | Token endpoint |
 | `/userinfo` | UserInfo endpoint |
 | `/healthz` | Liveness check |
+| `/theme/logo`, `/theme/logo-dark` | The [theme](#themes)'s logo, when it has one |
 
 ### Clients from the ConnectID registry
 
@@ -508,6 +595,7 @@ src/
   state.rs           shared application state
   http/              routing, endpoints, shared extractors and headers
   experience/        pluggable user experiences: technical, login, ci
+  theme.rs           themes: the name, logo and colours of the pages
   authz.rs           authorization request parameters and their rules
   request_object.rs  signed request object verification
   client_auth.rs     private_key_jwt client authentication
@@ -522,6 +610,7 @@ src/
   user.rs            users and the UserStore trait
   store/             requests, codes, tokens, replay cache, consent records;
                      memory and DynamoDB backends
+templates/           the pages: HTML templates, their styles and script
 tests/               integration tests against a running instance
 conformance/         conformance suite configuration
 deploy/aws/          what a deployment on AWS Lambda needs
