@@ -118,32 +118,40 @@ def step(name: str, commands: list) -> dict:
 
 
 class Login:
-    """The `login` experience: sign in as the demo user, then decide."""
+    """The `login` experience: log in as the demo user, then decide on the
+    consent page. A user who will not go on cancels from the login page."""
 
     name = "login"
     # An element that shows the first page has loaded.
     landmark = "username"
 
     @staticmethod
-    def decide(button: str) -> list:
+    def approve() -> list:
         return [
             step(
-                "Sign in",
+                "Log in",
                 [
                     ["text", "id", "username", USERNAME],
                     ["text", "id", "password", PASSWORD],
-                    ["click", "id", button],
+                    ["click", "id", "sign-in"],
                 ],
-            )
+            ),
+            step(
+                "Consent",
+                [
+                    ["wait", "id", "approve", 10],
+                    # Voluntary claims are off until chosen, and the suite
+                    # expects what it asks for. Absent when none are offered.
+                    ["click", "id", "share-all", "optional"],
+                    ["wait", "id", "approve", 10],
+                    ["click", "id", "approve"],
+                ],
+            ),
         ]
 
-    @classmethod
-    def approve(cls) -> list:
-        return cls.decide("approve")
-
-    @classmethod
-    def deny(cls) -> list:
-        return cls.decide("deny")
+    @staticmethod
+    def deny() -> list:
+        return [step("Cancel", [["click", "id", "deny"]])]
 
 
 class Technical:

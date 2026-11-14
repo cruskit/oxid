@@ -322,6 +322,40 @@ impl ClaimsRequest {
     }
 }
 
+impl ClaimsRequest {
+    /// The value `user` would share for each claim in
+    /// [`ClaimsRequest::consentable`], for showing on the consent page.
+    /// Verified claims are listed under their own names. A claim the user
+    /// does not have is absent: it would not be released.
+    pub fn shareable_values(
+        &self,
+        user: &User,
+        client: &Client,
+        scopes: &[String],
+        now: i64,
+    ) -> Map<String, Value> {
+        let everything: BTreeSet<String> = self
+            .consentable(client, scopes)
+            .into_iter()
+            .map(|item| item.name)
+            .collect();
+        let mut out = Map::new();
+        // As they are released: scopes add claims to UserInfo only.
+        for (location, scopes) in [(&self.id_token, &[][..]), (&self.userinfo, scopes)] {
+            for (name, value) in release(user, client, location, scopes, &everything, now) {
+                if name == VERIFIED_CLAIMS {
+                    if let Some(Value::Object(claims)) = value.get("claims") {
+                        out.extend(claims.clone());
+                    }
+                } else {
+                    out.insert(name, value);
+                }
+            }
+        }
+        out
+    }
+}
+
 /// The claims the user agreed to share, given the names they left selected.
 /// Essential claims are always included: they cannot be declined one by one.
 pub fn shared_claims(
@@ -487,7 +521,7 @@ fn beneficiary_account(user: &User, claim: &str) -> Option<Value> {
 
 /// An address claim as one string: `street, locality, region postcode,
 /// country`, leaving out whatever is missing.
-fn one_line_address(address: &Value) -> Option<String> {
+pub(crate) fn one_line_address(address: &Value) -> Option<String> {
     let part = |name: &str| {
         address
             .get(name)

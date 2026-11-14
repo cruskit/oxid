@@ -1,6 +1,6 @@
 [package]
 name = "oxid"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.85"
 description = "oxID - an OpenID Provider implementing the FAPI 2.0 and ConnectID security profiles"

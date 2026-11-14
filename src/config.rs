@@ -17,6 +17,8 @@ pub const MAX_ACCESS_TOKEN_TTL: i64 = 600;
 pub const MAX_AUTHORIZATION_CODE_TTL: i64 = 60;
 /// FAPI 2.0 §5.3.2.2-12: `request_uri` `expires_in` is below 600 seconds.
 pub const MAX_REQUEST_URI_TTL: i64 = 599;
+/// The longest a user may be given to sign in and decide.
+pub const MAX_SESSION_TTL: i64 = 60 * 60;
 /// ConnectID §4.2-3.10/11: request object `exp - nbf` and `nbf` age limits.
 pub const MAX_REQUEST_OBJECT_WINDOW: i64 = 600;
 
@@ -147,6 +149,9 @@ pub struct SecurityConfig {
     pub id_token_ttl: i64,
     pub authorization_code_ttl: i64,
     pub request_uri_ttl: i64,
+    /// How long a user has to sign in and decide once their browser has
+    /// arrived at the authorization endpoint with a valid `request_uri`.
+    pub session_ttl: i64,
     /// Maximum `exp - nbf` of a request object.
     pub request_object_max_lifetime: i64,
     /// Maximum age of a request object's `nbf`.
@@ -164,6 +169,7 @@ impl Default for SecurityConfig {
             id_token_ttl: 300,
             authorization_code_ttl: 60,
             request_uri_ttl: 90,
+            session_ttl: crate::store::DEFAULT_SESSION_TTL,
             request_object_max_lifetime: MAX_REQUEST_OBJECT_WINDOW,
             request_object_max_age: MAX_REQUEST_OBJECT_WINDOW,
             clock_skew: 10,
@@ -286,6 +292,10 @@ impl Config {
         ensure!(
             (1..=MAX_REQUEST_URI_TTL).contains(&s.request_uri_ttl),
             "security.request_uri_ttl must be between 1 and {MAX_REQUEST_URI_TTL} seconds"
+        );
+        ensure!(
+            (1..=MAX_SESSION_TTL).contains(&s.session_ttl),
+            "security.session_ttl must be between 1 and {MAX_SESSION_TTL} seconds"
         );
         ensure!(
             (1..=MAX_REQUEST_OBJECT_WINDOW).contains(&s.request_object_max_lifetime),
@@ -431,10 +441,12 @@ mod tests {
     #[test]
     fn lifetimes_cannot_exceed_profile_limits() {
         type Setter = fn(&mut SecurityConfig);
-        let cases: [(&str, Setter); 7] = [
+        let cases: [(&str, Setter); 9] = [
             ("access token over 10 minutes", |s| s.access_token_ttl = 601),
             ("code over 60 seconds", |s| s.authorization_code_ttl = 61),
             ("request_uri at 600 seconds", |s| s.request_uri_ttl = 600),
+            ("no session time", |s| s.session_ttl = 0),
+            ("session over an hour", |s| s.session_ttl = 3601),
             ("request object lifetime", |s| {
                 s.request_object_max_lifetime = 601;
             }),

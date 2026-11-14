@@ -75,7 +75,8 @@ impl AppState {
 
         let store = open_store(config)
             .await?
-            .grant_lifetime(config.security.refresh_token_ttl + config.security.access_token_ttl);
+            .grant_lifetime(config.security.refresh_token_ttl + config.security.access_token_ttl)
+            .session_ttl(config.security.session_ttl);
         let shared = config.store.backend != StoreBackend::Memory;
 
         // Without a configured key, one is generated and kept in the store:
