@@ -80,6 +80,7 @@ issuing the code, recording the transaction and building the redirect.
 | --- | --- | --- |
 | `technical` (default) | Development, debugging, testing relying parties | No sign-in. Shows the request, lets you pick a customer and an outcome, and lets you edit the ID token claims before they are issued. |
 | `login` | Showing an end user's flow | An oxID-branded login page, then a consent page that shows each claim and the value to be shared, described under [Consent](#consent). |
+| `ci` | Automated tests of a relying party | No user and no pages. Loading the authorization URL is answered with the redirect back to the client, which may choose the response first; see [The `ci` module](#the-ci-module). |
 
 > The `technical` module has no authentication: anyone who can reach the
 > authorization endpoint can act as any customer and change what is asserted
@@ -124,16 +125,97 @@ configured: `demo` (an adult with every claim), `riley` (under 18), `margaret`
 To add a module, implement the `Experience` trait in `src/experience/`, add a
 variant to `experience::Kind`, and construct it in `experience::build`.
 
+### The `ci` module
+
+For continuous integration: tests of a relying party, or of an SDK, that
+have to get through the authorization endpoint with nobody there to click.
+
+> Like `technical`, the `ci` module has no authentication: anyone who can
+> reach the authorization endpoint with a valid `request_uri` gets a response
+> about a user. oxID logs a warning when it starts with it. Never expose it
+> to real users.
+
+Under `ci`, loading the authorization URL is all it takes. oxID answers with
+the `303` redirect to the client's redirect URI, as if a user had decided, so
+a test can do this and nothing else:
+
+```sh
+curl --location "$AUTHORIZATION_URL"   # follows the redirect to the client's callback
+```
+
+With nothing chosen, the response is a success: the first configured user
+(`demo` of the built-in customers) shares every claim that was requested.
+
+**Choosing the response.** The client that pushed a request can choose
+another response to it, with a form-encoded `POST` to `/ci/response` (on the
+issuer host or the mTLS host). The client authenticates exactly as it does at
+the pushed authorization request endpoint, with `client_assertion_type` and a
+`private_key_jwt` `client_assertion`. An assertion is accepted once, so make a
+new one for this call.
+
+| Parameter | |
+| --- | --- |
+| `request_uri` | Required. A request this client pushed that has not been answered. |
+| `outcome` | `success` (the default), `error` or `abandon`. |
+| `user` | For a success: the username (or subject) of the user to respond as. Defaults to the first user. |
+| `voluntary_claims` | For a success: the voluntary claims to share, separated by spaces. The others are declined. Absent means all; present but empty means none. Essential claims are always shared. |
+| `error` | For an error: one of the predefined error codes. Defaults to `access_denied`. |
+| `error_description` | For an error: replaces that error's default description. |
+
+`outcome=abandon` is a user who looks and leaves: the next visit gets a page
+instead of a redirect and the request stays pending. It applies to one visit.
+
+```sh
+curl "$ISSUER/ci/response" \
+  --data-urlencode "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
+  --data-urlencode "client_assertion=$ASSERTION" \
+  --data-urlencode "request_uri=$REQUEST_URI" \
+  --data-urlencode "user=riley" \
+  --data-urlencode "voluntary_claims=given_name email"
+```
+
+The answer is JSON describing what will be sent (`outcome`, and `user`,
+`claims` and `declined`, or `error` and `error_description`). A parameter
+that does not apply to the outcome, an unknown user, or a claim that was not
+requested as voluntary is refused with `invalid_request`, so a test cannot
+quietly get a response it did not ask for. Choosing again replaces the
+earlier choice.
+
+`GET /ci` lists what there is to choose from: the users, the predefined
+errors (the same list the `technical` module offers) and the delay.
+
+**Timing.** The response can be chosen before the browser is sent to the
+authorization URL, in which case it is given at once. So that it can also be
+chosen afterwards, oxID holds the *default* response back for
+`ci.response_delay` seconds (5 unless configured, at most 25) from the
+browser's arrival. A choice made during that time is acted on within a
+quarter of a second. Set the delay to `0` if the tests always choose first or
+only want the default.
+
+```toml
+experience = "ci"
+
+[ci]
+response_delay = 5
+```
+
+The choice is kept in the store, so this works the same standalone and on AWS
+Lambda, where the waiting request and the call to `/ci/response` are handled
+by different instances of the function. On Lambda the function's timeout, and
+API Gateway's 30 second limit, must be longer than the delay.
+
 ### Consent
 
 This describes the `login` module, which has two pages.
 
 The **login page** names the client and says that it is asking for
-information to be shared. It shows nothing about what was requested or why:
-that is only for the signed-in user.
+information to be shared, which the user logs in to review. It shows nothing
+about what was requested or why: that is only for the signed-in user.
 
-The **consent page** follows a successful login. It shows which client is
-asking, the purpose it gave, and every claim that would be released together
+The **consent page** follows a successful login. It states the request as the
+sentence the purpose was written for ("*client* is asking you to share your
+information for the purpose of *purpose*"), with the purpose set apart, then
+lists every claim that would be released together
 with the value that would be shared. Claims requested with
 `"essential": true` are listed as required and have no switch; the only way to
 refuse them is to cancel the request. Every other claim, including those
@@ -387,7 +469,12 @@ who the response is about and what goes into the tokens, so a module can break
 conformance on its own, and the plan takes about two minutes. Each module has
 its own browser automation in `conformance/generate.py`: for `technical` the
 suite goes through the response preview page and sends it unedited; for
-`login` it signs in as the demo user. A new module needs an entry there and in
+`login` it signs in as the demo user; for `ci` it only loads the page.
+Under `ci` two test modules need a response other than the default (a user
+who refuses, and one who looks without acting), which only the client can
+choose, so `conformance/ci-client.py` runs beside the suite as that client:
+it reads each pushed `request_uri` from the suite's log and chooses the
+response at `/ci/response` while oxID holds the default back. A new module needs an entry there and in
 the `EXPERIENCES` list in `scripts/conformance.sh` and the workflow matrix.
 
 Nothing is published
@@ -401,7 +488,7 @@ Useful settings:
 | `SUITE_TAG` | `release-v5.3.4` | Suite release, used for both the images and `run-test-plan.py` |
 | `SUITE_HOST_PORT` | `8943` | Loopback port for the suite UI and API |
 | `OXID_HOST_PORT` | `9443` | Loopback port for oxID's public listener |
-| `OXID_EXPERIENCE` | unset | Run for one module only (`technical` or `login`); unset runs each in turn |
+| `OXID_EXPERIENCE` | unset | Run for one module only (`technical`, `login` or `ci`); unset runs each in turn |
 | `KEEP_RUNNING` | `0` | Set to `1` to leave the containers up so results can be browsed (use with `OXID_EXPERIENCE`) |
 
 Results the suite is expected to report as failures or skips, if any, are
@@ -420,7 +507,7 @@ src/
   config.rs          configuration file and its validation
   state.rs           shared application state
   http/              routing, endpoints, shared extractors and headers
-  experience/        pluggable user experiences: technical, login
+  experience/        pluggable user experiences: technical, login, ci
   authz.rs           authorization request parameters and their rules
   request_object.rs  signed request object verification
   client_auth.rs     private_key_jwt client authentication

@@ -19,6 +19,10 @@ pub const MAX_AUTHORIZATION_CODE_TTL: i64 = 60;
 pub const MAX_REQUEST_URI_TTL: i64 = 599;
 /// The longest a user may be given to sign in and decide.
 pub const MAX_SESSION_TTL: i64 = 60 * 60;
+/// The longest the `ci` experience may wait before responding. The wait
+/// happens inside the browser's request, and behind API Gateway a request
+/// may take 30 seconds at most.
+pub const MAX_CI_RESPONSE_DELAY: i64 = 25;
 /// ConnectID §4.2-3.10/11: request object `exp - nbf` and `nbf` age limits.
 pub const MAX_REQUEST_OBJECT_WINDOW: i64 = 600;
 
@@ -31,9 +35,12 @@ pub struct Config {
     /// Base URL of the mTLS listener, advertised via `mtls_endpoint_aliases`.
     pub mtls_base_url: String,
     /// The user experience at the authorization endpoint: `technical` (the
-    /// default) or `login`.
+    /// default), `login` or `ci`.
     #[serde(default)]
     pub experience: crate::experience::Kind,
+    /// Settings of the `ci` experience.
+    #[serde(default)]
+    pub ci: CiConfig,
     #[serde(default)]
     pub server: ServerConfig,
     #[serde(default)]
@@ -137,6 +144,24 @@ impl StoreConfig {
             }
         }
         Ok(())
+    }
+}
+
+/// Settings of the `ci` experience, which answers authorization requests by
+/// itself. They have no effect under another experience.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct CiConfig {
+    /// Seconds to wait, from the browser's arrival, before giving the
+    /// default response. It is the time a client has to say what the
+    /// response should be instead; a request whose response the client has
+    /// already set is answered at once.
+    pub response_delay: i64,
+}
+
+impl Default for CiConfig {
+    fn default() -> Self {
+        Self { response_delay: 5 }
     }
 }
 
@@ -314,6 +339,11 @@ impl Config {
             "security.refresh_token_ttl must be positive"
         );
         ensure!(s.id_token_ttl > 0, "security.id_token_ttl must be positive");
+
+        ensure!(
+            (0..=MAX_CI_RESPONSE_DELAY).contains(&self.ci.response_delay),
+            "ci.response_delay must be between 0 and {MAX_CI_RESPONSE_DELAY} seconds"
+        );
 
         if let Some(sync) = &self.client_sync {
             sync.validate().context("client_sync")?;

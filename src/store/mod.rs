@@ -106,6 +106,29 @@ pub enum Visit {
     Expired(Box<PushedRequest>),
 }
 
+/// The response a client has asked the `ci` experience to give to one of its
+/// pushed requests, in place of the default. It is checked when the client
+/// sets it, so what is stored can be applied as it stands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum PlannedResponse {
+    /// Issue an authorization code.
+    Success {
+        /// Internal subject of the user the response is about.
+        user_subject: String,
+        /// The claims to share: every essential one, and the voluntary ones
+        /// the client chose.
+        shared_claims: BTreeSet<String>,
+        /// The voluntary claims left out, as if the user had declined them.
+        declined: Vec<String>,
+    },
+    /// Return an OAuth error to the client's redirect URI.
+    Error { error: String, description: String },
+    /// Give no response: the user arrives and leaves without deciding. The
+    /// request stays pending. This applies to one visit only.
+    Abandon,
+}
+
 /// What the user authorised. Shared by the code and every token derived from
 /// it, so they can be revoked together.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -325,6 +348,10 @@ fn session_key(request_uri: &str) -> String {
     format!("session#{}", digest(request_uri))
 }
 
+fn plan_key(request_uri: &str) -> String {
+    format!("plan#{}", digest(request_uri))
+}
+
 fn code_key(code: &str) -> String {
     format!("code#{}", digest(code))
 }
@@ -514,6 +541,34 @@ impl Store {
             )
             .await?;
         Ok(session)
+    }
+
+    /// Set the response the `ci` experience is to give to a pushed request,
+    /// replacing any set before. It is kept until `expires_at`.
+    pub async fn plan_response(
+        &self,
+        request_uri: &str,
+        plan: &PlannedResponse,
+        expires_at: i64,
+    ) -> StoreResult<()> {
+        self.backend
+            .put(&plan_key(request_uri), encode(plan)?, Some(expires_at))
+            .await
+    }
+
+    /// The response a client has asked for, if it has asked for one.
+    pub async fn planned_response(
+        &self,
+        request_uri: &str,
+        now: i64,
+    ) -> StoreResult<Option<PlannedResponse>> {
+        self.live(&plan_key(request_uri), now).await
+    }
+
+    /// Forget the response chosen for a pushed request, so that it gets the
+    /// default one again.
+    pub async fn clear_planned_response(&self, request_uri: &str) -> StoreResult<()> {
+        self.backend.take(&plan_key(request_uri)).await.map(|_| ())
     }
 
     /// Consume a pushed request. Returns `None` if it is unknown or already
@@ -872,6 +927,47 @@ pub(crate) mod contract {
         );
     }
 
+    /// A planned response is kept per `request_uri` until it expires, and
+    /// the last one set wins.
+    pub async fn planned_responses(store: &Store) {
+        let uri = format!("{REQUEST_URI_PREFIX}planned");
+        assert_eq!(store.planned_response(&uri, NOW).await.unwrap(), None);
+
+        let error = PlannedResponse::Error {
+            error: "access_denied".to_owned(),
+            description: "the user denied the request".to_owned(),
+        };
+        store.plan_response(&uri, &error, NOW + 60).await.unwrap();
+        assert_eq!(
+            store.planned_response(&uri, NOW).await.unwrap(),
+            Some(error)
+        );
+
+        let success = PlannedResponse::Success {
+            user_subject: "u1".to_owned(),
+            shared_claims: BTreeSet::from(["given_name".to_owned()]),
+            declined: vec!["email".to_owned()],
+        };
+        store.plan_response(&uri, &success, NOW + 60).await.unwrap();
+        assert_eq!(
+            store.planned_response(&uri, NOW + 59).await.unwrap(),
+            Some(success)
+        );
+        assert_eq!(store.planned_response(&uri, NOW + 60).await.unwrap(), None);
+        let other = format!("{REQUEST_URI_PREFIX}other");
+        assert_eq!(store.planned_response(&other, NOW).await.unwrap(), None);
+
+        let abandon = PlannedResponse::Abandon;
+        store.plan_response(&uri, &abandon, NOW + 60).await.unwrap();
+        assert_eq!(
+            store.planned_response(&uri, NOW).await.unwrap(),
+            Some(abandon)
+        );
+        store.clear_planned_response(&uri).await.unwrap();
+        assert_eq!(store.planned_response(&uri, NOW).await.unwrap(), None);
+        store.clear_planned_response(&uri).await.unwrap();
+    }
+
     /// Arriving in time starts a session, which then outlives the
     /// `request_uri` and is what the user is held to.
     pub async fn sessions(store: &Store) {
@@ -1154,6 +1250,7 @@ pub(crate) mod contract {
         secrets(store, tag).await;
         pushed_requests(store).await;
         sessions(store).await;
+        planned_responses(store).await;
         failed_logins(store).await;
         code_replay(store).await;
         code_binding(store).await;

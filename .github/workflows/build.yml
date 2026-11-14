@@ -73,7 +73,7 @@ jobs:
       fail-fast: false
       matrix:
         # One full run per user experience module.
-        experience: [technical, login]
+        experience: [technical, login, ci]
     env:
       OXID_EXPERIENCE: ${{ matrix.experience }}
     steps:

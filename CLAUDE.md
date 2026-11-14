@@ -41,11 +41,14 @@ mise run build        # check + release build + conformance
 - The DynamoDB store tests run only when `OXID_TEST_DYNAMODB_ENDPOINT` is set
   (for example DynamoDB Local on `http://localhost:8000`). CI sets it.
 - `scripts/conformance.sh` runs each experience in turn. Set
-  `OXID_EXPERIENCE=technical|login` to run just one, and `KEEP_RUNNING=1` to
+  `OXID_EXPERIENCE=technical|login|ci` to run just one, and `KEEP_RUNNING=1` to
   browse the results. The suite version is in `SUITE_TAG`. Expected
   failures and skips are in `conformance/expected-*.json`. A change that
   adds a failure is a regression, unless the failure is justified and added
   there.
+- The `ci` conformance run needs `conformance/ci-client.py` (started by the
+  script) to choose the responses of two test modules. `conformance/.generated/`
+  is only created when missing: delete it after changing `generate.py`.
 - Bind test listeners to loopback only. An unrelated `unifi` container
   already holds host ports 8080 and 8443. The conformance runner uses
   8943 (suite) and 9443 (oxID).
@@ -69,6 +72,13 @@ mise run build        # check + release build + conformance
     authentication**. It is the default. Anyone who can reach the
     authorization endpoint can act as any customer, and the server logs a
     warning saying so at startup. Keep that warning and the README caveat.
+  - `ci`: no user and no pages, for automated tests. A `GET` of the
+    authorization URL is answered with the redirect (default: the first
+    user shares everything), after `ci.response_delay` seconds. The client
+    can choose the response (user, voluntary claims, a predefined error, or
+    `abandon`) at `POST /ci/response` (`http/ci.rs`), authenticated like
+    PAR. The choice lives in the store, so it works on Lambda. **No
+    authentication**: it also logs a startup warning, which must stay.
 
   The endpoint (`http/authorize.rs`), not the experience, owns the page
   shell and the user's session: `request_uri_ttl` only limits how long the

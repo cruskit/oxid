@@ -37,6 +37,7 @@ use crate::store::{PushedRequest, Session};
 use crate::user::UserStore;
 use crate::util::html_escape;
 
+pub mod ci;
 pub mod login;
 pub mod technical;
 
@@ -50,15 +51,20 @@ pub enum Kind {
     Technical,
     /// Sign in with a username and password, then consent.
     Login,
+    /// No user at all: the request is answered automatically, with a
+    /// response the client may choose. No authentication. Automated testing
+    /// only.
+    Ci,
 }
 
 impl Kind {
-    pub const ALL: &[Self] = &[Self::Technical, Self::Login];
+    pub const ALL: &[Self] = &[Self::Technical, Self::Login, Self::Ci];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Technical => "technical",
             Self::Login => "login",
+            Self::Ci => "ci",
         }
     }
 }
@@ -92,6 +98,7 @@ pub fn build(kind: Kind, users: Arc<dyn UserStore>) -> Arc<dyn Experience> {
     match kind {
         Kind::Technical => Arc::new(technical::Technical::new(users)),
         Kind::Login => Arc::new(login::Login::new(users)),
+        Kind::Ci => Arc::new(ci::Ci::new(users)),
     }
 }
 
@@ -247,6 +254,100 @@ impl From<Page> for Step {
     }
 }
 
+/// An error an experience can return to the client instead of a success,
+/// when it is asked to simulate one.
+#[derive(Debug, Clone, Copy)]
+pub struct ErrorCondition {
+    pub code: ErrorCode,
+    /// What this condition simulates.
+    pub label: &'static str,
+    /// The default `error_description`.
+    pub description: &'static str,
+}
+
+/// The predefined error conditions, in the order they are offered.
+pub const ERROR_CONDITIONS: &[ErrorCondition] = &[
+    ErrorCondition {
+        code: ErrorCode::AccessDenied,
+        label: "The user did not consent",
+        description: "the user denied the request",
+    },
+    ErrorCondition {
+        code: ErrorCode::LoginRequired,
+        label: "The user could not be authenticated",
+        description: "the user must authenticate",
+    },
+    ErrorCondition {
+        code: ErrorCode::ConsentRequired,
+        label: "Consent is needed and was not given",
+        description: "the user's consent is required",
+    },
+    ErrorCondition {
+        code: ErrorCode::InteractionRequired,
+        label: "User interaction is needed",
+        description: "user interaction is required",
+    },
+    ErrorCondition {
+        code: ErrorCode::AccountSelectionRequired,
+        label: "The user must choose an account",
+        description: "the user must select an account",
+    },
+    ErrorCondition {
+        code: ErrorCode::InvalidRequest,
+        label: "The request is malformed",
+        description: "the request is invalid",
+    },
+    ErrorCondition {
+        code: ErrorCode::InvalidScope,
+        label: "The requested scope is not allowed",
+        description: "the requested scope is invalid",
+    },
+    ErrorCondition {
+        code: ErrorCode::UnauthorizedClient,
+        label: "The client may not make this request",
+        description: "the client is not authorized to request a code",
+    },
+    ErrorCondition {
+        code: ErrorCode::ServerError,
+        label: "The provider failed unexpectedly",
+        description: "the authorization server encountered an unexpected condition",
+    },
+    ErrorCondition {
+        code: ErrorCode::TemporarilyUnavailable,
+        label: "The provider is overloaded or under maintenance",
+        description: "the authorization server is temporarily unavailable",
+    },
+];
+
+/// The predefined error condition with this error code.
+pub fn error_condition(code: &str) -> Option<&'static ErrorCondition> {
+    ERROR_CONDITIONS
+        .iter()
+        .find(|condition| condition.code.as_str() == code)
+}
+
+/// Longest `error_description` accepted from whoever chooses the response.
+pub const MAX_ERROR_DESCRIPTION: usize = 500;
+
+/// RFC 6749 §4.1.2.1: `error_description` is printable ASCII without `"` or
+/// `\`.
+pub fn is_error_description(text: &str) -> bool {
+    text.bytes()
+        .all(|b| matches!(b, 0x20..=0x21 | 0x23..=0x5B | 0x5D..=0x7E))
+}
+
+/// Every claim that can be released for the request: what a user who agreed
+/// to everything would share.
+pub fn everything_requested(interaction: &Interaction<'_>) -> BTreeSet<String> {
+    let request = interaction.request();
+    request
+        .claims
+        .consentable(interaction.client, &request.scope)
+        .into_iter()
+        .map(|item| item.name)
+        .collect()
+}
+
 /// A boxed future, so that [`Experience`] can be used as a trait object.
 pub type StepFuture<'a> = Pin<Box<dyn Future<Output = Step> + Send + 'a>>;
 
@@ -282,7 +383,10 @@ mod tests {
             assert_eq!(from_toml, *kind);
         }
         let err = "wizard".parse::<Kind>().unwrap_err();
-        assert!(err.contains("technical") && err.contains("login"), "{err}");
+        assert!(
+            err.contains("technical") && err.contains("login") && err.contains("ci"),
+            "{err}"
+        );
     }
 
     #[test]

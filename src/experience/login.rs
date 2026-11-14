@@ -44,8 +44,10 @@ const ACTION_SHARE_ALL: &str = "share-all";
 const STYLE: &str = ".who{display:flex;align-items:center;gap:.5rem;font-size:.85rem;color:#5d6577;\
 margin:0 0 1.25rem}.who::before{content:'';width:.5rem;height:.5rem;border-radius:50%;\
 background:#0a7d55}.who strong{color:#0e1320}\
-.purpose{background:#fff7f2;border:1px solid #ffd9c7;border-radius:.9rem;padding:.9rem 1rem;\
-margin:0 0 .5rem}.purpose h2{margin:0 0 .25rem;color:#b3400f}.purpose p{margin:0}\
+.ask{background:#fff7f2;border:1px solid #ffd9c7;border-radius:.9rem;padding:.9rem 1rem;\
+margin:.75rem 0 1rem}.card .ask p{margin:0;color:#5d6577;font-size:.9rem}\
+.card .ask strong{color:#0e1320}.card .ask .purpose{margin-top:.3rem;color:#0e1320;\
+font-size:1.1rem;font-weight:600;line-height:1.35}\
 .head{display:flex;align-items:baseline;justify-content:space-between}\
 .card .link{display:inline;width:auto;min-height:0;margin:0;padding:.2rem .4rem;border-radius:.4rem;\
 background:none;color:#b3400f;font-size:.8rem;font-weight:600}\
@@ -246,11 +248,11 @@ fn client_card(name: &str, line: &str) -> String {
 /// information shared; what and why is for the signed-in user to see.
 fn login_page(interaction: &Interaction<'_>, error: Option<&str>) -> Page {
     let name = &interaction.client.name;
-    let mut body = String::from("<h1>Log in to oxID</h1>");
-    let _ = write!(
-        body,
-        "<p class=\"lead\">Log in to continue to {}.</p>",
-        html_escape(name)
+    // The user is not logging in to the client: they are logging in to see
+    // what it has asked for. The lead introduces the card that says who.
+    let mut body = String::from(
+        "<h1>Log in to oxID</h1>\
+         <p class=\"lead\" id=\"login-reason\">Log in to review this request:</p>",
     );
     body.push_str(&client_card(
         name,
@@ -311,27 +313,41 @@ fn consent_page(interaction: &Interaction<'_>, user: &User, all_on: bool) -> Pag
     let (required, optional): (Vec<&ConsentItem>, Vec<&ConsentItem>) =
         requested.iter().partition(|item| item.essential);
 
+    // The purpose is written by the client to complete the sentence "... is
+    // asking you to share your information for the purpose of ..."
+    // (ConnectID identity assurance §5.1), so that is how it is shown: the
+    // sentence, with the purpose set apart as the part to read.
+    let asking = if requested.is_empty() {
+        "is asking you to log in with oxID"
+    } else {
+        "is asking you to share your information"
+    };
+    body.push_str("<h1>Review this request</h1><div class=\"ask\">");
+    match &request.purpose {
+        Some(purpose) => {
+            let _ = write!(
+                body,
+                "<p><strong id=\"client-name\">{name}</strong> {asking} \
+                 for the purpose of</p><p id=\"purpose\" class=\"purpose\">{}</p>",
+                html_escape(purpose)
+            );
+        }
+        None => {
+            let _ = write!(
+                body,
+                "<p><strong id=\"client-name\">{name}</strong> {asking}.</p>"
+            );
+        }
+    }
+    body.push_str("</div>");
     if requested.is_empty() {
         let _ = write!(
             body,
-            "<h1>Continue to {name}?</h1>\
-             <p id=\"requested-none\" class=\"lead\"><strong id=\"client-name\">{name}</strong> \
-             will be told that you logged in with oxID. No personal details will be shared.</p>"
+            "<p id=\"requested-none\" class=\"lead\">{name} will be told that you logged in \
+             with oxID. No personal details will be shared.</p>"
         );
     } else {
-        let _ = write!(
-            body,
-            "<h1><span id=\"client-name\">{name}</span> is asking you to share your details</h1>\
-             <p class=\"lead\">Check what will be shared before you continue.</p>"
-        );
-    }
-    if let Some(purpose) = &request.purpose {
-        let _ = write!(
-            body,
-            "<div class=\"purpose\"><h2>Why {name} is asking</h2>\
-             <p id=\"purpose\">{}</p></div>",
-            html_escape(purpose)
-        );
+        body.push_str("<p class=\"lead\">Check what will be shared before you continue.</p>");
     }
 
     body.push_str(&interaction.form_open());

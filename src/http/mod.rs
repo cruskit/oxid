@@ -17,6 +17,7 @@ use crate::state::AppState;
 use crate::tls::ClientCert;
 
 mod authorize;
+mod ci;
 mod discovery;
 mod par;
 mod token;
@@ -31,6 +32,10 @@ pub const PATH_DECISION: &str = "/authorize/decision";
 pub const PATH_TOKEN: &str = "/token";
 pub const PATH_USERINFO: &str = "/userinfo";
 pub const PATH_HEALTH: &str = "/healthz";
+/// What the `ci` experience offers. Served only under that experience.
+pub const PATH_CI: &str = "/ci";
+/// Where a client chooses the `ci` experience's response to a request.
+pub const PATH_CI_RESPONSE: &str = "/ci/response";
 
 pub static X_FAPI_INTERACTION_ID: HeaderName = HeaderName::from_static("x-fapi-interaction-id");
 
@@ -47,7 +52,16 @@ pub struct ConnInfo {
 }
 
 pub fn router(state: AppState) -> Router {
+    // The endpoints of the `ci` experience do not exist under any other.
+    let ci = if state.experience.kind() == crate::experience::Kind::Ci {
+        Router::new()
+            .route(PATH_CI, get(ci::options))
+            .route(PATH_CI_RESPONSE, post(ci::plan_response))
+    } else {
+        Router::new()
+    };
     Router::new()
+        .merge(ci)
         .route(PATH_DISCOVERY, get(discovery::metadata))
         .route(PATH_OAUTH_METADATA, get(discovery::metadata))
         .route(PATH_JWKS, get(discovery::jwks))
@@ -138,6 +152,11 @@ impl Params {
             }
         }
         Ok(Self(map))
+    }
+
+    /// Whether the parameter was sent at all, even with an empty value.
+    pub fn contains(&self, name: &str) -> bool {
+        self.0.contains_key(name)
     }
 
     /// The parameter's value. An empty value is treated as absent
@@ -254,7 +273,19 @@ pub(crate) mod test_support {
         }
 
         pub fn with_experience(kind: crate::experience::Kind) -> Self {
-            let (state, clock) = state_with(kind);
+            Self::from_state(state_with(kind))
+        }
+
+        /// A provider using the `ci` experience, which holds its default
+        /// response back for `response_delay` seconds.
+        pub fn ci(response_delay: i64) -> Self {
+            Self::from_state(crate::state::test_support::state_with_ci(
+                crate::experience::Kind::Ci,
+                crate::config::CiConfig { response_delay },
+            ))
+        }
+
+        fn from_state((state, clock): (AppState, std::sync::Arc<ManualClock>)) -> Self {
             Self {
                 router: router(state.clone()),
                 state,

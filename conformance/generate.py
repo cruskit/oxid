@@ -177,7 +177,27 @@ class Technical:
         ]
 
 
-EXPERIENCES = {cls.name: cls for cls in (Technical, Login)}
+class Ci:
+    """The `ci` experience: no pages and nothing to click. Loading the
+    authorization endpoint is answered with the redirect back to the suite,
+    so the browser only has to arrive. Where a test needs the user to refuse,
+    or to look and do nothing, conformance/ci-client.py chooses that response
+    as the client; the browser still only arrives."""
+
+    name = "ci"
+    # Shown when the client chose that the user abandons the visit.
+    landmark = "abandoned"
+
+    @staticmethod
+    def approve() -> list:
+        return []
+
+    @staticmethod
+    def deny() -> list:
+        return []
+
+
+EXPERIENCES = {cls.name: cls for cls in (Technical, Login, Ci)}
 
 
 def browser(experience) -> tuple[list, dict]:

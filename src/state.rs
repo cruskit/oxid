@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use url::Url;
 
 use crate::client::{ClientRegistry, StaticClientRegistry};
-use crate::config::{Config, SecurityConfig, StoreBackend};
+use crate::config::{CiConfig, Config, SecurityConfig, StoreBackend};
 use crate::experience::{self, Experience, Kind};
 use crate::keys::SigningKey;
 use crate::store::{MemoryBackend, Store};
@@ -19,6 +19,8 @@ pub struct Inner {
     pub issuer: String,
     pub mtls_base_url: String,
     pub security: SecurityConfig,
+    /// Settings of the `ci` experience.
+    pub ci: CiConfig,
     pub signing_key: SigningKey,
     pub clients: Arc<dyn ClientRegistry>,
     pub users: Arc<dyn UserStore>,
@@ -159,6 +161,13 @@ impl AppState {
                  can act as any customer and edit responses (development and testing only)"
             );
         }
+        if config.experience == Kind::Ci {
+            tracing::warn!(
+                response_delay = config.ci.response_delay,
+                "experience is 'ci': authorization requests are answered automatically, with \
+                 no user and no authentication (automated testing only)"
+            );
+        }
         tracing::info!(experience = %config.experience, "user experience selected");
         let experience = experience::build(config.experience, Arc::clone(&users));
 
@@ -166,6 +175,7 @@ impl AppState {
             issuer: config.issuer.clone(),
             mtls_base_url: config.mtls_base_url.clone(),
             security: config.security.clone(),
+            ci: config.ci.clone(),
             signing_key,
             clients: Arc::new(clients),
             users,
@@ -272,6 +282,11 @@ pub(crate) mod test_support {
 
     /// As [`state`], with the given user experience.
     pub fn state_with(kind: Kind) -> (AppState, Arc<ManualClock>) {
+        state_with_ci(kind, CiConfig::default())
+    }
+
+    /// As [`state_with`], with the given settings for the `ci` experience.
+    pub fn state_with_ci(kind: Kind, ci: CiConfig) -> (AppState, Arc<ManualClock>) {
         let clock = Arc::new(ManualClock::new(NOW));
         let users: Arc<dyn UserStore> = Arc::new(SharedUsers);
         let clients = StaticClientRegistry::new([client_with_key("rp", shared_key())]).unwrap();
@@ -279,6 +294,7 @@ pub(crate) mod test_support {
             issuer: ISSUER.to_owned(),
             mtls_base_url: MTLS.to_owned(),
             security: SecurityConfig::default(),
+            ci,
             signing_key: SigningKey::generate().unwrap(),
             clients: Arc::new(clients),
             experience: experience::build(kind, Arc::clone(&users)),

@@ -12,7 +12,7 @@
 # Usage: scripts/conformance.sh [extra run-test-plan.py arguments]
 #
 # Environment:
-#   OXID_EXPERIENCE  run for this experience only (technical or login);
+#   OXID_EXPERIENCE  run for this experience only (technical, login or ci);
 #                    unset runs each in turn
 #   SUITE_TAG        conformance suite release (image tag and git tag)
 #   SUITE_HOST_PORT  loopback port for the suite UI/API       (default 8943)
@@ -25,7 +25,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONF="$ROOT/conformance"
 CACHE="$CONF/.cache"
 
-EXPERIENCES=(technical login)
+EXPERIENCES=(technical login ci)
 
 # With no experience chosen, run this script once for each.
 if [[ -z "${OXID_EXPERIENCE:-}" ]]; then
@@ -93,8 +93,13 @@ if [[ ! -f "$SUITE_CONFIG" ]]; then
   "$VENV/bin/python" "$CONF/generate.py"
 fi
 
+CI_CLIENT_PID=""
+
 cleanup() {
   status=$?
+  if [[ -n "$CI_CLIENT_PID" ]]; then
+    kill "$CI_CLIENT_PID" 2>/dev/null || true
+  fi
   if [[ "${KEEP_RUNNING:-0}" == "1" ]]; then
     log "Leaving containers running; suite UI at $SUITE_URL"
   else
@@ -125,6 +130,18 @@ wait_for() {
 }
 wait_for "oxID" "https://localhost:$OXID_HOST_PORT/healthz" 60
 wait_for "conformance suite" "${SUITE_URL}api/runner/available" 150
+
+# Under `ci` oxID answers by itself, and only the client may choose another
+# answer. Two test modules need one, so a stand-in for the client's test code
+# runs beside the suite; see conformance/ci-client.py.
+if [[ "$OXID_EXPERIENCE" == "ci" ]]; then
+  log "Starting the ci client"
+  "$VENV/bin/python" "$CONF/ci-client.py" \
+    --suite "$SUITE_URL" \
+    --oxid "https://localhost:$OXID_HOST_PORT" \
+    --config "$SUITE_CONFIG" >"$RESULTS/ci-client.log" 2>&1 &
+  CI_CLIENT_PID=$!
+fi
 
 log "Running $PLAN ($OXID_EXPERIENCE experience)"
 cd "$SUITE_SRC/scripts"
