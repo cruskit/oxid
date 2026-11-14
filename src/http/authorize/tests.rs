@@ -514,6 +514,31 @@ async fn wrong_password_re_prompts_then_gives_up() {
 }
 
 #[tokio::test]
+async fn a_request_is_denied_and_recorded_once_however_many_browsers_try() {
+    let harness = Harness::new();
+    let uri = harness.push(&json!({})).await;
+    let csrf = open_login(&harness, &uri).await;
+    for _ in 1..MAX_FAILED_LOGINS {
+        submit(&harness, Some(&csrf), &login_fields(&csrf, &uri, "wrong")).await;
+    }
+    // The last allowed failure and one more race each other. Both are
+    // turned away, but only one decision is recorded.
+    let wrong = login_fields(&csrf, &uri, "wrong");
+    let (a, b) = tokio::join!(
+        submit(&harness, Some(&csrf), &wrong),
+        submit(&harness, Some(&csrf), &wrong),
+    );
+    for response in [a, b] {
+        assert!(
+            response.status() == StatusCode::BAD_REQUEST
+                || redirect_params(&response).1["error"] == "access_denied"
+        );
+    }
+    let records = harness.state.store.consent_history_of_nobody().await;
+    assert_eq!(records.len(), 1, "{records:?}");
+}
+
+#[tokio::test]
 async fn decision_requires_matching_csrf_cookie_and_field() {
     let harness = Harness::new();
     let uri = harness.push(&json!({})).await;
@@ -574,11 +599,13 @@ async fn arriving_in_time_gives_the_user_a_session_longer_than_the_request_uri()
     harness.clock.advance(security.request_uri_ttl - 1);
     let response = harness.get(None, &authorize_path(&uri)).await;
     let html = body_text(response).await;
-    // The page takes itself to the expiry page when the session ends.
+    // The page takes itself to the expiry page when the session ends. The
+    // URL is a JavaScript string with `&` escaped, so markup cannot end the
+    // script.
     assert!(html.contains(&format!(
-            "setTimeout(function(){{location.replace(\"/authorize?client_id=rp&request_uri={}\")}},300000);",
-            uri.replace(':', "%3A")
-        )));
+        "setTimeout(function(){{location.replace(\"/authorize?client_id=rp\\u0026request_uri={}\")}},300000);",
+        uri.replace(':', "%3A")
+    )));
 
     // Long after the request_uri expired, the user can still sign in,
     // read the consent page and decide.

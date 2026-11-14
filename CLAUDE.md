@@ -147,8 +147,9 @@ mise run build        # check + release build + conformance
 ## Releases and the infrastructure contract
 
 - CI (`.github/workflows/build.yml`) runs on every PR and push to `main`:
-  format, lint, tests with DynamoDB Local, conformance for both
-  experiences, and the Lambda package.
+  format, lint, dependency audit (`cargo deny`), tests with DynamoDB
+  Local, conformance for each of the three experiences, and the Lambda
+  package. Pushing a branch without a pull request runs nothing.
 - To release: bump `version` in `Cargo.toml`, merge to `main`, then run the
   Build workflow by hand with "Create a GitHub release" ticked. The release
   publishes the Linux binary, `oxid-lambda-<v>-x86_64.zip` and

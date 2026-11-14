@@ -28,7 +28,7 @@ enum Command {
         #[arg(short, long, env = "OXID_CONFIG", default_value = "oxid.toml")]
         config: PathBuf,
         /// User experience at the authorization endpoint, overriding the
-        /// configuration file: `technical` or `login`.
+        /// configuration file: `technical`, `login` or `ci`.
         #[arg(long, env = "OXID_EXPERIENCE")]
         experience: Option<oxid::Kind>,
     },

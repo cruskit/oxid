@@ -66,6 +66,13 @@ pub(crate) struct PushedRequest {
     pub failed_logins: u32,
 }
 
+impl PushedRequest {
+    /// Whether the sign-in attempts for this request are used up.
+    pub(crate) fn is_exhausted(&self) -> bool {
+        self.failed_logins >= MAX_FAILED_LOGINS
+    }
+}
+
 impl std::fmt::Debug for PushedRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // The request object carries the client's signed claims (and may
@@ -452,13 +459,15 @@ impl Store {
     }
 
     /// Look at a pushed request without consuming it, whether or not its
-    /// `request_uri` is still accepted from a new browser.
+    /// `request_uri` is still accepted from a new browser. A request that
+    /// has had [`MAX_FAILED_LOGINS`] failed sign-ins is treated as gone.
     pub(crate) async fn peek_request(
         &self,
         request_uri: &str,
         now: i64,
     ) -> StoreResult<Option<PushedRequest>> {
-        Self::pushed(self.backend.get(&request_key(request_uri)).await?, now)
+        Ok(Self::pushed(self.backend.get(&request_key(request_uri)).await?, now)?
+            .filter(|pushed| !pushed.is_exhausted()))
     }
 
     async fn session(&self, request_uri: &str) -> StoreResult<Option<Session>> {
@@ -600,18 +609,17 @@ impl Store {
         Self::pushed(self.backend.take(&request_key(request_uri)).await?, now)
     }
 
-    /// Count a failed login. Returns `false` once the limit is reached, at
-    /// which point the request has been discarded.
+    /// Count a failed login. Returns `false` once the limit is reached:
+    /// from then on [`Store::peek_request`] no longer finds the request, and
+    /// the denial that follows consumes it with [`Store::take_request`].
+    /// Consuming it there, rather than here, means exactly one caller ends
+    /// up holding it, and so exactly one consent record is written.
     pub(crate) async fn record_failed_login(&self, request_uri: &str) -> StoreResult<bool> {
         let key = request_key(request_uri);
         let Some(record) = self.backend.increment(&key).await? else {
             return Ok(false);
         };
-        if record.count >= u64::from(MAX_FAILED_LOGINS) {
-            self.backend.take(&key).await?;
-            return Ok(false);
-        }
-        Ok(true)
+        Ok(record.count < u64::from(MAX_FAILED_LOGINS))
     }
 
     pub(crate) async fn create_code(&self, code: AuthorizationCode) -> StoreResult<String> {
@@ -767,6 +775,18 @@ impl Store {
             .await?
             .iter()
             .map(|value| decode(value))
+            .collect()
+    }
+
+    /// Decisions made before anyone signed in, most recent first.
+    #[cfg(test)]
+    pub(crate) async fn consent_history_of_nobody(&self) -> Vec<ConsentRecord> {
+        self.backend
+            .log_list(&consent_partition(None))
+            .await
+            .unwrap()
+            .iter()
+            .map(|value| decode(value).unwrap())
             .collect()
     }
 

@@ -271,8 +271,12 @@ impl User {
         }
     }
 
+    /// Whether `password` is this user's. A user without a password never
+    /// matches, but the check still costs a full hash verification, so the
+    /// response time does not reveal which users have none.
     fn password_matches(&self, password: &str) -> bool {
         let Some(hash) = &self.password_hash else {
+            verify_decoy(password);
             return false;
         };
         PasswordHash::new(hash.expose()).is_ok_and(|hash| {
@@ -288,6 +292,13 @@ impl User {
 /// hash of a random password nobody kept, with the same parameters as
 /// [`hash_password`]: precomputed so that a cold start does not pay for it.
 const DECOY_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$TVs5tMgE/FS28BBEu7uI9A$e0EFOYlUFlmAwN2BIP5mQw7FqzrdWnB324v1gBurBM0";
+
+/// Spend what checking a real password costs, and discard the result.
+fn verify_decoy(password: &str) {
+    if let Ok(hash) = PasswordHash::new(DECOY_HASH) {
+        let _ = Argon2::default().verify_password(password.as_bytes(), &hash);
+    }
+}
 
 /// Hash a password with Argon2id, producing a PHC string for configuration.
 pub fn hash_password(password: &str) -> Result<String> {
@@ -375,9 +386,7 @@ impl UserStore for StaticUserStore {
         if let Some(user) = self.by_username.get(username) {
             user.password_matches(password).then(|| Arc::clone(user))
         } else {
-            if let Ok(hash) = PasswordHash::new(DECOY_HASH) {
-                let _ = Argon2::default().verify_password(password.as_bytes(), &hash);
-            }
+            verify_decoy(password);
             None
         }
     }

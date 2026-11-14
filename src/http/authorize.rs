@@ -396,21 +396,26 @@ async fn try_conclude(interaction: &Interaction<'_>, step: Step) -> StoreResult<
             return Ok(experience_page(&page, interaction, &step.set_cookies));
         }
         Decision::Deny { code, description } => {
-            // The experience may already have discarded the request (after
-            // too many failed sign-ins), so its absence is not an error.
-            state
+            // Only the caller that consumes the request records the
+            // decision. If a concurrent request got there first, it has
+            // been recorded once already; this browser is still sent back
+            // with the error.
+            if state
                 .store
                 .take_request(interaction.request_uri, now)
+                .await?
+                .is_some()
+            {
+                record_decision(
+                    state,
+                    interaction.client,
+                    request.purpose.as_deref(),
+                    None,
+                    now,
+                    ConsentOutcome::Denied,
+                )
                 .await?;
-            record_decision(
-                state,
-                interaction.client,
-                request.purpose.as_deref(),
-                None,
-                now,
-                ConsentOutcome::Denied,
-            )
-            .await?;
+            }
             redirect_error(
                 state,
                 &request.redirect_uri,
@@ -421,10 +426,13 @@ async fn try_conclude(interaction: &Interaction<'_>, step: Step) -> StoreResult<
         }
         Decision::Approve(approval) => {
             // One-time use is enforced here, at the point of authorization.
+            // A request whose sign-in attempts ran out cannot be approved,
+            // even by a sign-in that raced the last failure.
             let Some(pushed) = state
                 .store
                 .take_request(interaction.request_uri, now)
                 .await?
+                .filter(|pushed| !pushed.is_exhausted())
             else {
                 return Ok(error_page(
                     state,

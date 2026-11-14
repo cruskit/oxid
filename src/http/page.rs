@@ -85,6 +85,14 @@ struct ShellTemplate<'a> {
     /// The nonce the scripts run under.
     nonce: &'a str,
     scripts: Vec<&'a str>,
+    /// Replace the page after a while; the template writes the timer.
+    reload: Option<Reload<'a>>,
+}
+
+/// Replace the page with `url` after `after_ms` milliseconds.
+struct Reload<'a> {
+    url: &'a str,
+    after_ms: i64,
 }
 
 /// One HTML page.
@@ -110,19 +118,14 @@ impl Shell<'_> {
         let nonce = random_token(16);
         // The reload is a script timer, not a `<meta>` refresh: scripted
         // browsers, such as the conformance suite's, follow those at once.
-        let reload = self.refresh.as_ref().map(|(after, url)| {
-            let url = serde_json::Value::from(url.as_str())
-                .to_string()
-                .replace('<', "\\u003c");
-            format!("setTimeout(function(){{location.replace({url})}},{after}000);")
+        let reload = self.refresh.as_ref().map(|(after, url)| Reload {
+            url,
+            after_ms: after.saturating_mul(1000),
         });
-        let scripts: Vec<&str> = [self.script, reload.as_deref()]
-            .into_iter()
-            .flatten()
-            .collect();
+        let scripts: Vec<&str> = self.script.into_iter().collect();
         let policy = content_security_policy(
             self.redirect_to,
-            (!scripts.is_empty()).then_some(nonce.as_str()),
+            (!scripts.is_empty() || reload.is_some()).then_some(nonce.as_str()),
             theme.has_logo(),
         );
         let html = render(&ShellTemplate {
@@ -134,6 +137,7 @@ impl Shell<'_> {
             wide: self.wide,
             nonce: &nonce,
             scripts,
+            reload,
         });
         let mut response = no_store((self.status, Html(html)).into_response());
         response
