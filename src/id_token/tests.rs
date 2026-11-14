@@ -1,6 +1,6 @@
 use super::*;
 use crate::claims::ClaimsRequest;
-use crate::jose::{Jws, SigningAlg};
+use crate::jose::{SigningAlg, UnverifiedJws};
 use crate::testing::state::{ISSUER, NOW, state};
 use crate::user::{DEMO_PASSWORD, DEMO_USERNAME};
 
@@ -38,9 +38,11 @@ fn id_token_has_required_claims_and_verifies() {
     )
     .unwrap();
 
-    let jws = Jws::parse(&token, &[SigningAlg::PS256]).unwrap();
-    jws.verify(&state.signing_key.jwks()).unwrap();
-    assert_eq!(jws.kid.as_deref(), Some(state.signing_key.kid()));
+    let jws = UnverifiedJws::parse(&token, &[SigningAlg::PS256])
+        .unwrap()
+        .verify(&state.signing_key.jwks())
+        .unwrap();
+    assert_eq!(jws.header().kid.as_deref(), Some(state.signing_key.kid()));
     assert_eq!(jws.str_claim("iss"), Some(ISSUER));
     assert_eq!(jws.str_claim("aud"), Some("rp"));
     assert_eq!(jws.str_claim("nonce"), Some("n-1"));
@@ -58,7 +60,7 @@ fn id_token_has_required_claims_and_verifies() {
         "sub is pairwise"
     );
     assert!(
-        jws.claims.get("given_name").is_none(),
+        jws.claims().get("given_name").is_none(),
         "nothing released unless requested"
     );
 }
@@ -72,8 +74,10 @@ fn nonce_is_omitted_when_not_requested() {
         .authenticate(DEMO_USERNAME, DEMO_PASSWORD)
         .unwrap();
     let token = issue(&state, &client, &user, &grant(json!({})), None, "at").unwrap();
-    let jws = Jws::parse(&token, &[SigningAlg::PS256]).unwrap();
-    assert!(!jws.claims.contains_key("nonce"));
+    let jws = UnverifiedJws::parse(&token, &[SigningAlg::PS256])
+        .unwrap()
+        .skip_verification_in_tests();
+    assert!(!jws.claims().contains_key("nonce"));
 }
 
 #[test]
@@ -90,7 +94,9 @@ fn requested_claims_are_included_but_cannot_override_protocol_claims() {
         "txn": {"essential": true},
     }}));
     let token = issue(&state, &client, &user, &grant, None, "at").unwrap();
-    let jws = Jws::parse(&token, &[SigningAlg::PS256]).unwrap();
+    let jws = UnverifiedJws::parse(&token, &[SigningAlg::PS256])
+        .unwrap()
+        .skip_verification_in_tests();
     assert_eq!(jws.str_claim("given_name"), Some("Alex"));
     assert_eq!(jws.str_claim("iss"), Some(ISSUER));
     assert_eq!(jws.str_claim("txn"), Some("txn-123"));
@@ -133,7 +139,10 @@ fn preview_matches_the_issued_token_apart_from_at_hash() {
     assert_eq!(preview["at_hash"], AT_HASH_PLACEHOLDER);
 
     let token = issue(&state, &client, &user, &grant, Some("n-1"), "at").unwrap();
-    let mut issued = Jws::parse(&token, &[SigningAlg::PS256]).unwrap().claims;
+    let mut issued = UnverifiedJws::parse(&token, &[SigningAlg::PS256])
+        .unwrap()
+        .skip_verification_in_tests()
+        .into_claims();
     assert_eq!(issued["at_hash"], at_hash("at"));
     issued.insert("at_hash".to_owned(), AT_HASH_PLACEHOLDER.into());
     assert_eq!(issued, preview);
@@ -160,16 +169,18 @@ fn manual_edits_are_applied_to_the_issued_token() {
     // Time passes between the preview and the token request.
     clock.advance(7);
     let token = issue(&state, &client, &user, &grant, Some("n-1"), "at").unwrap();
-    let jws = Jws::parse(&token, &[SigningAlg::PS256]).unwrap();
-    jws.verify(&state.signing_key.jwks()).unwrap();
+    let jws = UnverifiedJws::parse(&token, &[SigningAlg::PS256])
+        .unwrap()
+        .verify(&state.signing_key.jwks())
+        .unwrap();
     assert_eq!(jws.str_claim("given_name"), Some("Edited"));
     assert_eq!(jws.str_claim("sub"), Some("someone-else"));
-    assert_eq!(jws.claims["custom"], json!({"nested": [1, 2]}));
-    assert!(!jws.claims.contains_key("family_name"));
-    assert!(!jws.claims.contains_key("nonce"));
+    assert_eq!(jws.claims()["custom"], json!({"nested": [1, 2]}));
+    assert!(!jws.claims().contains_key("family_name"));
+    assert!(!jws.claims().contains_key("nonce"));
     // Untouched claims are live, not frozen at preview time.
     assert_eq!(jws.time_claim("iat"), Some(NOW + 7));
-    assert_eq!(jws.claims["at_hash"], at_hash("at"));
+    assert_eq!(jws.claims()["at_hash"], at_hash("at"));
 }
 
 #[test]
@@ -210,9 +221,11 @@ fn id_token_carries_connectid_verified_claims_and_never_acr() {
         },
     }}));
     let token = issue(&state, &client, &user, &grant, None, "at").unwrap();
-    let jws = Jws::parse(&token, &[SigningAlg::PS256]).unwrap();
-    assert!(!jws.claims.contains_key("acr"));
-    let verified = &jws.claims["verified_claims"];
+    let jws = UnverifiedJws::parse(&token, &[SigningAlg::PS256])
+        .unwrap()
+        .skip_verification_in_tests();
+    assert!(!jws.claims().contains_key("acr"));
+    let verified = &jws.claims()["verified_claims"];
     assert_eq!(verified["verification"]["trust_framework"], "au_connectid");
     assert_eq!(verified["claims"]["over18"], true);
     assert_eq!(

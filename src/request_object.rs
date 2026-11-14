@@ -9,7 +9,7 @@ use serde_json::{Map, Value};
 use crate::client::Client;
 use crate::config::SecurityConfig;
 use crate::error::OAuthError;
-use crate::jose::{Jws, SigningAlg};
+use crate::jose::{SigningAlg, UnverifiedJws};
 
 /// The only algorithm accepted for request objects (ConnectID §4.2-3.8).
 pub(crate) const ALLOWED_ALGS: &[SigningAlg] = &[SigningAlg::PS256];
@@ -25,11 +25,12 @@ pub(crate) fn verify(
 ) -> Result<Map<String, Value>, OAuthError> {
     let bad = |reason: String| OAuthError::invalid_request_object(reason);
 
-    let jws = Jws::parse(request, ALLOWED_ALGS).map_err(|e| bad(e.to_string()))?;
-    jws.verify(&client.jwks).map_err(|e| bad(e.to_string()))?;
+    let jws = UnverifiedJws::parse(request, ALLOWED_ALGS)
+        .and_then(|jws| jws.verify(&client.jwks))
+        .map_err(|e| bad(e.to_string()))?;
 
     // RFC 9101 §10.8 defines this type; plain "JWT" is what most clients send.
-    if let Some(typ) = &jws.typ
+    if let Some(typ) = &jws.header().typ
         && !typ.eq_ignore_ascii_case("oauth-authz-req+jwt")
         && !typ.eq_ignore_ascii_case("JWT")
     {
@@ -39,7 +40,7 @@ pub(crate) fn verify(
     if jws.str_claim("iss") != Some(client.id.as_str()) {
         return Err(bad("iss must be the client_id".to_owned()));
     }
-    if !audience_contains(jws.claims.get("aud"), issuer) {
+    if !audience_contains(jws.claims().get("aud"), issuer) {
         return Err(bad("aud must contain the issuer identifier".to_owned()));
     }
 
@@ -75,7 +76,7 @@ pub(crate) fn verify(
         return Err(bad("iat is in the future".to_owned()));
     }
 
-    Ok(jws.claims)
+    Ok(jws.into_claims())
 }
 
 /// `aud` may be a single string or an array of strings (RFC 7519 §4.1.3).

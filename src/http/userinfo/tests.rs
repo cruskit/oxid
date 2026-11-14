@@ -4,7 +4,7 @@ use serde_json::json;
 
 use super::*;
 use crate::http::PATH_USERINFO;
-use crate::jose::{Jws, SigningAlg};
+use crate::jose::{SigningAlg, UnverifiedJws};
 use crate::testing::http::tokens;
 use crate::testing::http::{CERT, Harness, json_body};
 
@@ -27,7 +27,9 @@ async fn returns_sub_matching_the_id_token_and_requested_claims() {
     )
     .await;
     let access = body["access_token"].as_str().unwrap();
-    let id_token = Jws::parse(body["id_token"].as_str().unwrap(), &[SigningAlg::PS256]).unwrap();
+    let id_token = UnverifiedJws::parse(body["id_token"].as_str().unwrap(), &[SigningAlg::PS256])
+        .unwrap()
+        .skip_verification_in_tests();
 
     let response = call(&harness, Some(CERT), Some(&format!("Bearer {access}"))).await;
     assert_eq!(response.status(), StatusCode::OK);

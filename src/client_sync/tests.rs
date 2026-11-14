@@ -1,5 +1,5 @@
 use super::*;
-use crate::jose::{Jws, SigningAlg};
+use crate::jose::{SigningAlg, UnverifiedJws};
 use crate::testing::shared_key;
 
 fn config() -> ClientSyncConfig {
@@ -107,8 +107,10 @@ fn client_assertion_is_a_private_key_jwt_with_the_registry_kid() {
     let config = config();
     let assertion =
         client_assertion(&config, shared_key(), "https://auth.registry.example", 1000).unwrap();
-    let jws = Jws::parse(&assertion, &[SigningAlg::PS256]).unwrap();
-    assert_eq!(jws.kid.as_deref(), Some("registry-kid-1"));
+    let jws = UnverifiedJws::parse(&assertion, &[SigningAlg::PS256])
+        .unwrap()
+        .skip_verification_in_tests();
+    assert_eq!(jws.header().kid.as_deref(), Some("registry-kid-1"));
     assert_eq!(jws.str_claim("iss"), Some("oxid-idp"));
     assert_eq!(jws.str_claim("sub"), Some("oxid-idp"));
     assert_eq!(jws.str_claim("aud"), Some("https://auth.registry.example"));
@@ -119,11 +121,16 @@ fn client_assertion_is_a_private_key_jwt_with_the_registry_kid() {
     // The signature is by the configured key, whatever kid is claimed.
     let mut jwks = shared_key().jwks();
     jwks.keys[0].common.key_id = Some("registry-kid-1".to_owned());
-    jws.verify(&jwks).unwrap();
+    UnverifiedJws::parse(&assertion, &[SigningAlg::PS256])
+        .unwrap()
+        .verify(&jwks)
+        .unwrap();
 
     let again =
         client_assertion(&config, shared_key(), "https://auth.registry.example", 1000).unwrap();
-    let other = Jws::parse(&again, &[SigningAlg::PS256]).unwrap();
+    let other = UnverifiedJws::parse(&again, &[SigningAlg::PS256])
+        .unwrap()
+        .skip_verification_in_tests();
     assert_ne!(
         jws.str_claim("jti"),
         other.str_claim("jti"),

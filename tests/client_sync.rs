@@ -30,7 +30,7 @@ use common::TestOp;
 use oxid::client::Profile;
 use oxid::client_sync::{ClientSyncConfig, fetch};
 use oxid::http::ConnInfo;
-use oxid::jose::{Jws, SigningAlg};
+use oxid::jose::{SigningAlg, UnverifiedJws};
 use oxid::keys::SigningKey;
 use oxid::tls::{self, ClientCertPolicy, TlsIdentity};
 use oxid::util::SystemClock;
@@ -87,15 +87,19 @@ async fn token(
     {
         return oauth_error(StatusCode::BAD_REQUEST, "invalid_request");
     }
-    let Ok(jws) = Jws::parse(
+    let Ok(unverified) = UnverifiedJws::parse(
         field("client_assertion").unwrap_or_default(),
         &[SigningAlg::PS256],
     ) else {
         return oauth_error(StatusCode::UNAUTHORIZED, "invalid_client");
     };
-    let valid = jws.kid.as_deref() == Some(KEY_ID)
-        && jws.verify(&registry.idp_jwks).is_ok()
-        && jws.str_claim("iss") == Some(IDP_CLIENT_ID)
+    if unverified.header().kid.as_deref() != Some(KEY_ID) {
+        return oauth_error(StatusCode::UNAUTHORIZED, "invalid_client");
+    }
+    let Ok(jws) = unverified.verify(&registry.idp_jwks) else {
+        return oauth_error(StatusCode::UNAUTHORIZED, "invalid_client");
+    };
+    let valid = jws.str_claim("iss") == Some(IDP_CLIENT_ID)
         && jws.str_claim("sub") == Some(IDP_CLIENT_ID)
         && jws.str_claim("aud") == Some(registry.base.as_str())
         && jws.str_claim("jti").is_some()

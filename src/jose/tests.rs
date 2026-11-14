@@ -21,13 +21,14 @@ fn token(claims: &Value) -> String {
 
 #[test]
 fn sign_then_verify_round_trips() {
-    let jws = Jws::parse(&token(&json!({"sub": "a", "exp": 10})), PS256).unwrap();
-    assert_eq!(jws.alg, SigningAlg::PS256);
-    assert_eq!(jws.kid.as_deref(), Some(key().kid()));
-    assert_eq!(jws.typ.as_deref(), Some("JWT"));
+    let jws = UnverifiedJws::parse(&token(&json!({"sub": "a", "exp": 10})), PS256).unwrap();
+    assert_eq!(jws.header().alg, SigningAlg::PS256);
+    assert_eq!(jws.header().kid.as_deref(), Some(key().kid()));
+    assert_eq!(jws.header().typ.as_deref(), Some("JWT"));
+    assert_eq!(jws.unverified_issuer(), None);
+    let jws = jws.verify(&jwks(key())).unwrap();
     assert_eq!(jws.str_claim("sub"), Some("a"));
     assert_eq!(jws.time_claim("exp"), Some(10));
-    jws.verify(&jwks(key())).unwrap();
 }
 
 #[test]
@@ -36,8 +37,11 @@ fn tampered_payload_fails_verification() {
     let mut parts: Vec<&str> = good.split('.').collect();
     let forged = b64url(br#"{"sub":"b"}"#);
     parts[1] = &forged;
-    let jws = Jws::parse(&parts.join("."), PS256).unwrap();
-    assert_eq!(jws.verify(&jwks(key())), Err(JoseError::BadSignature));
+    let jws = UnverifiedJws::parse(&parts.join("."), PS256).unwrap();
+    assert_eq!(
+        jws.verify(&jwks(key())).unwrap_err(),
+        JoseError::BadSignature
+    );
 }
 
 #[test]
@@ -45,23 +49,23 @@ fn an_unreadable_signature_is_reported_as_such() {
     let good = token(&json!({"sub": "a"}));
     let (input, _) = good.rsplit_once('.').unwrap();
     // One base64url character cannot encode a whole byte.
-    let jws = Jws::parse(&format!("{input}.A"), PS256).unwrap();
+    let jws = UnverifiedJws::parse(&format!("{input}.A"), PS256).unwrap();
+    let error = jws.verify(&jwks(key())).unwrap_err();
     assert!(
-        matches!(
-            jws.verify(&jwks(key())),
-            Err(JoseError::UnreadableSignature(_))
-        ),
-        "{:?}",
-        jws.verify(&jwks(key()))
+        matches!(error, JoseError::UnreadableSignature(_)),
+        "{error:?}"
     );
 }
 
 #[test]
 fn signature_from_another_key_is_rejected() {
     let other = SigningKey::generate().unwrap();
-    let jws = Jws::parse(&other.sign(None, &json!({})).unwrap(), PS256).unwrap();
+    let jws = UnverifiedJws::parse(&other.sign(None, &json!({})).unwrap(), PS256).unwrap();
     // Different kid, so no key is even a candidate.
-    assert_eq!(jws.verify(&jwks(key())), Err(JoseError::NoMatchingKey));
+    assert_eq!(
+        jws.verify(&jwks(key())).unwrap_err(),
+        JoseError::NoMatchingKey
+    );
 }
 
 #[test]
@@ -70,7 +74,7 @@ fn alg_none_and_unlisted_algs_are_rejected() {
         let header = b64url(json!({"alg": alg}).to_string());
         let token = format!("{header}.{}.sig", b64url("{}"));
         assert_eq!(
-            Jws::parse(&token, PS256).unwrap_err(),
+            UnverifiedJws::parse(&token, PS256).unwrap_err(),
             JoseError::UnsupportedAlg(alg.to_owned()),
             "{alg}"
         );
@@ -79,7 +83,7 @@ fn alg_none_and_unlisted_algs_are_rejected() {
     let header = b64url(json!({"alg": "ES256"}).to_string());
     let token = format!("{header}.{}.sig", b64url("{}"));
     assert!(matches!(
-        Jws::parse(&token, PS256),
+        UnverifiedJws::parse(&token, PS256),
         Err(JoseError::UnsupportedAlg(_))
     ));
 }
@@ -103,7 +107,7 @@ fn malformed_tokens_are_rejected() {
         ),
     ] {
         assert!(
-            matches!(Jws::parse(&bad, PS256), Err(JoseError::Malformed(_))),
+            matches!(UnverifiedJws::parse(&bad, PS256), Err(JoseError::Malformed(_))),
             "{bad}"
         );
     }
@@ -111,33 +115,33 @@ fn malformed_tokens_are_rejected() {
 
 #[test]
 fn key_selection_honours_use_alg_and_kid() {
-    let jws = Jws::parse(&token(&json!({})), PS256).unwrap();
+    let jws = UnverifiedJws::parse(&token(&json!({})), PS256).unwrap();
 
     let mut enc_only = key().public_jwk().clone();
     enc_only.common.public_key_use = Some(PublicKeyUse::Encryption);
     assert_eq!(
-        jws.verify(&JwkSet {
-            keys: vec![enc_only]
-        }),
-        Err(JoseError::NoMatchingKey)
+        jws.clone()
+            .verify(&JwkSet { keys: vec![enc_only] })
+            .unwrap_err(),
+        JoseError::NoMatchingKey
     );
 
     let mut wrong_alg = key().public_jwk().clone();
     wrong_alg.common.key_algorithm = Some(jsonwebtoken::jwk::KeyAlgorithm::RS256);
     assert_eq!(
-        jws.verify(&JwkSet {
-            keys: vec![wrong_alg]
-        }),
-        Err(JoseError::NoMatchingKey)
+        jws.clone()
+            .verify(&JwkSet { keys: vec![wrong_alg] })
+            .unwrap_err(),
+        JoseError::NoMatchingKey
     );
 
     let mut wrong_kid = key().public_jwk().clone();
     wrong_kid.common.key_id = Some("other".into());
     assert_eq!(
-        jws.verify(&JwkSet {
-            keys: vec![wrong_kid]
-        }),
-        Err(JoseError::NoMatchingKey)
+        jws.clone()
+            .verify(&JwkSet { keys: vec![wrong_kid] })
+            .unwrap_err(),
+        JoseError::NoMatchingKey
     );
 }
 
@@ -149,7 +153,7 @@ fn duplicate_kids_are_resolved_by_trying_each_candidate() {
     let set = JwkSet {
         keys: vec![impostor, key().public_jwk().clone()],
     };
-    Jws::parse(&token(&json!({})), PS256)
+    UnverifiedJws::parse(&token(&json!({})), PS256)
         .unwrap()
         .verify(&set)
         .unwrap();
@@ -168,7 +172,10 @@ fn weak_rsa_keys_are_not_usable() {
 
 #[test]
 fn time_claims_accept_integers_and_floats_only() {
-    let jws = Jws::parse(&token(&json!({"a": 5, "b": 5.9, "c": "5"})), PS256).unwrap();
+    let jws = UnverifiedJws::parse(&token(&json!({"a": 5, "b": 5.9, "c": "5"})), PS256)
+        .unwrap()
+        .verify(&jwks(key()))
+        .unwrap();
     assert_eq!(jws.time_claim("a"), Some(5));
     assert_eq!(jws.time_claim("b"), Some(5));
     assert_eq!(jws.time_claim("c"), None);

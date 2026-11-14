@@ -497,19 +497,20 @@ async fn protocol_claims_can_be_overridden_for_negative_testing() {
         .json::<jsonwebtoken::jwk::JwkSet>()
         .await
         .unwrap();
-    let jws = oxid::jose::Jws::parse(
+    let jws = oxid::jose::UnverifiedJws::parse(
         tokens["id_token"].as_str().unwrap(),
         &[oxid::jose::SigningAlg::PS256],
     )
+    .unwrap()
+    .verify(&jwks)
     .unwrap();
-    jws.verify(&jwks).unwrap();
     assert_eq!(
         jws.str_claim("iss"),
         Some("https://wrong-issuer.example.com")
     );
-    assert_eq!(jws.claims["exp"], 1);
+    assert_eq!(jws.claims()["exp"], 1);
     assert_eq!(jws.str_claim("at_hash"), Some("deliberately-wrong"));
-    assert!(!jws.claims.contains_key("nonce"));
+    assert!(!jws.claims().contains_key("nonce"));
     op.stop().await;
 }
 

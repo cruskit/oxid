@@ -93,26 +93,51 @@ pub enum JoseError {
     Signing(String),
 }
 
-/// A parsed, not-yet-verified compact JWS whose payload is a JSON object.
+/// The protected header of a JWS: what may be read before the signature is
+/// checked.
 #[derive(Debug, Clone)]
 #[cfg_attr(
     not(feature = "test-util"),
     expect(unreachable_pub, reason = "the integration tests use it")
 )]
-pub struct Jws {
+pub struct JwsHeader {
     pub alg: SigningAlg,
     pub kid: Option<String>,
     pub typ: Option<String>,
-    pub claims: Map<String, Value>,
+}
+
+/// A parsed compact JWS whose signature has **not** been checked.
+///
+/// Its claims cannot be read: only the header, and the issuer under the
+/// name [`UnverifiedJws::unverified_issuer`], which a caller needs to find
+/// the keys to verify with. [`UnverifiedJws::verify`] consumes it and
+/// returns a [`VerifiedJws`], the only way to the claims.
+#[derive(Debug, Clone)]
+#[cfg_attr(
+    not(feature = "test-util"),
+    expect(unreachable_pub, reason = "the integration tests use it")
+)]
+pub struct UnverifiedJws {
+    header: JwsHeader,
+    claims: Map<String, Value>,
     signing_input: String,
     signature: String,
 }
 
-impl Jws {
+/// A JWS whose signature has been verified, with its claims.
+#[derive(Debug, Clone)]
+#[cfg_attr(
+    not(feature = "test-util"),
+    expect(unreachable_pub, reason = "the integration tests use it")
+)]
+pub struct VerifiedJws {
+    header: JwsHeader,
+    claims: Map<String, Value>,
+}
+
+impl UnverifiedJws {
     /// Split and decode a compact JWS, checking its `alg` against `allowed`.
-    ///
-    /// No signature verification happens here; call [`Jws::verify`] before
-    /// trusting any claim.
+    /// No signature verification happens here.
     #[cfg_attr(
         not(feature = "test-util"),
         expect(unreachable_pub, reason = "the integration tests use it")
@@ -155,13 +180,44 @@ impl Jws {
 
         let str_header = |name: &str| header.get(name).and_then(Value::as_str).map(str::to_owned);
         Ok(Self {
-            alg,
-            kid: str_header("kid"),
-            typ: str_header("typ"),
+            header: JwsHeader {
+                alg,
+                kid: str_header("kid"),
+                typ: str_header("typ"),
+            },
             claims,
             signing_input: format!("{header_b64}.{payload_b64}"),
             signature: signature.to_owned(),
         })
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    #[cfg_attr(
+        not(feature = "test-util"),
+        expect(unreachable_pub, reason = "the integration tests use it")
+    )]
+    pub fn header(&self) -> &JwsHeader {
+        &self.header
+    }
+
+    /// The `iss` claim, **before** the signature is checked: only for
+    /// choosing whose keys to verify with. Never trust it otherwise.
+    #[cfg_attr(
+        not(feature = "test-util"),
+        expect(unreachable_pub, reason = "the integration tests use it")
+    )]
+    pub fn unverified_issuer(&self) -> Option<&str> {
+        self.claims.get("iss").and_then(Value::as_str)
+    }
+
+    /// The claims without checking the signature. Unit tests only, for
+    /// looking inside a token whose signature is not what they test.
+    #[cfg(test)]
+    pub(crate) fn skip_verification_in_tests(self) -> VerifiedJws {
+        VerifiedJws {
+            header: self.header,
+            claims: self.claims,
+        }
     }
 
     /// Verify the signature against a key from `keys`.
@@ -173,7 +229,7 @@ impl Jws {
         not(feature = "test-util"),
         expect(unreachable_pub, reason = "the integration tests use it")
     )]
-    pub fn verify(&self, keys: &JwkSet) -> Result<(), JoseError> {
+    pub fn verify(self, keys: &JwkSet) -> Result<VerifiedJws, JoseError> {
         let mut outcome = Err(JoseError::NoMatchingKey);
         for jwk in keys.keys.iter().filter(|jwk| self.key_is_candidate(jwk)) {
             let Ok(key) = DecodingKey::from_jwk(jwk) else {
@@ -183,9 +239,14 @@ impl Jws {
                 &self.signature,
                 self.signing_input.as_bytes(),
                 &key,
-                self.alg.algorithm(),
+                self.header.alg.algorithm(),
             ) {
-                Ok(true) => return Ok(()),
+                Ok(true) => {
+                    return Ok(VerifiedJws {
+                        header: self.header,
+                        claims: self.claims,
+                    });
+                }
                 // A wrong signature outranks an unreadable one: it is the
                 // more useful thing to report when keys disagree.
                 Ok(false) => outcome = Err(JoseError::BadSignature),
@@ -200,7 +261,7 @@ impl Jws {
     }
 
     fn key_is_candidate(&self, jwk: &Jwk) -> bool {
-        if let Some(kid) = &self.kid
+        if let Some(kid) = &self.header.kid
             && jwk.common.key_id.as_deref() != Some(kid.as_str())
         {
             return false;
@@ -209,11 +270,38 @@ impl Jws {
             return false;
         }
         if let Some(key_alg) = jwk.common.key_algorithm
-            && key_alg.to_string() != self.alg.as_str()
+            && key_alg.to_string() != self.header.alg.as_str()
         {
             return false;
         }
-        key_supports_alg(jwk, self.alg)
+        key_supports_alg(jwk, self.header.alg)
+    }
+
+}
+
+impl VerifiedJws {
+    #[cfg_attr(
+        not(feature = "test-util"),
+        expect(unreachable_pub, reason = "the integration tests use it")
+    )]
+    pub fn header(&self) -> &JwsHeader {
+        &self.header
+    }
+
+    #[cfg_attr(
+        not(feature = "test-util"),
+        expect(unreachable_pub, reason = "the integration tests use it")
+    )]
+    pub fn claims(&self) -> &Map<String, Value> {
+        &self.claims
+    }
+
+    #[cfg_attr(
+        not(feature = "test-util"),
+        expect(unreachable_pub, reason = "the integration tests use it")
+    )]
+    pub fn into_claims(self) -> Map<String, Value> {
+        self.claims
     }
 
     /// A string claim, if present and a string.

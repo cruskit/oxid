@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::client::{Client, ClientRegistry};
 use crate::error::OAuthError;
-use crate::jose::{Jws, SigningAlg};
+use crate::jose::{SigningAlg, UnverifiedJws};
 
 pub(crate) const ASSERTION_TYPE: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
 
@@ -59,19 +59,20 @@ pub(crate) fn authenticate(
         return Err(bad("client_assertion_type must be the jwt-bearer type"));
     }
 
-    let jws = Jws::parse(assertion, ALLOWED_ALGS)
+    let unverified = UnverifiedJws::parse(assertion, ALLOWED_ALGS)
         .map_err(|e| OAuthError::invalid_client(e.to_string()))?;
 
     // `iss` selects the client whose keys verify the signature; nothing else
     // in the assertion is trusted until that has happened.
-    let claimed = jws
-        .str_claim("iss")
+    let claimed = unverified
+        .unverified_issuer()
         .ok_or_else(|| bad("assertion has no iss"))?;
     if credentials.client_id.is_some_and(|id| id != claimed) {
         return Err(bad("client_id does not match the assertion issuer"));
     }
     let client = clients.get(claimed).ok_or_else(|| bad("unknown client"))?;
-    jws.verify(&client.jwks)
+    let jws = unverified
+        .verify(&client.jwks)
         .map_err(|e| OAuthError::invalid_client(e.to_string()))?;
 
     if jws.str_claim("sub") != Some(client.id.as_str()) {
@@ -79,7 +80,7 @@ pub(crate) fn authenticate(
     }
     // FAPI 2.0 §5.3.2.1-8: the audience must be the issuer identifier, as a
     // single string. Endpoint URLs and arrays are not accepted.
-    if jws.claims.get("aud") != Some(&Value::String(issuer.to_owned())) {
+    if jws.claims().get("aud") != Some(&Value::String(issuer.to_owned())) {
         return Err(bad(
             "assertion aud must be the issuer identifier as a string",
         ));

@@ -17,7 +17,7 @@ use std::net::TcpListener;
 use std::sync::Arc;
 
 use oxid::config::{ClientConfig, Config};
-use oxid::jose::{Jws, SigningAlg};
+use oxid::jose::{SigningAlg, UnverifiedJws};
 use oxid::keys::SigningKey;
 use oxid::server::{Server, ServerBuilder};
 use oxid::tls::TlsIdentity;
@@ -453,10 +453,11 @@ impl TestOp {
             .json::<jsonwebtoken::jwk::JwkSet>()
             .await
             .unwrap();
-        let jws = Jws::parse(id_token, &[SigningAlg::PS256]).expect("well-formed PS256 ID token");
-        jws.verify(&jwks)
-            .expect("ID token signature verifies against published JWKS");
-        jws.claims
+        UnverifiedJws::parse(id_token, &[SigningAlg::PS256])
+            .expect("well-formed PS256 ID token")
+            .verify(&jwks)
+            .expect("ID token signature verifies against published JWKS")
+            .into_claims()
     }
 }
 

@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 
 use crate::client_auth::ASSERTION_TYPE;
 use crate::http::PATH_TOKEN;
-use crate::jose::{Jws, SigningAlg};
+use crate::jose::{SigningAlg, UnverifiedJws};
 use crate::testing::VERIFIER;
 use crate::testing::http::approve;
 use crate::testing::http::{CERT, Harness, json_body};
@@ -57,8 +57,10 @@ async fn code_exchange_returns_bound_tokens_and_a_valid_id_token() {
         .unwrap();
     assert_eq!(stored.cert_thumbprint, CERT);
 
-    let jws = Jws::parse(body["id_token"].as_str().unwrap(), &[SigningAlg::PS256]).unwrap();
-    jws.verify(&harness.state.signing_key.jwks()).unwrap();
+    let jws = UnverifiedJws::parse(body["id_token"].as_str().unwrap(), &[SigningAlg::PS256])
+        .unwrap()
+        .verify(&harness.state.signing_key.jwks())
+        .unwrap();
     assert_eq!(jws.str_claim("iss"), Some(ISSUER));
     assert_eq!(jws.str_claim("aud"), Some("rp"));
     assert_eq!(jws.str_claim("nonce"), Some("n-1"));
@@ -90,15 +92,17 @@ async fn requested_id_token_claims_are_returned() {
         }}}),
     )
     .await;
-    let jws = Jws::parse(body["id_token"].as_str().unwrap(), &[SigningAlg::PS256]).unwrap();
+    let jws = UnverifiedJws::parse(body["id_token"].as_str().unwrap(), &[SigningAlg::PS256])
+        .unwrap()
+        .skip_verification_in_tests();
     assert_eq!(jws.str_claim("given_name"), Some("Alex"));
     assert_eq!(jws.str_claim("family_name"), Some("Citizen"));
     assert_eq!(
-        jws.claims["verified_claims"]["verification"]["trust_framework"],
+        jws.claims()["verified_claims"]["verification"]["trust_framework"],
         "au_connectid"
     );
-    assert_eq!(jws.claims["verified_claims"]["claims"]["over18"], true);
-    assert!(!jws.claims.contains_key("email"));
+    assert_eq!(jws.claims()["verified_claims"]["claims"]["over18"], true);
+    assert!(!jws.claims().contains_key("email"));
 }
 
 #[tokio::test]
@@ -122,12 +126,14 @@ async fn declined_claims_are_left_out_of_tokens_and_userinfo() {
     // given_name is essential, so trying to decline it changes nothing.
     let code = approve_declining(&harness, &uri, &["email", "over21", "given_name"]).await;
     let body = json_body(exchange(&harness, Some(CERT), &code).await).await;
-    let jws = Jws::parse(body["id_token"].as_str().unwrap(), &[SigningAlg::PS256]).unwrap();
+    let jws = UnverifiedJws::parse(body["id_token"].as_str().unwrap(), &[SigningAlg::PS256])
+        .unwrap()
+        .skip_verification_in_tests();
     assert_eq!(jws.str_claim("given_name"), Some("Alex"));
     assert_eq!(jws.str_claim("family_name"), Some("Citizen"));
-    assert!(!jws.claims.contains_key("email"));
+    assert!(!jws.claims().contains_key("email"));
     assert_eq!(
-        jws.claims["verified_claims"]["claims"],
+        jws.claims()["verified_claims"]["claims"],
         json!({"over18": true})
     );
 
