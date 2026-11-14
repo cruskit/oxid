@@ -17,6 +17,7 @@ use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, crypto};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::epoch::Timestamp;
 use crate::util::{b64url, b64url_decode};
 
 /// Minimum RSA modulus size accepted, in bits (FAPI 2.0 §5.4.1).
@@ -322,14 +323,17 @@ impl VerifiedJws {
         not(feature = "test-util"),
         expect(unreachable_pub, reason = "the integration tests use it")
     )]
-    pub fn time_claim(&self, name: &str) -> Option<i64> {
+    pub fn time_claim(&self, name: &str) -> Option<Timestamp> {
         let value = self.claims.get(name)?;
-        value.as_i64().or_else(|| {
-            value
-                .as_f64()
-                .filter(|f| f.is_finite())
-                .map(|f| f.floor() as i64)
-        })
+        value
+            .as_i64()
+            .or_else(|| {
+                value
+                    .as_f64()
+                    .filter(|f| f.is_finite())
+                    .map(|f| f.floor() as i64)
+            })
+            .map(Timestamp::from_unix)
     }
 }
 

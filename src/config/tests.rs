@@ -1,4 +1,5 @@
 use super::*;
+use crate::epoch::Seconds;
 
 fn minimal() -> Config {
     toml::from_str(
@@ -14,9 +15,12 @@ fn minimal() -> Config {
 fn minimal_config_gets_compliant_defaults() {
     let config = minimal();
     config.validate().unwrap();
-    assert_eq!(config.security.access_token_ttl, 300);
-    assert_eq!(config.security.authorization_code_ttl, 60);
-    assert_eq!(config.security.request_object_max_lifetime, 600);
+    assert_eq!(config.security.access_token_ttl, Seconds::new(300));
+    assert_eq!(config.security.authorization_code_ttl, Seconds::new(60));
+    assert_eq!(
+        config.security.request_object_max_lifetime,
+        Seconds::new(600)
+    );
     assert!(config.clients.is_empty());
     assert!(config.users.is_empty());
     assert_eq!(config.experience, crate::experience::Kind::Technical);
@@ -96,17 +100,27 @@ fn issuer_must_be_a_clean_https_url() {
 fn lifetimes_cannot_exceed_profile_limits() {
     type Setter = fn(&mut SecurityConfig);
     let cases: [(&str, Setter); 9] = [
-        ("access token over 10 minutes", |s| s.access_token_ttl = 601),
-        ("code over 60 seconds", |s| s.authorization_code_ttl = 61),
-        ("request_uri at 600 seconds", |s| s.request_uri_ttl = 600),
-        ("no session time", |s| s.session_ttl = 0),
-        ("session over an hour", |s| s.session_ttl = 3601),
-        ("request object lifetime", |s| {
-            s.request_object_max_lifetime = 601;
+        ("access token over 10 minutes", |s| {
+            s.access_token_ttl = Seconds::new(601);
         }),
-        ("request object age", |s| s.request_object_max_age = 601),
-        ("skew below 10", |s| s.clock_skew = 9),
-        ("skew above 60", |s| s.clock_skew = 61),
+        ("code over 60 seconds", |s| {
+            s.authorization_code_ttl = Seconds::new(61);
+        }),
+        ("request_uri at 600 seconds", |s| {
+            s.request_uri_ttl = Seconds::new(600);
+        }),
+        ("no session time", |s| s.session_ttl = Seconds::new(0)),
+        ("session over an hour", |s| {
+            s.session_ttl = Seconds::new(3601);
+        }),
+        ("request object lifetime", |s| {
+            s.request_object_max_lifetime = Seconds::new(601);
+        }),
+        ("request object age", |s| {
+            s.request_object_max_age = Seconds::new(601);
+        }),
+        ("skew below 10", |s| s.clock_skew = Seconds::new(9)),
+        ("skew above 60", |s| s.clock_skew = Seconds::new(61)),
     ];
     for (name, set) in cases {
         let mut config = minimal();
@@ -287,4 +301,16 @@ fn relative_paths_resolve_against_the_config_directory() {
     );
     assert_eq!(config.clients[0].scopes, ["openid"]);
     assert_eq!(config.clients[0].grant_types, ["authorization_code"]);
+}
+
+#[test]
+fn token_lifetimes_have_upper_bounds() {
+    let mut config = minimal();
+    config.security.refresh_token_ttl = MAX_REFRESH_TOKEN_TTL + Seconds::new(1);
+    assert!(config.validate().is_err(), "refresh_token_ttl is bounded");
+    config.security.refresh_token_ttl = MAX_REFRESH_TOKEN_TTL;
+    config.validate().unwrap();
+
+    config.security.id_token_ttl = MAX_ID_TOKEN_TTL + Seconds::new(1);
+    assert!(config.validate().is_err(), "id_token_ttl is bounded");
 }

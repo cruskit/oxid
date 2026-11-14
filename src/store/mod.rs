@@ -25,6 +25,7 @@ use crate::authz::AuthorizationRequest;
 use crate::claims::ClaimsRequest;
 
 use crate::error::{BoxError, OAuthError};
+use crate::epoch::{Seconds, Timestamp};
 use crate::util::{b64url, random_token, sha256};
 
 #[cfg(feature = "aws")]
@@ -44,11 +45,11 @@ pub(crate) const MAX_FAILED_LOGINS: u32 = 5;
 
 /// How long an expired session is remembered, so that the user can still be
 /// told what happened and be sent back to the client with an error.
-pub(crate) const EXPIRED_SESSION_RETENTION: i64 = 60 * 60;
+pub(crate) const EXPIRED_SESSION_RETENTION: Seconds = Seconds::hours(1);
 
 /// How long a user has to finish once they arrive, when nothing else is
 /// configured (`security.session_ttl`).
-pub(crate) const DEFAULT_SESSION_TTL: i64 = 300;
+pub(crate) const DEFAULT_SESSION_TTL: Seconds = Seconds::minutes(5);
 
 /// Consent records kept before the oldest are dropped.
 pub(crate) const MAX_CONSENT_RECORDS: usize = 10_000;
@@ -61,7 +62,7 @@ pub(crate) struct PushedRequest {
     pub request_object: String,
     /// When the `request_uri` stops being accepted from a browser that has
     /// not yet arrived (RFC 9126 §2.2 `expires_in`).
-    pub expires_at: i64,
+    pub expires_at: Timestamp,
     /// Kept by the backend as the record's counter, not in the stored value.
     #[serde(skip)]
     pub failed_logins: u32,
@@ -93,7 +94,7 @@ impl std::fmt::Debug for PushedRequest {
 /// long the user has to sign in and decide.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Session {
-    pub expires_at: i64,
+    pub expires_at: Timestamp,
     /// Set once the user has signed in during this session.
     #[serde(default)]
     pub signed_in: Option<SignedIn>,
@@ -162,7 +163,7 @@ pub(crate) struct Grant {
     /// The claims the user agreed to share. Nothing else is ever released
     /// under this grant.
     pub shared_claims: BTreeSet<String>,
-    pub auth_time: i64,
+    pub auth_time: Timestamp,
     /// Transaction identifier returned as the `txn` claim (ConnectID).
     pub txn: String,
     /// The purpose the client gave for this transaction, if any.
@@ -195,7 +196,7 @@ pub(crate) struct ConsentRecord {
     pub claims: Vec<String>,
     /// Names of the voluntary claims the user declined to share.
     pub declined: Vec<String>,
-    pub decided_at: i64,
+    pub decided_at: Timestamp,
     pub outcome: ConsentOutcome,
 }
 
@@ -205,7 +206,7 @@ pub(crate) struct AuthorizationCode {
     pub redirect_uri: String,
     pub code_challenge: String,
     pub nonce: Option<String>,
-    pub expires_at: i64,
+    pub expires_at: Timestamp,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -214,13 +215,13 @@ pub(crate) struct AccessToken {
     /// SHA-256 thumbprint of the client certificate the token is bound to
     /// (RFC 8705 §3).
     pub cert_thumbprint: String,
-    pub expires_at: i64,
+    pub expires_at: Timestamp,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RefreshToken {
     pub grant: Grant,
-    pub expires_at: i64,
+    pub expires_at: Timestamp,
 }
 
 /// Outcome of presenting an authorization code.
@@ -269,13 +270,13 @@ pub(crate) struct Record {
     pub value: String,
     /// When the record stops being valid (seconds since the epoch). `None`
     /// for records that are kept indefinitely.
-    pub expires_at: Option<i64>,
+    pub expires_at: Option<Timestamp>,
     /// How many times [`Backend::increment`] has been called on it.
     pub count: u64,
 }
 
 impl Record {
-    fn live(&self, now: i64) -> bool {
+    fn live(&self, now: Timestamp) -> bool {
         self.expires_at.is_none_or(|at| at > now)
     }
 }
@@ -295,7 +296,7 @@ pub(crate) trait Backend: std::fmt::Debug + Send + Sync {
         &'a self,
         key: &'a str,
         value: String,
-        expires_at: Option<i64>,
+        expires_at: Option<Timestamp>,
     ) -> BackendFuture<'a, ()>;
 
     /// Write `value` only if `key` is absent or its record expired at or
@@ -304,8 +305,8 @@ pub(crate) trait Backend: std::fmt::Debug + Send + Sync {
         &'a self,
         key: &'a str,
         value: String,
-        expires_at: Option<i64>,
-        now: i64,
+        expires_at: Option<Timestamp>,
+        now: Timestamp,
     ) -> BackendFuture<'a, bool>;
 
     fn get<'a>(&'a self, key: &'a str) -> BackendFuture<'a, Option<Record>>;
@@ -325,7 +326,7 @@ pub(crate) trait Backend: std::fmt::Debug + Send + Sync {
         &'a self,
         partition: &'a str,
         id: &'a str,
-        at: i64,
+        at: Timestamp,
         value: String,
     ) -> BackendFuture<'a, ()>;
 
@@ -341,21 +342,23 @@ pub(crate) trait Backend: std::fmt::Debug + Send + Sync {
 
     /// Drop everything that expired at or before `now`. Backends that
     /// expire records themselves need do nothing.
-    fn purge(&self, now: i64) -> BackendFuture<'_, ()>;
+    fn purge(&self, now: Timestamp) -> BackendFuture<'_, ()>;
 }
 
 /// How long a revoked grant is remembered when nothing better is known:
 /// the default refresh token lifetime plus the longest access token one.
-const DEFAULT_GRANT_LIFETIME: i64 = 24 * 60 * 60 + crate::config::MAX_ACCESS_TOKEN_TTL;
+const DEFAULT_GRANT_LIFETIME: Seconds = Seconds::new(
+    Seconds::days(1).get() + crate::config::MAX_ACCESS_TOKEN_TTL.get(),
+);
 
 #[derive(Debug, Clone)]
 pub(crate) struct Store {
     backend: Arc<dyn Backend>,
     /// The longest any token of a grant can outlive the grant's code. A
     /// revocation is remembered for this long.
-    grant_lifetime: i64,
+    grant_lifetime: Seconds,
     /// How long a user has at the authorization endpoint once they arrive.
-    session_ttl: i64,
+    session_ttl: Seconds,
 }
 
 impl Default for Store {
@@ -424,7 +427,7 @@ impl Store {
     /// Set how long a user has at the authorization endpoint once they
     /// arrive with a valid `request_uri`.
     #[must_use]
-    pub(crate) fn session_ttl(mut self, seconds: i64) -> Self {
+    pub(crate) fn session_ttl(mut self, seconds: Seconds) -> Self {
         self.session_ttl = seconds;
         self
     }
@@ -432,7 +435,7 @@ impl Store {
     /// Set how long a revoked grant is remembered: at least as long as its
     /// longest-lived token.
     #[must_use]
-    pub(crate) fn grant_lifetime(mut self, seconds: i64) -> Self {
+    pub(crate) fn grant_lifetime(mut self, seconds: Seconds) -> Self {
         self.grant_lifetime = seconds;
         self
     }
@@ -442,7 +445,7 @@ impl Store {
         &self,
         request: AuthorizationRequest,
         request_object: String,
-        expires_at: i64,
+        expires_at: Timestamp,
     ) -> StoreResult<String> {
         let uri = format!("{REQUEST_URI_PREFIX}{}", random_token(SECRET_BYTES));
         let pushed = PushedRequest {
@@ -461,7 +464,7 @@ impl Store {
         Ok(uri)
     }
 
-    fn pushed(record: Option<Record>, now: i64) -> StoreResult<Option<PushedRequest>> {
+    fn pushed(record: Option<Record>, now: Timestamp) -> StoreResult<Option<PushedRequest>> {
         let Some(record) = record.filter(|record| record.live(now)) else {
             return Ok(None);
         };
@@ -476,7 +479,7 @@ impl Store {
     pub(crate) async fn peek_request(
         &self,
         request_uri: &str,
-        now: i64,
+        now: Timestamp,
     ) -> StoreResult<Option<PushedRequest>> {
         Ok(Self::pushed(self.backend.get(&request_key(request_uri)).await?, now)?
             .filter(|pushed| !pushed.is_exhausted()))
@@ -490,7 +493,7 @@ impl Store {
             .transpose()
     }
 
-    fn visit(pushed: PushedRequest, session: Session, now: i64) -> Visit {
+    fn visit(pushed: PushedRequest, session: Session, now: Timestamp) -> Visit {
         if session.expires_at > now {
             Visit::Active(Box::new(pushed), session)
         } else {
@@ -509,7 +512,7 @@ impl Store {
     ///
     /// Returns `None` if the request is unknown, already used, or expired
     /// before any browser arrived.
-    pub(crate) async fn arrive(&self, request_uri: &str, now: i64) -> StoreResult<Option<Visit>> {
+    pub(crate) async fn arrive(&self, request_uri: &str, now: Timestamp) -> StoreResult<Option<Visit>> {
         let Some(pushed) = self.peek_request(request_uri, now).await? else {
             return Ok(None);
         };
@@ -545,7 +548,7 @@ impl Store {
     /// The pushed request and session for a form submission. Unlike
     /// [`Store::arrive`] this never starts a session: a form can only come
     /// from a page that was shown within one.
-    pub(crate) async fn resume(&self, request_uri: &str, now: i64) -> StoreResult<Option<Visit>> {
+    pub(crate) async fn resume(&self, request_uri: &str, now: Timestamp) -> StoreResult<Option<Visit>> {
         let Some(pushed) = self.peek_request(request_uri, now).await? else {
             return Ok(None);
         };
@@ -587,7 +590,7 @@ impl Store {
         &self,
         request_uri: &str,
         plan: &PlannedResponse,
-        expires_at: i64,
+        expires_at: Timestamp,
     ) -> StoreResult<()> {
         self.backend
             .put(&plan_key(request_uri), encode(plan)?, Some(expires_at))
@@ -598,7 +601,7 @@ impl Store {
     pub(crate) async fn planned_response(
         &self,
         request_uri: &str,
-        now: i64,
+        now: Timestamp,
     ) -> StoreResult<Option<PlannedResponse>> {
         self.live(&plan_key(request_uri), now).await
     }
@@ -616,7 +619,7 @@ impl Store {
     pub(crate) async fn take_request(
         &self,
         request_uri: &str,
-        now: i64,
+        now: Timestamp,
     ) -> StoreResult<Option<PushedRequest>> {
         Self::pushed(self.backend.take(&request_key(request_uri)).await?, now)
     }
@@ -651,7 +654,7 @@ impl Store {
         &self,
         code: &str,
         client_id: &str,
-        now: i64,
+        now: Timestamp,
     ) -> StoreResult<CodeRedemption> {
         let key = code_key(code);
         let Some(record) = self.backend.get(&key).await? else {
@@ -682,7 +685,7 @@ impl Store {
 
     /// Revoke every token of a grant, by recording that it is revoked;
     /// token lookups check the record.
-    async fn revoke_grant(&self, grant_id: &str, now: i64) -> StoreResult<()> {
+    async fn revoke_grant(&self, grant_id: &str, now: Timestamp) -> StoreResult<()> {
         self.backend
             .put(
                 &revoked_key(grant_id),
@@ -692,7 +695,7 @@ impl Store {
             .await
     }
 
-    async fn revoked(&self, grant_id: &str, now: i64) -> StoreResult<bool> {
+    async fn revoked(&self, grant_id: &str, now: Timestamp) -> StoreResult<bool> {
         Ok(self
             .backend
             .get(&revoked_key(grant_id))
@@ -700,7 +703,7 @@ impl Store {
             .is_some_and(|record| record.live(now)))
     }
 
-    async fn live<T: DeserializeOwned>(&self, key: &str, now: i64) -> StoreResult<Option<T>> {
+    async fn live<T: DeserializeOwned>(&self, key: &str, now: Timestamp) -> StoreResult<Option<T>> {
         match self.backend.get(key).await? {
             Some(record) if record.live(now) => decode(&record.value).map(Some),
             _ => Ok(None),
@@ -715,7 +718,7 @@ impl Store {
         Ok(value)
     }
 
-    pub(crate) async fn access_token(&self, token: &str, now: i64) -> StoreResult<Option<AccessToken>> {
+    pub(crate) async fn access_token(&self, token: &str, now: Timestamp) -> StoreResult<Option<AccessToken>> {
         let Some(found) = self.live::<AccessToken>(&access_key(token), now).await? else {
             return Ok(None);
         };
@@ -737,7 +740,7 @@ impl Store {
         Ok(value)
     }
 
-    pub(crate) async fn refresh_token(&self, token: &str, now: i64) -> StoreResult<Option<RefreshToken>> {
+    pub(crate) async fn refresh_token(&self, token: &str, now: Timestamp) -> StoreResult<Option<RefreshToken>> {
         let Some(found) = self.live::<RefreshToken>(&refresh_key(token), now).await? else {
             return Ok(None);
         };
@@ -753,8 +756,8 @@ impl Store {
         &self,
         client_id: &str,
         jti: &str,
-        expires_at: i64,
-        now: i64,
+        expires_at: Timestamp,
+        now: Timestamp,
     ) -> StoreResult<bool> {
         // Hashed: both parts are chosen by the client and may be long.
         let key = format!("jti#{}", digest(&format!("{client_id}\n{jti}")));
@@ -834,7 +837,9 @@ impl Store {
             source: source.into(),
         })?;
         // Secrets never expire, so `now` is irrelevant to the condition.
-        self.backend.put_new(&key, candidate, None, 0).await?;
+        self.backend
+            .put_new(&key, candidate, None, Timestamp::default())
+            .await?;
         self.backend
             .get(&key)
             .await?
@@ -845,7 +850,7 @@ impl Store {
     }
 
     /// Drop everything that has expired. Called periodically.
-    pub(crate) async fn purge(&self, now: i64) -> StoreResult<()> {
+    pub(crate) async fn purge(&self, now: Timestamp) -> StoreResult<()> {
         self.backend.purge(now).await
     }
 }

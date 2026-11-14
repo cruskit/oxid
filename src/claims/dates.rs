@@ -1,11 +1,12 @@
 //! Calendar dates: birthdates and ages.
 
+use crate::epoch::Timestamp;
 use time::{Date, Month};
 
-/// The calendar date in `zone` at `unix_seconds`. Ages turn over at local
+/// The calendar date in `zone` at `at`. Ages turn over at local
 /// midnight, not at midnight UTC, which in Australia is 8 to 11 hours later.
-pub(crate) fn local_date(unix_seconds: i64, zone: &jiff::tz::TimeZone) -> Option<Date> {
-    let date = jiff::Timestamp::from_second(unix_seconds)
+pub(crate) fn local_date(at: Timestamp, zone: &jiff::tz::TimeZone) -> Option<Date> {
+    let date = jiff::Timestamp::from_second(at.unix())
         .ok()?
         .to_zoned(zone.clone())
         .date();

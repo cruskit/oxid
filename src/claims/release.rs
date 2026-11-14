@@ -9,6 +9,7 @@ use super::catalogue::{
     TRUST_FRAMEWORK, VERIFIED_CLAIMS, age_threshold, is_standard, scope_claims,
 };
 use super::dates::{age_on, local_date, parse_date};
+use crate::epoch::Timestamp;
 use crate::client::Client;
 use crate::user::User;
 
@@ -26,7 +27,7 @@ pub(crate) fn release(
     requested: &Map<String, Value>,
     scopes: &[String],
     shared: &BTreeSet<String>,
-    now: i64,
+    now: Timestamp,
 ) -> Map<String, Value> {
     let mut out = Map::new();
     let wanted = requested
@@ -100,7 +101,7 @@ pub(super) fn verified_claims(
     client: &Client,
     requested: &Map<String, Value>,
     shared: &BTreeSet<String>,
-    now: i64,
+    now: Timestamp,
 ) -> Map<String, Value> {
     let age = user
         .claims

@@ -9,6 +9,7 @@ use url::Url;
 
 use super::no_store;
 use crate::cookie::{SameSite, SetCookie};
+use crate::epoch::Seconds;
 use crate::experience::render;
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -107,7 +108,7 @@ pub(super) struct Shell<'a> {
     /// [`content_security_policy`].
     pub redirect_to: Option<&'a str>,
     /// Replace the page with `url` after this many seconds.
-    pub refresh: Option<(i64, String)>,
+    pub refresh: Option<(Seconds, String)>,
     pub wide: bool,
 }
 
@@ -120,7 +121,7 @@ impl Shell<'_> {
         // browsers, such as the conformance suite's, follow those at once.
         let reload = self.refresh.as_ref().map(|(after, url)| Reload {
             url,
-            after_ms: after.saturating_mul(1000),
+            after_ms: after.millis(),
         });
         let scripts: Vec<&str> = self.script.into_iter().collect();
         let policy = content_security_policy(

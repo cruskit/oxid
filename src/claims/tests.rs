@@ -1,3 +1,4 @@
+use crate::epoch::{Seconds, Timestamp};
 use std::collections::BTreeSet;
 
 use serde_json::{Map, Value, json};
@@ -9,7 +10,7 @@ use crate::user::User;
 use crate::user::{BankAccount, DEMO_PASSWORD, DEMO_USERNAME, UserStore};
 
 /// 2026-11-11T00:00:00Z. The demo user was born 1985-04-12, so is 41.
-const NOW: i64 = 1_794_355_200;
+const NOW: Timestamp = Timestamp::from_unix(1_794_355_200);
 
 fn user() -> std::sync::Arc<User> {
     demo_store()
@@ -33,7 +34,7 @@ fn release(
     user: &User,
     client: &Client,
     requested: &Map<String, Value>,
-    now: i64,
+    now: Timestamp,
 ) -> Map<String, Value> {
     super::release(
         user,
@@ -639,7 +640,7 @@ fn born_2008_06_15(zoneinfo: Option<&str>) -> User {
     User::new("minor", "minor", None, claims).unwrap()
 }
 
-fn over18(user: &User, now: i64) -> Value {
+fn over18(user: &User, now: Timestamp) -> Value {
     let request = verified(json!({"over18": null}));
     release(user, &client(), &request, now)[VERIFIED_CLAIMS]["claims"]["over18"].clone()
 }
@@ -647,27 +648,27 @@ fn over18(user: &User, now: i64) -> Value {
 #[test]
 fn age_turns_over_at_local_midnight() {
     // 2026-06-14T14:00:00Z is midnight on the 15th in Sydney (AEST, +10).
-    let sydney_midnight = 1_781_445_600;
+    let sydney_midnight = Timestamp::from_unix(1_781_445_600);
     let user = born_2008_06_15(None);
-    assert_eq!(over18(&user, sydney_midnight - 1), json!(false));
+    assert_eq!(over18(&user, sydney_midnight - Seconds::new(1)), json!(false));
     assert_eq!(over18(&user, sydney_midnight), json!(true));
     // Still the 14th in UTC: the old UTC reading would have said false.
-    assert_eq!(over18(&user, sydney_midnight + 9 * 3600), json!(true));
+    assert_eq!(over18(&user, sydney_midnight + Seconds::hours(9)), json!(true));
 }
 
 #[test]
 fn age_uses_the_users_own_time_zone() {
     // Perth (AWST, +8) reaches the 15th two hours after Sydney.
-    let perth_midnight = 1_781_452_800;
+    let perth_midnight = Timestamp::from_unix(1_781_452_800);
     let user = born_2008_06_15(Some("Australia/Perth"));
-    assert_eq!(over18(&user, perth_midnight - 1), json!(false));
+    assert_eq!(over18(&user, perth_midnight - Seconds::new(1)), json!(false));
     assert_eq!(over18(&user, perth_midnight), json!(true));
 
     // A configured default applies to users without `zoneinfo`.
     let utc = jiff::tz::TimeZone::UTC;
     let user = born_2008_06_15(None).with_default_time_zone(&utc);
     assert_eq!(over18(&user, perth_midnight), json!(false));
-    assert_eq!(over18(&user, 1_781_481_600), json!(true));
+    assert_eq!(over18(&user, Timestamp::from_unix(1_781_481_600)), json!(true));
 }
 
 #[test]

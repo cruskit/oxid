@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use url::Url;
 
 use crate::client::{ClientRegistry, StaticClientRegistry};
+use crate::epoch::Timestamp;
 use crate::config::{CiConfig, Config, SecurityConfig, StoreBackend};
 use crate::experience::{self, Experience, Kind};
 use crate::keys::SigningKey;
@@ -175,7 +176,7 @@ impl AppState {
         }
         if config.experience == Kind::Ci {
             tracing::warn!(
-                response_delay = config.ci.response_delay,
+                response_delay = config.ci.response_delay.get(),
                 "experience is 'ci': authorization requests are answered automatically, with \
                  no user and no authentication (automated testing only)"
             );
@@ -206,7 +207,7 @@ impl AppState {
         })))
     }
 
-    pub(crate) fn now(&self) -> i64 {
+    pub(crate) fn now(&self) -> Timestamp {
         self.clock.now()
     }
 

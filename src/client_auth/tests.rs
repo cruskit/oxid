@@ -1,3 +1,4 @@
+use crate::epoch::{Seconds, Timestamp};
 use serde_json::json;
 
 use super::*;
@@ -10,7 +11,7 @@ use crate::testing::valid_assertion;
 use crate::util::b64url;
 
 const ISSUER: &str = "https://op.example.com";
-const NOW: i64 = 1_800_000_000;
+const NOW: Timestamp = Timestamp::from_unix(1_800_000_000);
 
 fn registry() -> StaticClientRegistry {
     StaticClientRegistry::new([client_with_key("rp", shared_key())]).unwrap()
@@ -25,7 +26,7 @@ fn attempt(assertion: &str, client_id: Option<&str>) -> Result<Authenticated, OA
         },
         &registry(),
         ISSUER,
-        10,
+        Seconds::new(10),
         NOW,
     )
 }
@@ -59,7 +60,7 @@ fn accepts_a_valid_assertion() {
     let auth = check(&valid_assertion(ISSUER, NOW)).unwrap();
     assert_eq!(auth.client.id, "rp");
     assert_eq!(auth.jti, "jti-1");
-    assert_eq!(auth.expires_at, NOW + 60);
+    assert_eq!(auth.expires_at, NOW + Seconds::new(60));
 }
 
 #[test]
@@ -76,7 +77,7 @@ fn requires_assertion_and_correct_type() {
     let token = shared_key()
         .sign(None, &valid_assertion(ISSUER, NOW))
         .unwrap();
-    let missing = authenticate(Credentials::default(), &registry(), ISSUER, 10, NOW);
+    let missing = authenticate(Credentials::default(), &registry(), ISSUER, Seconds::new(10), NOW);
     assert_eq!(missing.unwrap_err().code, ErrorCode::InvalidClient);
 
     let wrong_type = authenticate(
@@ -87,7 +88,7 @@ fn requires_assertion_and_correct_type() {
         },
         &registry(),
         ISSUER,
-        10,
+        Seconds::new(10),
         NOW,
     );
     assert!(wrong_type.is_err());
@@ -114,16 +115,16 @@ fn iss_and_sub_must_both_be_the_client() {
 fn expiry_is_enforced() {
     rejected(&without("exp"));
     rejected(&with("exp", json!(NOW)));
-    rejected(&with("exp", json!(NOW - 300)));
-    rejected(&with("exp", json!(NOW + 86_400)));
+    rejected(&with("exp", json!(NOW - Seconds::new(300))));
+    rejected(&with("exp", json!(NOW + Seconds::new(86_400))));
 }
 
 #[test]
 fn iat_and_nbf_tolerate_small_skew_only() {
-    check(&with("iat", json!(NOW + 10))).unwrap();
-    rejected(&with("iat", json!(NOW + 61)));
-    check(&with("nbf", json!(NOW + 10))).unwrap();
-    rejected(&with("nbf", json!(NOW + 61)));
+    check(&with("iat", json!(NOW + Seconds::new(10)))).unwrap();
+    rejected(&with("iat", json!(NOW + Seconds::new(61))));
+    check(&with("nbf", json!(NOW + Seconds::new(10)))).unwrap();
+    rejected(&with("nbf", json!(NOW + Seconds::new(61))));
 }
 
 #[test]

@@ -106,7 +106,7 @@ fn token_endpoint_prefers_the_mtls_alias() {
 fn client_assertion_is_a_private_key_jwt_with_the_registry_kid() {
     let config = config();
     let assertion =
-        client_assertion(&config, shared_key(), "https://auth.registry.example", 1000).unwrap();
+        client_assertion(&config, shared_key(), "https://auth.registry.example", Timestamp::from_unix(1000)).unwrap();
     let jws = UnverifiedJws::parse(&assertion, &[SigningAlg::PS256])
         .unwrap()
         .skip_verification_in_tests();
@@ -114,8 +114,8 @@ fn client_assertion_is_a_private_key_jwt_with_the_registry_kid() {
     assert_eq!(jws.str_claim("iss"), Some("oxid-idp"));
     assert_eq!(jws.str_claim("sub"), Some("oxid-idp"));
     assert_eq!(jws.str_claim("aud"), Some("https://auth.registry.example"));
-    assert_eq!(jws.time_claim("iat"), Some(1000));
-    assert_eq!(jws.time_claim("exp"), Some(1060));
+    assert_eq!(jws.time_claim("iat"), Some(Timestamp::from_unix(1000)));
+    assert_eq!(jws.time_claim("exp"), Some(Timestamp::from_unix(1060)));
     assert!(jws.str_claim("jti").is_some_and(|jti| jti.len() >= 16));
 
     // The signature is by the configured key, whatever kid is claimed.
@@ -127,7 +127,7 @@ fn client_assertion_is_a_private_key_jwt_with_the_registry_kid() {
         .unwrap();
 
     let again =
-        client_assertion(&config, shared_key(), "https://auth.registry.example", 1000).unwrap();
+        client_assertion(&config, shared_key(), "https://auth.registry.example", Timestamp::from_unix(1000)).unwrap();
     let other = UnverifiedJws::parse(&again, &[SigningAlg::PS256])
         .unwrap()
         .skip_verification_in_tests();

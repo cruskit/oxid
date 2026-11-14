@@ -12,6 +12,7 @@
 
 pub mod html;
 
+use oxid::{Seconds, Timestamp};
 use std::collections::HashMap;
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -190,7 +191,7 @@ impl TestOp {
             .unwrap()
     }
 
-    pub fn now(&self) -> i64 {
+    pub fn now(&self) -> Timestamp {
         self.clock.now()
     }
 
@@ -211,7 +212,7 @@ impl TestOp {
         let now = self.now();
         let mut claims = json!({
             "iss": CLIENT_ID, "sub": CLIENT_ID, "aud": self.issuer,
-            "jti": random_token(16), "iat": now, "nbf": now, "exp": now + 60,
+            "jti": random_token(16), "iat": now, "nbf": now, "exp": now + Seconds::new(60),
         });
         apply(&mut claims, overrides);
         self.rp_key.sign(Some("JWT"), &claims).unwrap()
@@ -223,7 +224,7 @@ impl TestOp {
         let now = self.now();
         let mut claims = json!({
             "iss": CLIENT_ID, "aud": self.issuer,
-            "iat": now, "nbf": now, "exp": now + 300,
+            "iat": now, "nbf": now, "exp": now + Seconds::new(300),
             "client_id": CLIENT_ID,
             "response_type": "code",
             "redirect_uri": REDIRECT_URI,

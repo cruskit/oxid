@@ -14,6 +14,7 @@
 mod common;
 
 use common::{ASSERTION_TYPE, Pkce, TestOp, redirect_params};
+use oxid::Seconds;
 use oxid::experience::Kind;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
@@ -22,7 +23,7 @@ use serde_json::{Value, json};
 async fn start() -> TestOp {
     TestOp::start_with(|config| {
         config.experience = Kind::Ci;
-        config.ci.response_delay = 0;
+        config.ci.response_delay = Seconds::new(0);
     })
     .await
 }

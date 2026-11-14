@@ -8,6 +8,7 @@ use serde_json::{Map, Value};
 
 use super::catalogue::{VERIFIED_CLAIMS, is_standard, is_verified_claim, label, scope_claims};
 use super::release::{release, verified_request};
+use crate::epoch::Timestamp;
 use crate::client::Client;
 use crate::user::User;
 
@@ -150,7 +151,7 @@ impl ClaimsRequest {
         user: &User,
         client: &Client,
         scopes: &[String],
-        now: i64,
+        now: Timestamp,
     ) -> Map<String, Value> {
         let everything: BTreeSet<String> = self
             .consentable(client, scopes)

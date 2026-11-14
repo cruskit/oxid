@@ -6,6 +6,7 @@
 
 use serde_json::{Map, Value};
 
+use crate::epoch::Timestamp;
 use crate::client::Client;
 use crate::config::SecurityConfig;
 use crate::error::OAuthError;
@@ -21,7 +22,7 @@ pub(crate) fn verify(
     client: &Client,
     issuer: &str,
     security: &SecurityConfig,
-    now: i64,
+    now: Timestamp,
 ) -> Result<Map<String, Value>, OAuthError> {
     let bad = |reason: String| OAuthError::invalid_request_object(reason);
 

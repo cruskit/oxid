@@ -30,6 +30,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
+use crate::epoch::Seconds;
 use crate::cookie::{SameSite, SetCookie};
 use super::{
     Approval, Decision, ERROR_CONDITIONS, ErrorCondition, Experience, Form, FormTarget,
@@ -43,7 +44,7 @@ use crate::util::b64url;
 
 /// Remembers the customer used on the last completed flow.
 pub(crate) const CUSTOMER_COOKIE: &str = "__Host-oxid-customer";
-const CUSTOMER_COOKIE_MAX_AGE: i64 = 365 * 24 * 60 * 60;
+const CUSTOMER_COOKIE_MAX_AGE: Seconds = Seconds::days(365);
 
 /// The `outcome` form value for an error response. Anything else, such as
 /// the template's `success`, is a successful one.

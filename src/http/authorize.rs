@@ -30,6 +30,7 @@ use url::Url;
 use uuid::Uuid;
 
 use super::page::{CSRF_COOKIE, Shell, csrf_cookie, error_page, is_csrf_token};
+use crate::epoch::{Seconds, Timestamp};
 use crate::cookie::{self, SetCookie};
 use super::{Params, no_store};
 use crate::client::Client;
@@ -245,7 +246,7 @@ fn experience_page(
         script: page.script,
         redirect_to: Some(&interaction.request().redirect_uri),
         refresh: Some((
-            remaining.max(1),
+            remaining.max(Seconds::new(1)),
             authorize_path(&interaction.client.id, interaction.request_uri),
         )),
         wide: page.wide,
@@ -533,7 +534,7 @@ async fn record_decision(
     client: &Client,
     purpose: Option<&str>,
     approval: Option<&Approval>,
-    now: i64,
+    now: Timestamp,
     outcome: ConsentOutcome,
 ) -> StoreResult<String> {
     let txn = approval

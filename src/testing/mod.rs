@@ -8,6 +8,7 @@
 
 #![allow(unreachable_pub, reason = "test fixtures, shared across modules")]
 
+use crate::epoch::{Seconds, Timestamp};
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
@@ -86,25 +87,25 @@ pub fn valid_params() -> Map<String, Value> {
 }
 
 /// Claims of a valid request object issued at `now` by client `rp`.
-pub fn valid_claims(now: i64) -> Value {
+pub fn valid_claims(now: Timestamp) -> Value {
     let mut claims = valid_params();
     claims.insert("iss".into(), json!("rp"));
     claims.insert("aud".into(), json!(ISSUER));
     claims.insert("nbf".into(), json!(now));
     claims.insert("iat".into(), json!(now));
-    claims.insert("exp".into(), json!(now + 300));
+    claims.insert("exp".into(), json!(now + Seconds::new(300)));
     Value::Object(claims)
 }
 
 /// Claims of a valid assertion from client `rp`.
-pub fn valid_assertion(issuer: &str, now: i64) -> Value {
+pub fn valid_assertion(issuer: &str, now: Timestamp) -> Value {
     json!({
         "iss": "rp",
         "sub": "rp",
         "aud": issuer,
         "jti": "jti-1",
         "iat": now,
-        "exp": now + 60,
+        "exp": now + Seconds::new(60),
     })
 }
 

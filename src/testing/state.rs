@@ -1,5 +1,6 @@
 //! An [`AppState`] for unit tests, on a manual clock.
 
+use crate::epoch::Timestamp;
 use std::sync::Arc;
 
 use crate::client::StaticClientRegistry;
@@ -16,7 +17,7 @@ pub use super::ISSUER;
 use super::{client_with_key, demo_store, shared_key};
 
 pub const MTLS: &str = "https://mtls.op.example.com";
-pub const NOW: i64 = 1_800_000_000;
+pub const NOW: Timestamp = Timestamp::from_unix(1_800_000_000);
 
 #[derive(Debug)]
 struct SharedUsers;

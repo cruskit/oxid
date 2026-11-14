@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+use crate::epoch::{Seconds, Timestamp};
 use crate::client::{Client, ClientRegistry};
 use crate::error::OAuthError;
 use crate::jose::{SigningAlg, UnverifiedJws};
@@ -16,7 +17,7 @@ pub(crate) const ALLOWED_ALGS: &[SigningAlg] = &[SigningAlg::PS256];
 
 /// Longest an assertion may remain valid. Bounds how long its `jti` must be
 /// remembered for replay detection.
-const MAX_ASSERTION_LIFETIME: i64 = 600;
+const MAX_ASSERTION_LIFETIME: Seconds = Seconds::minutes(10);
 
 /// The client authentication parameters of a token or PAR request.
 #[derive(Debug, Clone, Copy, Default)]
@@ -36,7 +37,7 @@ pub(crate) struct Credentials<'a> {
 pub(crate) struct Authenticated {
     pub client: Arc<Client>,
     pub jti: String,
-    pub expires_at: i64,
+    pub expires_at: Timestamp,
 }
 
 /// Verify a `private_key_jwt` assertion.
@@ -47,8 +48,8 @@ pub(crate) fn authenticate(
     credentials: Credentials<'_>,
     clients: &dyn ClientRegistry,
     issuer: &str,
-    clock_skew: i64,
-    now: i64,
+    clock_skew: Seconds,
+    now: Timestamp,
 ) -> Result<Authenticated, OAuthError> {
     let bad = |reason: &str| OAuthError::invalid_client(reason.to_owned());
 

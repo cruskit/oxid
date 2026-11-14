@@ -14,6 +14,7 @@
 mod common;
 
 use common::{ASSERTION_TYPE, CLIENT_ID, Pkce, REDIRECT_URI, TestOp, oauth_error, redirect_params};
+use oxid::Seconds;
 use oxid::keys::SigningKey;
 use oxid::util::b64url;
 use reqwest::header::{LOCATION, WWW_AUTHENTICATE};
@@ -101,7 +102,7 @@ async fn access_token_expires_within_ten_minutes() {
     let tokens = op.tokens(&json!({})).await;
     let expires_in = tokens["expires_in"].as_i64().unwrap();
     assert!(expires_in <= 600);
-    op.clock.advance(expires_in);
+    op.clock.advance(Seconds::new(expires_in));
     let response = op
         .rp
         .get(op.mtls_url("/userinfo"))
@@ -150,7 +151,7 @@ async fn authorization_code_expires_after_sixty_seconds() {
     let pkce = Pkce::new();
     let request_uri = op.push(&pkce, &json!({})).await;
     let params = op.approve(&request_uri).await;
-    op.clock.advance(61);
+    op.clock.advance(Seconds::new(61));
     assert_eq!(
         oauth_error(op.exchange(&params["code"], &pkce).await)
             .await
@@ -216,7 +217,7 @@ async fn request_uri_is_single_use_and_expires() {
     assert_eq!(reused.status(), StatusCode::BAD_REQUEST);
 
     let request_uri = op.push(&pkce, &json!({})).await;
-    op.clock.advance(600);
+    op.clock.advance(Seconds::new(600));
     let expired = op
         .browser
         .get(op.authorize_url(&request_uri))
@@ -277,18 +278,21 @@ async fn request_object_lifetime_rules_are_enforced() {
     let cases = [
         ("no exp", json!({"exp": null})),
         ("no nbf", json!({"nbf": null})),
-        ("expired", json!({"nbf": now - 120, "exp": now - 60})),
+        (
+            "expired",
+            json!({"nbf": now - Seconds::new(120), "exp": now - Seconds::new(60)}),
+        ),
         (
             "exp more than 10 minutes after nbf",
-            json!({"exp": now + 601}),
+            json!({"exp": now + Seconds::new(601)}),
         ),
         (
             "nbf more than 10 minutes old",
-            json!({"nbf": now - 900, "exp": now + 60}),
+            json!({"nbf": now - Seconds::new(900), "exp": now + Seconds::new(60)}),
         ),
         (
             "nbf far in the future",
-            json!({"nbf": now + 120, "exp": now + 300}),
+            json!({"nbf": now + Seconds::new(120), "exp": now + Seconds::new(300)}),
         ),
         (
             "wrong audience",
@@ -303,7 +307,8 @@ async fn request_object_lifetime_rules_are_enforced() {
     }
 
     // FAPI 2.0 5.3.2.1-13: 8 seconds of clock skew must be tolerated.
-    op.push(&Pkce::new(), &json!({"nbf": now + 8})).await;
+    op.push(&Pkce::new(), &json!({"nbf": now + Seconds::new(8)}))
+        .await;
     // An array audience that includes the issuer is fine.
     op.push(
         &Pkce::new(),
@@ -440,11 +445,14 @@ async fn client_assertions_are_strictly_validated() {
             json!({"aud": op.mtls_url("/par")}),
         ),
         ("array audience", json!({"aud": [op.issuer]})),
-        ("expired", json!({"exp": now - 300})),
+        ("expired", json!({"exp": now - Seconds::new(300)})),
         ("no exp", json!({"exp": null})),
         ("no sub", json!({"sub": null})),
         ("no jti", json!({"jti": null})),
-        ("iat far in the future", json!({"iat": now + 120})),
+        (
+            "iat far in the future",
+            json!({"iat": now + Seconds::new(120)}),
+        ),
         ("unknown client", json!({"iss": "ghost", "sub": "ghost"})),
     ];
     for (name, overrides) in cases {
@@ -495,7 +503,7 @@ async fn assertion_signed_by_another_key_is_rejected() {
     let assertion = attacker
         .sign(
             None,
-            &json!({"iss": CLIENT_ID, "sub": CLIENT_ID, "aud": op.issuer, "jti": "x", "exp": now + 60}),
+            &json!({"iss": CLIENT_ID, "sub": CLIENT_ID, "aud": op.issuer, "jti": "x", "exp": now + Seconds::new(60)}),
         )
         .unwrap();
     let response = op

@@ -19,6 +19,7 @@ use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 
 use super::{OAuthForm, PATH_CI_RESPONSE, Params, authenticate_client, no_store};
+use crate::epoch::Timestamp;
 use crate::client::Client;
 use crate::error::OAuthError;
 use crate::experience::ci::default_user;
@@ -158,7 +159,7 @@ async fn pending_request(
     state: &AppState,
     client: &Client,
     request_uri: &str,
-    now: i64,
+    now: Timestamp,
 ) -> Result<Option<PushedRequest>, OAuthError> {
     let pushed = match state.store.resume(request_uri, now).await? {
         Some(Visit::Active(pushed, _)) => Some(*pushed),

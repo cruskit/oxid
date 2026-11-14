@@ -79,8 +79,9 @@ impl Ci {
     async fn respond(&self, interaction: &Interaction<'_>) -> StepResult {
         let state = interaction.state;
         let arrived = interaction.session.expires_at - state.security.session_ttl;
-        let left = (arrived + state.ci.response_delay - state.now()).max(0);
-        let deadline = Instant::now() + Duration::from_secs(left.unsigned_abs());
+        // Negative once the delay has passed, which `to_std` makes zero.
+        let left = (arrived + state.ci.response_delay) - state.now();
+        let deadline = Instant::now() + left.to_std();
         loop {
             match state
                 .store

@@ -11,20 +11,30 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use url::Url;
 
+use crate::epoch::Seconds;
+
 /// ConnectID §4.2-3.2: access tokens expire at most 10 minutes after issue.
-pub const MAX_ACCESS_TOKEN_TTL: i64 = 600;
+pub const MAX_ACCESS_TOKEN_TTL: Seconds = Seconds::minutes(10);
 /// FAPI 2.0 §5.3.2.1-11: authorization codes live at most 60 seconds.
-pub const MAX_AUTHORIZATION_CODE_TTL: i64 = 60;
+pub const MAX_AUTHORIZATION_CODE_TTL: Seconds = Seconds::new(60);
 /// FAPI 2.0 §5.3.2.2-12: `request_uri` `expires_in` is below 600 seconds.
-pub const MAX_REQUEST_URI_TTL: i64 = 599;
+pub const MAX_REQUEST_URI_TTL: Seconds = Seconds::new(599);
 /// The longest a user may be given to sign in and decide.
-pub const MAX_SESSION_TTL: i64 = 60 * 60;
+pub const MAX_SESSION_TTL: Seconds = Seconds::hours(1);
 /// The longest the `ci` experience may wait before responding. The wait
 /// happens inside the browser's request, and behind API Gateway a request
 /// may take 30 seconds at most.
-pub const MAX_CI_RESPONSE_DELAY: i64 = 25;
+pub const MAX_CI_RESPONSE_DELAY: Seconds = Seconds::new(25);
 /// ConnectID §4.2-3.10/11: request object `exp - nbf` and `nbf` age limits.
-pub const MAX_REQUEST_OBJECT_WINDOW: i64 = 600;
+pub const MAX_REQUEST_OBJECT_WINDOW: Seconds = Seconds::minutes(10);
+/// The longest a refresh token may live. Neither profile sets one; a year
+/// keeps a mistyped value from meaning "forever".
+pub const MAX_REFRESH_TOKEN_TTL: Seconds = Seconds::days(365);
+/// The longest an ID token may be valid for.
+pub const MAX_ID_TOKEN_TTL: Seconds = Seconds::hours(1);
+/// FAPI 2.0 §5.3.2.1-13: accept 10 seconds of skew, reject more than 60.
+const CLOCK_SKEW_RANGE: std::ops::RangeInclusive<Seconds> = Seconds::new(10)..=Seconds::new(60);
+const ONE_SECOND: Seconds = Seconds::new(1);
 /// The longest a listener waits for a request's headers, in seconds.
 pub const MAX_HEADER_READ_TIMEOUT: u64 = 60;
 /// The longest a listener lets one request take, in seconds.
@@ -187,12 +197,14 @@ pub struct CiConfig {
     /// default response. It is the time a client has to say what the
     /// response should be instead; a request whose response the client has
     /// already set is answered at once.
-    pub response_delay: i64,
+    pub response_delay: Seconds,
 }
 
 impl Default for CiConfig {
     fn default() -> Self {
-        Self { response_delay: 5 }
+        Self {
+            response_delay: Seconds::new(5),
+        }
     }
 }
 
@@ -200,35 +212,35 @@ impl Default for CiConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct SecurityConfig {
-    pub access_token_ttl: i64,
-    pub refresh_token_ttl: i64,
-    pub id_token_ttl: i64,
-    pub authorization_code_ttl: i64,
-    pub request_uri_ttl: i64,
+    pub access_token_ttl: Seconds,
+    pub refresh_token_ttl: Seconds,
+    pub id_token_ttl: Seconds,
+    pub authorization_code_ttl: Seconds,
+    pub request_uri_ttl: Seconds,
     /// How long a user has to sign in and decide once their browser has
     /// arrived at the authorization endpoint with a valid `request_uri`.
-    pub session_ttl: i64,
+    pub session_ttl: Seconds,
     /// Maximum `exp - nbf` of a request object.
-    pub request_object_max_lifetime: i64,
+    pub request_object_max_lifetime: Seconds,
     /// Maximum age of a request object's `nbf`.
-    pub request_object_max_age: i64,
+    pub request_object_max_age: Seconds,
     /// How far in the future `iat`/`nbf` may be. FAPI 2.0 §5.3.2.1-13 requires
     /// accepting 10 seconds and rejecting more than 60.
-    pub clock_skew: i64,
+    pub clock_skew: Seconds,
 }
 
 impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
-            access_token_ttl: 300,
-            refresh_token_ttl: 24 * 60 * 60,
-            id_token_ttl: 300,
-            authorization_code_ttl: 60,
-            request_uri_ttl: 90,
+            access_token_ttl: Seconds::minutes(5),
+            refresh_token_ttl: Seconds::days(1),
+            id_token_ttl: Seconds::minutes(5),
+            authorization_code_ttl: Seconds::new(60),
+            request_uri_ttl: Seconds::new(90),
             session_ttl: crate::store::DEFAULT_SESSION_TTL,
             request_object_max_lifetime: MAX_REQUEST_OBJECT_WINDOW,
             request_object_max_age: MAX_REQUEST_OBJECT_WINDOW,
-            clock_skew: 10,
+            clock_skew: Seconds::new(10),
         }
     }
 }
@@ -355,45 +367,48 @@ impl Config {
 
         let s = &self.security;
         ensure!(
-            (1..=MAX_ACCESS_TOKEN_TTL).contains(&s.access_token_ttl),
+            (ONE_SECOND..=MAX_ACCESS_TOKEN_TTL).contains(&s.access_token_ttl),
             "security.access_token_ttl must be between 1 and {MAX_ACCESS_TOKEN_TTL} seconds"
         );
         ensure!(
-            (1..=MAX_AUTHORIZATION_CODE_TTL).contains(&s.authorization_code_ttl),
+            (ONE_SECOND..=MAX_AUTHORIZATION_CODE_TTL).contains(&s.authorization_code_ttl),
             "security.authorization_code_ttl must be between 1 and {MAX_AUTHORIZATION_CODE_TTL} seconds"
         );
         ensure!(
-            (1..=MAX_REQUEST_URI_TTL).contains(&s.request_uri_ttl),
+            (ONE_SECOND..=MAX_REQUEST_URI_TTL).contains(&s.request_uri_ttl),
             "security.request_uri_ttl must be between 1 and {MAX_REQUEST_URI_TTL} seconds"
         );
         ensure!(
-            (1..=MAX_SESSION_TTL).contains(&s.session_ttl),
+            (ONE_SECOND..=MAX_SESSION_TTL).contains(&s.session_ttl),
             "security.session_ttl must be between 1 and {MAX_SESSION_TTL} seconds"
         );
         ensure!(
-            (1..=MAX_REQUEST_OBJECT_WINDOW).contains(&s.request_object_max_lifetime),
+            (ONE_SECOND..=MAX_REQUEST_OBJECT_WINDOW).contains(&s.request_object_max_lifetime),
             "security.request_object_max_lifetime must be between 1 and {MAX_REQUEST_OBJECT_WINDOW} seconds"
         );
         ensure!(
-            (1..=MAX_REQUEST_OBJECT_WINDOW).contains(&s.request_object_max_age),
+            (ONE_SECOND..=MAX_REQUEST_OBJECT_WINDOW).contains(&s.request_object_max_age),
             "security.request_object_max_age must be between 1 and {MAX_REQUEST_OBJECT_WINDOW} seconds"
         );
         ensure!(
-            (10..=60).contains(&s.clock_skew),
+            CLOCK_SKEW_RANGE.contains(&s.clock_skew),
             "security.clock_skew must be between 10 and 60 seconds"
         );
         ensure!(
-            s.refresh_token_ttl > 0,
-            "security.refresh_token_ttl must be positive"
+            (ONE_SECOND..=MAX_REFRESH_TOKEN_TTL).contains(&s.refresh_token_ttl),
+            "security.refresh_token_ttl must be between 1 and {MAX_REFRESH_TOKEN_TTL} seconds"
         );
-        ensure!(s.id_token_ttl > 0, "security.id_token_ttl must be positive");
+        ensure!(
+            (ONE_SECOND..=MAX_ID_TOKEN_TTL).contains(&s.id_token_ttl),
+            "security.id_token_ttl must be between 1 and {MAX_ID_TOKEN_TTL} seconds"
+        );
 
         ensure!(
-            (0..=MAX_CI_RESPONSE_DELAY).contains(&self.ci.response_delay),
+            (Seconds::ZERO..=MAX_CI_RESPONSE_DELAY).contains(&self.ci.response_delay),
             "ci.response_delay must be between 0 and {MAX_CI_RESPONSE_DELAY} seconds"
         );
         ensure!(
-            self.server.request_timeout.cast_signed() > self.ci.response_delay,
+            Seconds::new(self.server.request_timeout.cast_signed()) > self.ci.response_delay,
             "server.request_timeout must be longer than ci.response_delay"
         );
 

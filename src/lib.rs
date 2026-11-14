@@ -32,6 +32,7 @@ internal! {
     client_auth;
     client_sync;
     cookie;
+    epoch;
     error;
     experience;
     http;
@@ -55,6 +56,7 @@ pub(crate) mod testing;
 pub use client::Profile;
 pub use client_sync::ClientSyncConfig;
 pub use config::Config;
+pub use epoch::{Seconds, Timestamp};
 pub use experience::{Kind, UnknownExperience};
 pub use server::{Server, ServerBuilder};
 pub use theme::{NotAColor, ThemeConfig};

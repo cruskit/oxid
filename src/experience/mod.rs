@@ -35,6 +35,7 @@ use askama::Template;
 use axum::http::HeaderMap;
 use serde::Deserialize;
 
+use crate::epoch::Seconds;
 use crate::cookie::SetCookie;
 use crate::authz::AuthorizationRequest;
 use crate::client::Client;
@@ -192,7 +193,8 @@ pub(crate) fn render(template: &impl Template) -> askama::Result<String> {
 }
 
 /// A length of time in words, for telling the user how long they have.
-pub(crate) fn duration_text(seconds: i64) -> String {
+pub(crate) fn duration_text(length: Seconds) -> String {
+    let seconds = length.get();
     let (count, unit) = if seconds % 60 == 0 {
         (seconds / 60, "minute")
     } else {

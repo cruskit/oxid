@@ -1,3 +1,4 @@
+use crate::epoch::{Seconds, Timestamp};
 use super::*;
 
 #[test]
@@ -36,15 +37,15 @@ fn ct_eq_compares_content() {
 
 #[test]
 fn manual_clock_moves_only_on_request() {
-    let clock = ManualClock::new(100);
-    assert_eq!(clock.now(), 100);
-    clock.advance(5);
-    assert_eq!(clock.now(), 105);
-    clock.set(7);
-    assert_eq!(clock.now(), 7);
+    let clock = ManualClock::new(Timestamp::from_unix(100));
+    assert_eq!(clock.now(), Timestamp::from_unix(100));
+    clock.advance(Seconds::new(5));
+    assert_eq!(clock.now(), Timestamp::from_unix(105));
+    clock.set(Timestamp::from_unix(7));
+    assert_eq!(clock.now(), Timestamp::from_unix(7));
 }
 
 #[test]
 fn system_clock_is_after_2024() {
-    assert!(SystemClock.now() > 1_704_067_200);
+    assert!(SystemClock.now() > Timestamp::from_unix(1_704_067_200));
 }

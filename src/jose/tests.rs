@@ -1,6 +1,7 @@
 use serde_json::json;
 
 use super::*;
+use crate::epoch::Timestamp;
 use crate::keys::SigningKey;
 
 const PS256: &[SigningAlg] = &[SigningAlg::PS256];
@@ -28,7 +29,7 @@ fn sign_then_verify_round_trips() {
     assert_eq!(jws.unverified_issuer(), None);
     let jws = jws.verify(&jwks(key())).unwrap();
     assert_eq!(jws.str_claim("sub"), Some("a"));
-    assert_eq!(jws.time_claim("exp"), Some(10));
+    assert_eq!(jws.time_claim("exp"), Some(Timestamp::from_unix(10)));
 }
 
 #[test]
@@ -176,8 +177,8 @@ fn time_claims_accept_integers_and_floats_only() {
         .unwrap()
         .verify(&jwks(key()))
         .unwrap();
-    assert_eq!(jws.time_claim("a"), Some(5));
-    assert_eq!(jws.time_claim("b"), Some(5));
+    assert_eq!(jws.time_claim("a"), Some(Timestamp::from_unix(5)));
+    assert_eq!(jws.time_claim("b"), Some(Timestamp::from_unix(5)));
     assert_eq!(jws.time_claim("c"), None);
     assert_eq!(jws.time_claim("missing"), None);
 }

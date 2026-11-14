@@ -1,3 +1,4 @@
+use crate::epoch::Seconds;
 use std::time::Duration;
 
 use crate::testing::html::has_id;
@@ -82,7 +83,7 @@ fn names(claims: &[&str]) -> std::collections::BTreeSet<String> {
 
 #[tokio::test]
 async fn with_no_response_chosen_the_first_user_shares_everything() {
-    let harness = Harness::ci(0);
+    let harness = Harness::ci(Seconds::new(0));
     let uri = harness.push(&request()).await;
     let params = arrive(&harness, &uri).await;
     assert_eq!(params["state"], "s-1");
@@ -105,7 +106,7 @@ async fn with_no_response_chosen_the_first_user_shares_everything() {
 
 #[tokio::test(start_paused = true)]
 async fn the_default_response_waits_for_the_configured_delay() {
-    let harness = Harness::ci(5);
+    let harness = Harness::ci(Seconds::new(5));
     let uri = harness.push(&request()).await;
     let started = tokio::time::Instant::now();
     let params = arrive(&harness, &uri).await;
@@ -116,12 +117,12 @@ async fn the_default_response_waits_for_the_configured_delay() {
 
 #[tokio::test(start_paused = true)]
 async fn the_delay_runs_from_the_first_arrival() {
-    let harness = Harness::ci(5);
+    let harness = Harness::ci(Seconds::new(5));
     let uri = harness.push(&request()).await;
     // A browser arrived three seconds ago and went away without waiting.
     let now = harness.state.now();
     harness.state.store.arrive(&uri, now).await.unwrap();
-    harness.clock.advance(3);
+    harness.clock.advance(Seconds::new(3));
 
     let started = tokio::time::Instant::now();
     assert!(arrive(&harness, &uri).await.contains_key("code"));
@@ -131,7 +132,7 @@ async fn the_delay_runs_from_the_first_arrival() {
 
 #[tokio::test(start_paused = true)]
 async fn a_response_chosen_during_the_wait_is_given_at_once() {
-    let harness = Harness::ci(5);
+    let harness = Harness::ci(Seconds::new(5));
     let uri = harness.push(&request()).await;
     let started = tokio::time::Instant::now();
     let (params, (status, _)) = tokio::join!(arrive(&harness, &uri), async {
@@ -148,7 +149,7 @@ async fn a_response_chosen_during_the_wait_is_given_at_once() {
 
 #[tokio::test(start_paused = true)]
 async fn a_response_chosen_before_arriving_is_given_without_waiting() {
-    let harness = Harness::ci(5);
+    let harness = Harness::ci(Seconds::new(5));
     let uri = harness.push(&request()).await;
     let (status, body) = plan(
         &harness,
@@ -182,7 +183,7 @@ async fn a_response_chosen_before_arriving_is_given_without_waiting() {
 
 #[tokio::test]
 async fn an_error_can_carry_its_own_description() {
-    let harness = Harness::ci(0);
+    let harness = Harness::ci(Seconds::new(0));
     let uri = harness.push(&request()).await;
     let (status, _) = plan(
         &harness,
@@ -202,7 +203,7 @@ async fn an_error_can_carry_its_own_description() {
 
 #[tokio::test]
 async fn the_client_chooses_the_user_and_the_voluntary_claims() {
-    let harness = Harness::ci(0);
+    let harness = Harness::ci(Seconds::new(0));
     let uri = harness.push(&request()).await;
     let (status, body) = plan(
         &harness,
@@ -238,7 +239,7 @@ async fn the_client_chooses_the_user_and_the_voluntary_claims() {
 
 #[tokio::test]
 async fn voluntary_claims_can_be_all_none_or_named_by_subject() {
-    let harness = Harness::ci(0);
+    let harness = Harness::ci(Seconds::new(0));
 
     // Present but empty: none of them. Essential claims are still shared.
     let uri = harness.push(&request()).await;
@@ -263,7 +264,7 @@ async fn voluntary_claims_can_be_all_none_or_named_by_subject() {
 
 #[tokio::test]
 async fn an_abandoned_visit_gets_a_page_and_leaves_the_request_pending() {
-    let harness = Harness::ci(0);
+    let harness = Harness::ci(Seconds::new(0));
     let uri = harness.push(&request()).await;
     let (status, body) = plan(&harness, &[("request_uri", &uri), ("outcome", "abandon")]).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -294,7 +295,7 @@ async fn an_abandoned_visit_gets_a_page_and_leaves_the_request_pending() {
 
 #[tokio::test]
 async fn the_last_response_chosen_wins() {
-    let harness = Harness::ci(0);
+    let harness = Harness::ci(Seconds::new(0));
     let uri = harness.push(&request()).await;
     plan(&harness, &[("request_uri", &uri), ("outcome", "error")]).await;
     let (status, _) = plan(&harness, &[("request_uri", &uri), ("user", "margaret")]).await;
@@ -306,7 +307,7 @@ async fn the_last_response_chosen_wins() {
 
 #[tokio::test]
 async fn the_client_must_authenticate_as_it_does_to_push() {
-    let harness = Harness::ci(0);
+    let harness = Harness::ci(Seconds::new(0));
     let uri = harness.push(&request()).await;
 
     let response = harness
@@ -334,7 +335,7 @@ async fn the_client_must_authenticate_as_it_does_to_push() {
 
 #[tokio::test]
 async fn only_a_pending_request_can_be_given_a_response() {
-    let harness = Harness::ci(0);
+    let harness = Harness::ci(Seconds::new(0));
     let expect_refused = |(status, body): (StatusCode, Value)| {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         assert_eq!(body["error"], "invalid_request");
@@ -370,7 +371,7 @@ async fn only_a_pending_request_can_be_given_a_response() {
 
 #[tokio::test]
 async fn a_response_that_cannot_be_given_is_refused() {
-    let harness = Harness::ci(0);
+    let harness = Harness::ci(Seconds::new(0));
     let uri = harness.push(&request()).await;
     let cases: &[&[(&str, &str)]] = &[
         &[("outcome", "maybe")],
@@ -402,7 +403,7 @@ async fn a_response_that_cannot_be_given_is_refused() {
 
 #[tokio::test]
 async fn the_options_list_users_and_errors() {
-    let harness = Harness::ci(0);
+    let harness = Harness::ci(Seconds::new(0));
     let response = harness.get(None, PATH_CI).await;
     assert_eq!(response.status(), StatusCode::OK);
     let body = json_body(response).await;
@@ -444,7 +445,7 @@ async fn the_endpoints_exist_only_under_the_ci_experience() {
 
 #[tokio::test]
 async fn an_experience_that_fails_sends_the_browser_back_with_server_error() {
-    let harness = Harness::ci(0);
+    let harness = Harness::ci(Seconds::new(0));
     let uri = harness.push(&request()).await;
     // A stored choice naming a user who does not exist: the experience
     // cannot answer, and says so with an error rather than a decision.
@@ -456,7 +457,7 @@ async fn an_experience_that_fails_sends_the_browser_back_with_server_error() {
     harness
         .state
         .store
-        .plan_response(&uri, &plan, harness.state.now() + 60)
+        .plan_response(&uri, &plan, harness.state.now() + Seconds::new(60))
         .await
         .unwrap();
     let params = arrive(&harness, &uri).await;

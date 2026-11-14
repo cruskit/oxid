@@ -1,12 +1,13 @@
 //! Behaviour every backend must provide, written against [`Store`] so the
 //! same checks run on each.
 
+use crate::epoch::{Seconds, Timestamp};
 use super::*;
 use crate::testing::client_with_key;
 use crate::testing::shared_key;
 use crate::testing::{CHALLENGE, valid_params};
 
-pub(crate) const NOW: i64 = 1_800_000_000;
+pub(crate) const NOW: Timestamp = Timestamp::from_unix(1_800_000_000);
 
 pub(crate) fn request() -> AuthorizationRequest {
     AuthorizationRequest::from_params(&client_with_key("rp", shared_key()), &valid_params())
@@ -28,7 +29,7 @@ pub(crate) fn grant(id: &str) -> Grant {
     }
 }
 
-pub(crate) fn consent(txn: &str, user: Option<&str>, decided_at: i64) -> ConsentRecord {
+pub(crate) fn consent(txn: &str, user: Option<&str>, decided_at: Timestamp) -> ConsentRecord {
     ConsentRecord {
         txn: txn.to_owned(),
         client_id: "rp".to_owned(),
@@ -51,7 +52,7 @@ pub(crate) fn code(grant_id: &str) -> AuthorizationCode {
         redirect_uri: "https://rp.example.com/cb".to_owned(),
         code_challenge: CHALLENGE.to_owned(),
         nonce: Some("n-1".to_owned()),
-        expires_at: NOW + 60,
+        expires_at: NOW + Seconds::new(60),
     }
 }
 
@@ -64,15 +65,15 @@ pub(crate) async fn consent_history(store: &Store, tag: &str) {
         .await
         .unwrap();
     store
-        .record_consent(consent(&txn(2), Some(&u2), NOW + 1))
+        .record_consent(consent(&txn(2), Some(&u2), NOW + Seconds::new(1)))
         .await
         .unwrap();
     store
-        .record_consent(consent(&txn(3), None, NOW + 2))
+        .record_consent(consent(&txn(3), None, NOW + Seconds::new(2)))
         .await
         .unwrap();
     store
-        .record_consent(consent(&txn(4), Some(&u1), NOW + 3))
+        .record_consent(consent(&txn(4), Some(&u1), NOW + Seconds::new(3)))
         .await
         .unwrap();
 
@@ -98,17 +99,17 @@ pub(crate) async fn consent_history(store: &Store, tag: &str) {
     );
 
     // Records are not transient state: purging leaves them alone.
-    store.purge(NOW + 1_000_000).await.unwrap();
+    store.purge(NOW + Seconds::new(1_000_000)).await.unwrap();
     assert_eq!(store.consent_history(&u1).await.unwrap().len(), 2);
 }
 
 pub(crate) async fn pushed_requests(store: &Store) {
     let a = store
-        .push_request(request(), "object".to_owned(), NOW + 60)
+        .push_request(request(), "object".to_owned(), NOW + Seconds::new(60))
         .await
         .unwrap();
     let b = store
-        .push_request(request(), String::new(), NOW + 60)
+        .push_request(request(), String::new(), NOW + Seconds::new(60))
         .await
         .unwrap();
     assert_ne!(a, b);
@@ -126,7 +127,7 @@ pub(crate) async fn pushed_requests(store: &Store) {
     assert!(store.peek_request(&a, NOW).await.unwrap().is_none());
 
     // A browser must arrive before the request_uri expires.
-    assert!(store.arrive(&b, NOW + 60).await.unwrap().is_none());
+    assert!(store.arrive(&b, NOW + Seconds::new(60)).await.unwrap().is_none());
     assert!(store.resume(&b, NOW).await.unwrap().is_none(), "no session");
     assert!(
         store
@@ -147,7 +148,7 @@ pub(crate) async fn planned_responses(store: &Store) {
         error: "access_denied".to_owned(),
         description: "the user denied the request".to_owned(),
     };
-    store.plan_response(&uri, &error, NOW + 60).await.unwrap();
+    store.plan_response(&uri, &error, NOW + Seconds::new(60)).await.unwrap();
     assert_eq!(
         store.planned_response(&uri, NOW).await.unwrap(),
         Some(error)
@@ -158,17 +159,17 @@ pub(crate) async fn planned_responses(store: &Store) {
         shared_claims: BTreeSet::from(["given_name".to_owned()]),
         declined: vec!["email".to_owned()],
     };
-    store.plan_response(&uri, &success, NOW + 60).await.unwrap();
+    store.plan_response(&uri, &success, NOW + Seconds::new(60)).await.unwrap();
     assert_eq!(
-        store.planned_response(&uri, NOW + 59).await.unwrap(),
+        store.planned_response(&uri, NOW + Seconds::new(59)).await.unwrap(),
         Some(success)
     );
-    assert_eq!(store.planned_response(&uri, NOW + 60).await.unwrap(), None);
+    assert_eq!(store.planned_response(&uri, NOW + Seconds::new(60)).await.unwrap(), None);
     let other = format!("{REQUEST_URI_PREFIX}other");
     assert_eq!(store.planned_response(&other, NOW).await.unwrap(), None);
 
     let abandon = PlannedResponse::Abandon;
-    store.plan_response(&uri, &abandon, NOW + 60).await.unwrap();
+    store.plan_response(&uri, &abandon, NOW + Seconds::new(60)).await.unwrap();
     assert_eq!(
         store.planned_response(&uri, NOW).await.unwrap(),
         Some(abandon)
@@ -183,10 +184,10 @@ pub(crate) async fn planned_responses(store: &Store) {
 pub(crate) async fn sessions(store: &Store) {
     let ttl = DEFAULT_SESSION_TTL;
     let uri = store
-        .push_request(request(), String::new(), NOW + 60)
+        .push_request(request(), String::new(), NOW + Seconds::new(60))
         .await
         .unwrap();
-    let arrived = NOW + 59;
+    let arrived = NOW + Seconds::new(59);
     let Some(Visit::Active(_, session)) = store.arrive(&uri, arrived).await.unwrap() else {
         panic!("arriving in time starts a session");
     };
@@ -195,7 +196,7 @@ pub(crate) async fn sessions(store: &Store) {
 
     // Past the request_uri lifetime, the same session carries on, and
     // arriving again does not extend it.
-    let later = arrived + ttl - 1;
+    let later = arrived + ttl - Seconds::new(1);
     for visit in [
         store.arrive(&uri, later).await.unwrap(),
         store.resume(&uri, later).await.unwrap(),
@@ -223,7 +224,7 @@ pub(crate) async fn sessions(store: &Store) {
 
     // Once the session ends the request is kept, to explain and to
     // return an error to the client, but only for a while.
-    for at in [arrived + ttl, arrived + ttl + EXPIRED_SESSION_RETENTION - 1] {
+    for at in [arrived + ttl, arrived + ttl + EXPIRED_SESSION_RETENTION - Seconds::new(1)] {
         assert!(matches!(
             store.arrive(&uri, at).await.unwrap(),
             Some(Visit::Expired(_))
@@ -233,12 +234,12 @@ pub(crate) async fn sessions(store: &Store) {
             Some(Visit::Expired(_))
         ));
     }
-    let gone = NOW + 60 + ttl + EXPIRED_SESSION_RETENTION;
+    let gone = NOW + Seconds::new(60) + ttl + EXPIRED_SESSION_RETENTION;
     assert!(store.arrive(&uri, gone).await.unwrap().is_none());
 
     // A used request has no session to come back to.
     let uri = store
-        .push_request(request(), String::new(), NOW + 60)
+        .push_request(request(), String::new(), NOW + Seconds::new(60))
         .await
         .unwrap();
     assert!(store.arrive(&uri, NOW).await.unwrap().is_some());
@@ -249,7 +250,7 @@ pub(crate) async fn sessions(store: &Store) {
 
 pub(crate) async fn failed_logins(store: &Store) {
     let uri = store
-        .push_request(request(), String::new(), NOW + 60)
+        .push_request(request(), String::new(), NOW + Seconds::new(60))
         .await
         .unwrap();
     for attempt in 1..MAX_FAILED_LOGINS {
@@ -278,14 +279,14 @@ pub(crate) async fn code_replay(store: &Store) {
         .issue_access_token(AccessToken {
             grant: redeemed.grant.clone(),
             cert_thumbprint: "tp".to_owned(),
-            expires_at: NOW + 300,
+            expires_at: NOW + Seconds::new(300),
         })
         .await
         .unwrap();
     let refresh = store
         .issue_refresh_token(RefreshToken {
             grant: redeemed.grant.clone(),
-            expires_at: NOW + 900,
+            expires_at: NOW + Seconds::new(900),
         })
         .await
         .unwrap();
@@ -293,19 +294,19 @@ pub(crate) async fn code_replay(store: &Store) {
         .issue_access_token(AccessToken {
             grant: grant(&format!("{grant_id}-other")),
             cert_thumbprint: "tp".to_owned(),
-            expires_at: NOW + 300,
+            expires_at: NOW + Seconds::new(300),
         })
         .await
         .unwrap();
     assert!(store.access_token(&access, NOW).await.unwrap().is_some());
 
     assert!(matches!(
-        store.redeem_code(&value, "rp", NOW + 1).await.unwrap(),
+        store.redeem_code(&value, "rp", NOW + Seconds::new(1)).await.unwrap(),
         CodeRedemption::Replayed
     ));
     assert!(
         store
-            .access_token(&access, NOW + 1)
+            .access_token(&access, NOW + Seconds::new(1))
             .await
             .unwrap()
             .is_none(),
@@ -313,14 +314,14 @@ pub(crate) async fn code_replay(store: &Store) {
     );
     assert!(
         store
-            .refresh_token(&refresh, NOW + 1)
+            .refresh_token(&refresh, NOW + Seconds::new(1))
             .await
             .unwrap()
             .is_none(),
         "revoked with the grant"
     );
     assert!(
-        store.access_token(&other, NOW + 1).await.unwrap().is_some(),
+        store.access_token(&other, NOW + Seconds::new(1)).await.unwrap().is_some(),
         "other grants are untouched"
     );
 }
@@ -343,7 +344,7 @@ pub(crate) async fn code_binding(store: &Store) {
 
     let late = store.create_code(code("g3")).await.unwrap();
     assert!(matches!(
-        store.redeem_code(&late, "rp", NOW + 60).await.unwrap(),
+        store.redeem_code(&late, "rp", NOW + Seconds::new(60)).await.unwrap(),
         CodeRedemption::Invalid
     ));
 }
@@ -371,17 +372,17 @@ pub(crate) async fn tokens(store: &Store) {
         .issue_access_token(AccessToken {
             grant: grant(&id),
             cert_thumbprint: "tp".to_owned(),
-            expires_at: NOW + 300,
+            expires_at: NOW + Seconds::new(300),
         })
         .await
         .unwrap();
-    let found = store.access_token(&access, NOW + 299).await.unwrap();
+    let found = store.access_token(&access, NOW + Seconds::new(299)).await.unwrap();
     let found = found.unwrap();
     assert_eq!(found.cert_thumbprint, "tp");
     assert_eq!(found.grant, grant(&id));
     assert!(
         store
-            .access_token(&access, NOW + 300)
+            .access_token(&access, NOW + Seconds::new(300))
             .await
             .unwrap()
             .is_none()
@@ -391,14 +392,14 @@ pub(crate) async fn tokens(store: &Store) {
     let refresh = store
         .issue_refresh_token(RefreshToken {
             grant: grant(&id),
-            expires_at: NOW + 10,
+            expires_at: NOW + Seconds::new(10),
         })
         .await
         .unwrap();
     assert!(store.refresh_token(&refresh, NOW).await.unwrap().is_some());
     assert!(
         store
-            .refresh_token(&refresh, NOW + 10)
+            .refresh_token(&refresh, NOW + Seconds::new(10))
             .await
             .unwrap()
             .is_none()
@@ -409,21 +410,21 @@ pub(crate) async fn tokens(store: &Store) {
 
 pub(crate) async fn jti_replay(store: &Store, tag: &str) {
     let (rp, other) = (format!("{tag}-rp"), format!("{tag}-other"));
-    assert!(store.record_jti(&rp, "j1", NOW + 60, NOW).await.unwrap());
+    assert!(store.record_jti(&rp, "j1", NOW + Seconds::new(60), NOW).await.unwrap());
     assert!(
         !store
-            .record_jti(&rp, "j1", NOW + 60, NOW + 1)
+            .record_jti(&rp, "j1", NOW + Seconds::new(60), NOW + Seconds::new(1))
             .await
             .unwrap()
     );
     assert!(
-        store.record_jti(&other, "j1", NOW + 60, NOW).await.unwrap(),
+        store.record_jti(&other, "j1", NOW + Seconds::new(60), NOW).await.unwrap(),
         "scoped to the client"
     );
-    assert!(store.record_jti(&rp, "j2", NOW + 60, NOW).await.unwrap());
+    assert!(store.record_jti(&rp, "j2", NOW + Seconds::new(60), NOW).await.unwrap());
     assert!(
         store
-            .record_jti(&rp, "j1", NOW + 120, NOW + 60)
+            .record_jti(&rp, "j1", NOW + Seconds::new(120), NOW + Seconds::new(60))
             .await
             .unwrap(),
         "reusable once expired"
@@ -446,7 +447,7 @@ pub(crate) async fn secrets(store: &Store, tag: &str) {
             .is_err()
     );
     // Secrets are not transient state.
-    store.purge(NOW + 1_000_000).await.unwrap();
+    store.purge(NOW + Seconds::new(1_000_000)).await.unwrap();
     assert_eq!(
         store.secret(&name, || Ok("two".to_owned())).await.unwrap(),
         "one"

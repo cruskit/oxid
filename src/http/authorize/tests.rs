@@ -1,3 +1,4 @@
+use crate::epoch::Seconds;
 use crate::testing::html::{Page, has_id, text_of};
 use axum::http::{StatusCode, header};
 use serde_json::json;
@@ -592,11 +593,11 @@ async fn a_form_cannot_be_submitted_for_a_request_no_browser_arrived_for() {
 async fn arriving_in_time_gives_the_user_a_session_longer_than_the_request_uri() {
     let harness = Harness::new();
     let security = &harness.state.security;
-    assert_eq!(security.session_ttl, 300);
+    assert_eq!(security.session_ttl, Seconds::minutes(5));
     assert!(security.request_uri_ttl < security.session_ttl);
 
     let uri = harness.push(&json!({})).await;
-    harness.clock.advance(security.request_uri_ttl - 1);
+    harness.clock.advance(security.request_uri_ttl - Seconds::new(1));
     let response = harness.get(None, &authorize_path(&uri)).await;
     let html = body_text(response).await;
     // The page takes itself to the expiry page when the session ends. The
@@ -609,11 +610,11 @@ async fn arriving_in_time_gives_the_user_a_session_longer_than_the_request_uri()
 
     // Long after the request_uri expired, the user can still sign in,
     // read the consent page and decide.
-    harness.clock.advance(200);
+    harness.clock.advance(Seconds::new(200));
     let browser = sign_in(&harness, &uri).await;
     assert!(browser.html.contains(")},100000);"));
     assert!(browser.html.contains("expires 5 minutes after you arrived"));
-    harness.clock.advance(99);
+    harness.clock.advance(Seconds::new(99));
     let response = consent(&harness, &uri, &browser, &[], "approve").await;
     assert!(redirect_params(&response).1.contains_key("code"));
 }
@@ -697,12 +698,12 @@ async fn the_technical_experience_has_the_same_session() {
     let harness = Harness::with_experience(crate::experience::Kind::Technical);
     let uri = harness.push(&json!({})).await;
     let csrf = open_login(&harness, &uri).await;
-    harness.clock.advance(299);
+    harness.clock.advance(Seconds::new(299));
     let response = harness.get(None, &authorize_path(&uri)).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert!(body_text(response).await.contains(")},1000);"));
 
-    harness.clock.advance(1);
+    harness.clock.advance(Seconds::new(1));
     let fields = base_fields(&csrf, &uri, "send");
     let late = submit(&harness, Some(&csrf), &fields).await;
     assert_eq!(late.status(), StatusCode::BAD_REQUEST);

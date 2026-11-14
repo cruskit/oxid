@@ -12,6 +12,10 @@ use aws_lc_rs::{constant_time, digest, rand};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
+#[cfg(any(test, feature = "test-util"))]
+use crate::epoch::Seconds;
+use crate::epoch::Timestamp;
+
 /// A value that must never be printed: its `Debug` output is redacted, so a
 /// `?config` or `dbg!` cannot leak it into logs. Read it with
 /// [`Secret::expose`].
@@ -109,8 +113,7 @@ pub(crate) fn ct_eq(a: impl AsRef<[u8]>, b: impl AsRef<[u8]>) -> bool {
 
 /// Source of the current time, injectable so expiry logic can be unit tested.
 pub trait Clock: Send + Sync + Debug {
-    /// Seconds since the Unix epoch.
-    fn now(&self) -> i64;
+    fn now(&self) -> Timestamp;
 }
 
 /// The real wall clock.
@@ -118,11 +121,11 @@ pub trait Clock: Send + Sync + Debug {
 pub struct SystemClock;
 
 impl Clock for SystemClock {
-    fn now(&self) -> i64 {
+    fn now(&self) -> Timestamp {
         let secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
-        i64::try_from(secs).unwrap_or(i64::MAX)
+        Timestamp::from_unix(i64::try_from(secs).unwrap_or(i64::MAX))
     }
 }
 
@@ -133,23 +136,23 @@ pub struct ManualClock(AtomicI64);
 
 #[cfg(any(test, feature = "test-util"))]
 impl ManualClock {
-    pub fn new(now: i64) -> Self {
-        Self(AtomicI64::new(now))
+    pub fn new(now: Timestamp) -> Self {
+        Self(AtomicI64::new(now.unix()))
     }
 
-    pub fn set(&self, now: i64) {
-        self.0.store(now, Ordering::SeqCst);
+    pub fn set(&self, now: Timestamp) {
+        self.0.store(now.unix(), Ordering::SeqCst);
     }
 
-    pub fn advance(&self, secs: i64) {
-        self.0.fetch_add(secs, Ordering::SeqCst);
+    pub fn advance(&self, by: Seconds) {
+        self.0.fetch_add(by.get(), Ordering::SeqCst);
     }
 }
 
 #[cfg(any(test, feature = "test-util"))]
 impl Clock for ManualClock {
-    fn now(&self) -> i64 {
-        self.0.load(Ordering::SeqCst)
+    fn now(&self) -> Timestamp {
+        Timestamp::from_unix(self.0.load(Ordering::SeqCst))
     }
 }
 

@@ -33,6 +33,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use url::Url;
 
+use crate::epoch::{Seconds, Timestamp};
 use crate::client::{Client, GRANT_AUTHORIZATION_CODE, GRANT_REFRESH_TOKEN, Profile};
 use crate::client_auth::ASSERTION_TYPE;
 use crate::config::ClientConfig;
@@ -233,7 +234,7 @@ fn client_assertion(
     config: &ClientSyncConfig,
     signing_key: &SigningKey,
     audience: &str,
-    now: i64,
+    now: Timestamp,
 ) -> Result<String> {
     signing_key
         .sign_with_kid(
@@ -246,7 +247,7 @@ fn client_assertion(
                 "jti": random_token(16),
                 "iat": now,
                 "nbf": now,
-                "exp": now + 60,
+                "exp": now + Seconds::minutes(1),
             }),
         )
         .map_err(|error| anyhow!("signing the client assertion: {error}"))
@@ -258,7 +259,7 @@ async fn access_token(
     signing_key: &SigningKey,
     token_endpoint: &str,
     audience: &str,
-    now: i64,
+    now: Timestamp,
 ) -> Result<String> {
     let assertion = client_assertion(config, signing_key, audience, now)?;
     let request = http.post(token_endpoint).form(&[

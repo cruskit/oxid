@@ -1,3 +1,4 @@
+use crate::epoch::Seconds;
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 
@@ -163,8 +164,8 @@ async fn invalid_request_objects_and_parameters_map_to_the_right_errors() {
     let harness = Harness::new();
     let now = harness.state.now();
     let cases = [
-        (json!({"exp": now + 3600}), "invalid_request_object"),
-        (json!({"nbf": now - 900}), "invalid_request_object"),
+        (json!({"exp": now + Seconds::new(3600)}), "invalid_request_object"),
+        (json!({"nbf": now - Seconds::new(900)}), "invalid_request_object"),
         (
             json!({"aud": "https://other.example.com"}),
             "invalid_request_object",

@@ -1,4 +1,5 @@
 use super::*;
+use crate::epoch::{Seconds, Timestamp};
 
 fn config(extra: &str) -> Config {
     toml::from_str(&format!(
@@ -22,7 +23,7 @@ async fn builds_from_minimal_config_with_development_fallbacks() {
             .is_some()
     );
     assert!(state.clients.get("anything").is_none());
-    assert!(state.now() > 1_704_067_200);
+    assert!(state.now() > Timestamp::from_unix(1_704_067_200));
 }
 
 #[tokio::test]
@@ -71,7 +72,7 @@ async fn secrets_are_not_in_debug_output() {
 #[tokio::test]
 async fn invalid_config_is_rejected() {
     let mut bad = config("");
-    bad.security.access_token_ttl = 3600;
+    bad.security.access_token_ttl = Seconds::new(3600);
     assert!(AppState::from_config(&bad).await.is_err());
 
     let missing_key = config("[keys]\nsigning_key = \"/nonexistent/key.pem\"");

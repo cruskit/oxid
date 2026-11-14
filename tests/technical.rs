@@ -13,6 +13,7 @@
 mod common;
 
 use common::html::{Page, has_id, text_of};
+use oxid::Seconds;
 use std::collections::HashMap;
 
 use common::{CLIENT_ID, LoginPage, Pkce, REDIRECT_URI, TestOp, redirect_params};
@@ -420,7 +421,7 @@ async fn response_can_be_edited_before_it_is_sent() {
     edited.as_object_mut().unwrap().remove("family_name");
     let edited_text = serde_json::to_string_pretty(&edited).unwrap();
 
-    op.clock.advance(5);
+    op.clock.advance(Seconds::new(5));
     let response = send_success(
         &op,
         &page,
@@ -450,7 +451,7 @@ async fn response_can_be_edited_before_it_is_sent() {
     assert_eq!(claims["nonce"], "nonce-456");
     assert_eq!(
         claims["iat"],
-        op.now(),
+        op.now().unix(),
         "iat is the time of issue, not of preview"
     );
     let at_hash = claims["at_hash"].as_str().unwrap();

@@ -20,6 +20,7 @@ use std::sync::Arc;
 use askama::Template;
 use serde_json::{Map, Value};
 
+use crate::epoch::Seconds;
 use crate::cookie::{SameSite, SetCookie};
 use super::{
     Approval, Decision, Experience, Form, FormTarget, Interaction, Kind, Page, Step, StepFuture,
@@ -147,7 +148,7 @@ impl Login {
         store
             .sign_in(interaction.request_uri, session, &user.subject, &secret)
             .await?;
-        let remaining = (session.expires_at - interaction.state.now()).max(1);
+        let remaining = (session.expires_at - interaction.state.now()).max(Seconds::new(1));
         Ok(Step {
             decision: Decision::Page(consent_page(interaction, &user, false)?),
             set_cookies: vec![SetCookie::host(LOGIN_COOKIE, secret, SameSite::Lax).max_age(remaining)],

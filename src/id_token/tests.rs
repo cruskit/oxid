@@ -1,3 +1,4 @@
+use crate::epoch::Seconds;
 use super::*;
 use crate::claims::ClaimsRequest;
 use crate::jose::{SigningAlg, UnverifiedJws};
@@ -13,7 +14,7 @@ fn grant(claims: Value) -> Grant {
         scope: vec!["openid".to_owned()],
         claims: ClaimsRequest::parse(&claims).unwrap(),
         shared_claims: crate::testing::everything(),
-        auth_time: NOW - 5,
+        auth_time: NOW - Seconds::new(5),
         txn: "txn-123".to_owned(),
         purpose: None,
         id_token_edits: None,
@@ -48,8 +49,8 @@ fn id_token_has_required_claims_and_verifies() {
     assert_eq!(jws.str_claim("nonce"), Some("n-1"));
     assert_eq!(jws.str_claim("txn"), Some("txn-123"));
     assert_eq!(jws.time_claim("iat"), Some(NOW));
-    assert_eq!(jws.time_claim("exp"), Some(NOW + 300));
-    assert_eq!(jws.time_claim("auth_time"), Some(NOW - 5));
+    assert_eq!(jws.time_claim("exp"), Some(NOW + Seconds::new(300)));
+    assert_eq!(jws.time_claim("auth_time"), Some(NOW - Seconds::new(5)));
     assert_eq!(
         jws.str_claim("sub"),
         Some(subject_for(&state, &client, &user).as_str())
@@ -167,7 +168,7 @@ fn manual_edits_are_applied_to_the_issued_token() {
     grant.id_token_edits = Some(ClaimEdits::between(&base, &edited));
 
     // Time passes between the preview and the token request.
-    clock.advance(7);
+    clock.advance(Seconds::new(7));
     let token = issue(&state, &client, &user, &grant, Some("n-1"), "at").unwrap();
     let jws = UnverifiedJws::parse(&token, &[SigningAlg::PS256])
         .unwrap()
@@ -179,7 +180,7 @@ fn manual_edits_are_applied_to_the_issued_token() {
     assert!(!jws.claims().contains_key("family_name"));
     assert!(!jws.claims().contains_key("nonce"));
     // Untouched claims are live, not frozen at preview time.
-    assert_eq!(jws.time_claim("iat"), Some(NOW + 7));
+    assert_eq!(jws.time_claim("iat"), Some(NOW + Seconds::new(7)));
     assert_eq!(jws.claims()["at_hash"], at_hash("at"));
 }
 

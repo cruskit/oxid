@@ -98,7 +98,7 @@ async fn full_code_flow_issues_verifiable_bound_tokens() {
     assert_eq!(claims["aud"], CLIENT_ID);
     assert_eq!(claims["nonce"], "nonce-456");
     assert!(claims["txn"].as_str().is_some_and(|txn| !txn.is_empty()));
-    assert!(claims["exp"].as_i64().unwrap() > op.now());
+    assert!(claims["exp"].as_i64().unwrap() > op.now().unix());
 
     // 5. UserInfo over the same mutual TLS identity.
     let response = op

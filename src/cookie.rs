@@ -4,6 +4,7 @@
 //! `Secure`, `Path=/`, no `Domain`, so it is pinned to this origin. They are
 //! all `HttpOnly`. Only `SameSite` differs, and [`SameSite`] says why.
 
+use crate::epoch::Seconds;
 use std::fmt;
 
 use axum::http::{HeaderMap, HeaderValue, header};
@@ -37,7 +38,7 @@ pub(crate) struct SetCookie {
     value: String,
     same_site: SameSite,
     /// Seconds until the browser drops it; `None` for the session.
-    max_age: Option<i64>,
+    max_age: Option<Seconds>,
 }
 
 impl SetCookie {
@@ -54,14 +55,14 @@ impl SetCookie {
 
     /// Expire the cookie after `seconds`; 0 deletes it.
     #[must_use]
-    pub(crate) fn max_age(mut self, seconds: i64) -> Self {
+    pub(crate) fn max_age(mut self, seconds: Seconds) -> Self {
         self.max_age = Some(seconds);
         self
     }
 
     /// Delete the cookie `name`.
     pub(crate) fn delete(name: &'static str, same_site: SameSite) -> Self {
-        Self::host(name, "", same_site).max_age(0)
+        Self::host(name, "", same_site).max_age(Seconds::ZERO)
     }
 }
 
@@ -114,7 +115,7 @@ mod tests {
         );
         assert_eq!(
             SetCookie::host("__Host-x", "v", SameSite::Strict)
-                .max_age(60)
+                .max_age(Seconds::new(60))
                 .to_string(),
             "__Host-x=v; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=60"
         );

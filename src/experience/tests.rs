@@ -2,6 +2,7 @@ use axum::http::HeaderValue;
 use axum::http::header;
 
 use super::*;
+use crate::epoch::Seconds;
 
 #[test]
 fn kinds_parse_from_their_configuration_names() {
@@ -37,8 +38,8 @@ fn cookie_parsing_finds_the_named_cookie() {
 
 #[test]
 fn durations_read_naturally() {
-    assert_eq!(duration_text(300), "5 minutes");
-    assert_eq!(duration_text(60), "1 minute");
-    assert_eq!(duration_text(90), "90 seconds");
+    assert_eq!(duration_text(Seconds::new(300)), "5 minutes");
+    assert_eq!(duration_text(Seconds::new(60)), "1 minute");
+    assert_eq!(duration_text(Seconds::new(90)), "90 seconds");
 }
 

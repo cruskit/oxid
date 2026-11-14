@@ -140,8 +140,8 @@ backend = "memory"
 # the limits set by FAPI 2.0 and ConnectID are refused at startup.
 [security]
 access_token_ttl = 300              # at most 600
-refresh_token_ttl = 86400
-id_token_ttl = 300
+refresh_token_ttl = 86400            # at most a year
+id_token_ttl = 300                    # at most an hour
 authorization_code_ttl = 60         # at most 60
 request_uri_ttl = 90                # below 600; time to reach the sign-in page
 session_ttl = 300                   # time to sign in and decide once there; at most 3600

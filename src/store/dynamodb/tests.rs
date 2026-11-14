@@ -7,6 +7,7 @@ use aws_sdk_dynamodb::types::{
 use serde_json::Value;
 
 use super::*;
+use crate::epoch::Timestamp;
 use crate::store::{Store, contract};
 use crate::util::random_token;
 
@@ -38,12 +39,12 @@ fn sort_keys_order_log_entries_by_time() {
 
 #[test]
 fn records_are_read_from_items() {
-    let mut stored = item("k", SOLE, "v".to_owned(), Some(42));
+    let mut stored = item("k", SOLE, "v".to_owned(), Some(Timestamp::from_unix(42)));
     assert_eq!(
         record(&stored).unwrap(),
         Record {
             value: "v".to_owned(),
-            expires_at: Some(42),
+            expires_at: Some(Timestamp::from_unix(42)),
             count: 0
         }
     );
@@ -124,7 +125,7 @@ async fn dynamodb_backend_meets_the_contract() {
     backend.put("forever", "a".to_owned(), None).await.unwrap();
     assert!(
         !backend
-            .put_new("forever", "b".to_owned(), None, i64::MAX)
+            .put_new("forever", "b".to_owned(), None, Timestamp::from_unix(i64::MAX))
             .await
             .unwrap()
     );

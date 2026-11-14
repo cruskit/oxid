@@ -24,6 +24,7 @@ use aws_sdk_dynamodb::types::{AttributeValue, ReturnValue};
 
 use super::{Backend, BackendFuture, Record, StoreError, StoreResult};
 use crate::config::StoreConfig;
+use crate::epoch::Timestamp;
 
 pub(crate) const HASH_KEY: &str = "pk";
 pub(crate) const RANGE_KEY: &str = "sk";
@@ -84,7 +85,7 @@ fn string(value: impl Into<String>) -> AttributeValue {
     AttributeValue::S(value.into())
 }
 
-fn number(value: i64) -> AttributeValue {
+fn number(value: impl std::fmt::Display) -> AttributeValue {
     AttributeValue::N(value.to_string())
 }
 
@@ -95,7 +96,7 @@ fn key(pk: &str, sk: &str) -> Item {
     ])
 }
 
-fn item(pk: &str, sk: &str, value: String, expires_at: Option<i64>) -> Item {
+fn item(pk: &str, sk: &str, value: String, expires_at: Option<Timestamp>) -> Item {
     let mut item = key(pk, sk);
     item.insert(VALUE.to_owned(), string(value));
     if let Some(expires_at) = expires_at {
@@ -129,7 +130,7 @@ fn number_of<T: std::str::FromStr>(item: &Item, name: &str) -> StoreResult<Optio
 fn record(item: &Item) -> StoreResult<Record> {
     Ok(Record {
         value: value_of(item)?,
-        expires_at: number_of(item, TTL_ATTRIBUTE)?,
+        expires_at: number_of(item, TTL_ATTRIBUTE)?.map(Timestamp::from_unix),
         count: number_of(item, COUNT)?.unwrap_or(0),
     })
 }
@@ -139,7 +140,7 @@ impl Backend for DynamoBackend {
         &'a self,
         key: &'a str,
         value: String,
-        expires_at: Option<i64>,
+        expires_at: Option<Timestamp>,
     ) -> BackendFuture<'a, ()> {
         Box::pin(async move {
             self.client
@@ -157,8 +158,8 @@ impl Backend for DynamoBackend {
         &'a self,
         key: &'a str,
         value: String,
-        expires_at: Option<i64>,
-        now: i64,
+        expires_at: Option<Timestamp>,
+        now: Timestamp,
     ) -> BackendFuture<'a, bool> {
         Box::pin(async move {
             let result = self
@@ -252,7 +253,7 @@ impl Backend for DynamoBackend {
         &'a self,
         partition: &'a str,
         id: &'a str,
-        at: i64,
+        at: Timestamp,
         value: String,
     ) -> BackendFuture<'a, ()> {
         Box::pin(async move {
@@ -323,7 +324,7 @@ impl Backend for DynamoBackend {
         })
     }
 
-    fn purge(&self, _now: i64) -> BackendFuture<'_, ()> {
+    fn purge(&self, _now: Timestamp) -> BackendFuture<'_, ()> {
         // The table's TTL setting removes expired items.
         Box::pin(std::future::ready(Ok(())))
     }

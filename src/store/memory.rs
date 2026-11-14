@@ -4,6 +4,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, MutexGuard};
 
 use super::{Backend, BackendFuture, MAX_CONSENT_RECORDS, Record};
+use crate::epoch::Timestamp;
 
 #[derive(Debug)]
 struct LogEntry {
@@ -81,7 +82,7 @@ impl Backend for MemoryBackend {
         &'a self,
         key: &'a str,
         value: String,
-        expires_at: Option<i64>,
+        expires_at: Option<Timestamp>,
     ) -> BackendFuture<'a, ()> {
         self.lock().records.insert(
             key.to_owned(),
@@ -98,8 +99,8 @@ impl Backend for MemoryBackend {
         &'a self,
         key: &'a str,
         value: String,
-        expires_at: Option<i64>,
-        now: i64,
+        expires_at: Option<Timestamp>,
+        now: Timestamp,
     ) -> BackendFuture<'a, bool> {
         let mut inner = self.lock();
         let occupied = inner
@@ -138,7 +139,7 @@ impl Backend for MemoryBackend {
         &'a self,
         partition: &'a str,
         id: &'a str,
-        _at: i64,
+        _at: Timestamp,
         value: String,
     ) -> BackendFuture<'a, ()> {
         let mut inner = self.lock();
@@ -176,7 +177,7 @@ impl Backend for MemoryBackend {
         )
     }
 
-    fn purge(&self, now: i64) -> BackendFuture<'_, ()> {
+    fn purge(&self, now: Timestamp) -> BackendFuture<'_, ()> {
         self.lock()
             .records
             .retain(|_, record| record.expires_at.is_none_or(|at| at > now));

@@ -1,6 +1,7 @@
 //! The router driven in-process, and the browser and token legs of the
 //! authorization code flow.
 
+use crate::epoch::Seconds;
 use std::collections::HashMap;
 
 use axum::body::Body;
@@ -55,7 +56,7 @@ impl Harness {
 
     /// A provider using the `ci` experience, which holds its default
     /// response back for `response_delay` seconds.
-    pub fn ci(response_delay: i64) -> Self {
+    pub fn ci(response_delay: Seconds) -> Self {
         Self::from_state(crate::testing::state::state_with_ci(
             crate::experience::Kind::Ci,
             crate::config::CiConfig { response_delay },
@@ -114,7 +115,7 @@ impl Harness {
                 Some("JWT"),
                 &json!({
                     "iss": "rp", "sub": "rp", "aud": ISSUER,
-                    "jti": random_token(16), "iat": now, "exp": now + 60,
+                    "jti": random_token(16), "iat": now, "exp": now + Seconds::new(60),
                 }),
             )
             .unwrap()
