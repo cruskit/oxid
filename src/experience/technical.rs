@@ -30,10 +30,11 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
+use crate::cookie::{SameSite, SetCookie};
 use super::{
     Approval, Decision, ERROR_CONDITIONS, ErrorCondition, Experience, Form, FormTarget,
     Interaction, Kind, MAX_ERROR_DESCRIPTION, Page, Step, StepFuture, error_condition,
-    everything_requested, host_cookie, is_error_description, render,
+    everything_requested, is_error_description, render,
 };
 use crate::id_token::{self, ClaimEdits};
 use crate::store::Grant;
@@ -128,12 +129,9 @@ fn cookie_value(user: &User) -> String {
     b64url(user.subject.as_bytes())
 }
 
-fn remember(user: &User) -> String {
-    host_cookie(
-        CUSTOMER_COOKIE,
-        &cookie_value(user),
-        Some(CUSTOMER_COOKIE_MAX_AGE),
-    )
+fn remember(user: &User) -> SetCookie {
+    SetCookie::host(CUSTOMER_COOKIE, cookie_value(user), SameSite::Lax)
+        .max_age(CUSTOMER_COOKIE_MAX_AGE)
 }
 
 /// What the page should show: the selections so far and any message.

@@ -85,6 +85,10 @@ pub enum JoseError {
     NoMatchingKey,
     #[error("signature verification failed")]
     BadSignature,
+    /// The signature could not be checked at all, for example because it
+    /// is not valid base64url or has the wrong length for the key.
+    #[error("signature could not be checked: {0}")]
+    UnreadableSignature(String),
     #[error("signing failed: {0}")]
     Signing(String),
 }
@@ -170,28 +174,29 @@ impl Jws {
         expect(unreachable_pub, reason = "the integration tests use it")
     )]
     pub fn verify(&self, keys: &JwkSet) -> Result<(), JoseError> {
-        let mut tried_any = false;
+        let mut outcome = Err(JoseError::NoMatchingKey);
         for jwk in keys.keys.iter().filter(|jwk| self.key_is_candidate(jwk)) {
             let Ok(key) = DecodingKey::from_jwk(jwk) else {
                 continue;
             };
-            tried_any = true;
-            if crypto::verify(
+            match crypto::verify(
                 &self.signature,
                 self.signing_input.as_bytes(),
                 &key,
                 self.alg.algorithm(),
-            )
-            .unwrap_or(false)
-            {
-                return Ok(());
+            ) {
+                Ok(true) => return Ok(()),
+                // A wrong signature outranks an unreadable one: it is the
+                // more useful thing to report when keys disagree.
+                Ok(false) => outcome = Err(JoseError::BadSignature),
+                Err(error) => {
+                    if !matches!(outcome, Err(JoseError::BadSignature)) {
+                        outcome = Err(JoseError::UnreadableSignature(error.to_string()));
+                    }
+                }
             }
         }
-        if tried_any {
-            Err(JoseError::BadSignature)
-        } else {
-            Err(JoseError::NoMatchingKey)
-        }
+        outcome
     }
 
     fn key_is_candidate(&self, jwk: &Jwk) -> bool {
@@ -275,25 +280,14 @@ pub(crate) fn sign(
     if let Some(typ) = typ {
         header.insert("typ".into(), typ.into());
     }
-    let to_json = |v: &dyn erased::Json| v.to_vec().map_err(|e| JoseError::Signing(e.to_string()));
     let signing_input = format!("{}.{}", b64url(to_json(&header)?), b64url(to_json(claims)?));
     let signature = crypto::sign(signing_input.as_bytes(), key, alg.algorithm())
         .map_err(|e| JoseError::Signing(e.to_string()))?;
     Ok(format!("{signing_input}.{signature}"))
 }
 
-mod erased {
-    /// Object-safe "serialise to JSON bytes", so one closure can handle both
-    /// the header map and the caller's claims type.
-    pub(super) trait Json {
-        fn to_vec(&self) -> serde_json::Result<Vec<u8>>;
-    }
-
-    impl<T: serde::Serialize> Json for T {
-        fn to_vec(&self) -> serde_json::Result<Vec<u8>> {
-            serde_json::to_vec(self)
-        }
-    }
+fn to_json(value: &impl Serialize) -> Result<Vec<u8>, JoseError> {
+    serde_json::to_vec(value).map_err(|e| JoseError::Signing(e.to_string()))
 }
 
 #[cfg(test)]

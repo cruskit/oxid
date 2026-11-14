@@ -20,9 +20,10 @@ use std::sync::Arc;
 use askama::Template;
 use serde_json::{Map, Value};
 
+use crate::cookie::{SameSite, SetCookie};
 use super::{
     Approval, Decision, Experience, Form, FormTarget, Interaction, Kind, Page, Step, StepFuture,
-    duration_text, host_cookie, render,
+    duration_text, render,
 };
 use crate::claims::{self, ConsentItem};
 use crate::error::ErrorCode;
@@ -162,14 +163,14 @@ impl Login {
         let remaining = (session.expires_at - interaction.state.now()).max(1);
         Step {
             decision: Decision::Page(consent_page(interaction, &user, false)),
-            set_cookies: vec![host_cookie(LOGIN_COOKIE, &secret, Some(remaining))],
+            set_cookies: vec![SetCookie::host(LOGIN_COOKIE, secret, SameSite::Lax).max_age(remaining)],
         }
     }
 }
 
-/// A `Set-Cookie` value that removes the sign-in cookie.
-fn forget_browser() -> String {
-    host_cookie(LOGIN_COOKIE, "", Some(0))
+/// Removes the sign-in cookie.
+fn forget_browser() -> SetCookie {
+    SetCookie::delete(LOGIN_COOKIE, SameSite::Lax)
 }
 
 fn approve(interaction: &Interaction<'_>, form: &Form, user: &User) -> Step {

@@ -76,7 +76,7 @@ impl SigningKey {
             .map_err(|_| anyhow::anyhow!("RSA key generation failed"))?;
         let der = AsDer::<aws_lc_rs::encoding::Pkcs8V1Der<'_>>::as_der(&pair)
             .map_err(|_| anyhow::anyhow!("RSA key serialisation failed"))?;
-        Ok(pkcs8_pem(der.as_ref()))
+        Ok(crate::util::pem("PRIVATE KEY", der.as_ref()))
     }
 
     fn from_encoding_key(encoding_key: EncodingKey) -> Result<Self> {
@@ -141,13 +141,6 @@ impl SigningKey {
     }
 }
 
-/// Wrap PKCS#8 DER in a PEM envelope so it goes through the same loader as a
-/// key read from disk.
-fn pkcs8_pem(der: &[u8]) -> String {
-    use base64::Engine;
-    let body = base64::engine::general_purpose::STANDARD.encode(der);
-    format!("-----BEGIN PRIVATE KEY-----\n{body}\n-----END PRIVATE KEY-----\n")
-}
 
 #[cfg(test)]
 mod tests;

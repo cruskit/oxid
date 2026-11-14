@@ -42,6 +42,22 @@ impl<T> Debug for Secret<T> {
     }
 }
 
+/// Wrap DER in a PEM envelope (RFC 7468 §2): standard base64 in lines of 64
+/// characters between `-----BEGIN {label}-----` and `-----END {label}-----`.
+pub(crate) fn pem(label: &str, der: &[u8]) -> String {
+    let body = base64::engine::general_purpose::STANDARD.encode(der);
+    let mut out = format!("-----BEGIN {label}-----\n");
+    // Base64 is ASCII, so every 64-byte chunk is a whole string.
+    for line in body.as_bytes().chunks(64) {
+        out.push_str(&String::from_utf8_lossy(line));
+        out.push('\n');
+    }
+    out.push_str("-----END ");
+    out.push_str(label);
+    out.push_str("-----\n");
+    out
+}
+
 /// Encode bytes as unpadded base64url (RFC 4648 §5).
 #[cfg_attr(
     not(feature = "test-util"),

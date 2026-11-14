@@ -38,24 +38,31 @@ const TLS12_SUITES: &[CipherSuite] = &[
     expect(unreachable_pub, reason = "the integration tests use it")
 )]
 pub struct TlsIdentity {
-    pub certs: Vec<CertificateDer<'static>>,
-    pub key: PrivateKeyDer<'static>,
+    /// The end-entity certificate. Kept apart from the rest of the chain,
+    /// so that an identity always has one.
+    leaf: CertificateDer<'static>,
+    /// The rest of the chain, in the order the file gives it.
+    intermediates: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
 }
 
 impl TlsIdentity {
     pub(crate) fn from_pem_files(cert: &Path, key: &Path) -> Result<Self> {
-        let certs = CertificateDer::pem_file_iter(cert)
+        let mut certs = CertificateDer::pem_file_iter(cert)
             .with_context(|| format!("reading certificate {}", cert.display()))?
             .collect::<Result<Vec<_>, _>>()
-            .with_context(|| format!("parsing certificate {}", cert.display()))?;
-        anyhow::ensure!(
-            !certs.is_empty(),
-            "{} contains no certificates",
-            cert.display()
-        );
+            .with_context(|| format!("parsing certificate {}", cert.display()))?
+            .into_iter();
+        let leaf = certs
+            .next()
+            .with_context(|| format!("{} contains no certificates", cert.display()))?;
         let key = PrivateKeyDer::from_pem_file(key)
             .with_context(|| format!("reading private key {}", key.display()))?;
-        Ok(Self { certs, key })
+        Ok(Self {
+            leaf,
+            intermediates: certs.collect(),
+            key,
+        })
     }
 
     /// Generate a self-signed certificate valid for `names` (DNS names or IP
@@ -69,15 +76,32 @@ impl TlsIdentity {
             .context("generating self-signed certificate")?;
         let key = PrivatePkcs8KeyDer::from(generated.signing_key.serialize_der());
         Ok(Self {
-            certs: vec![generated.cert.der().clone()],
+            leaf: generated.cert.der().clone(),
+            intermediates: Vec::new(),
             key: key.into(),
         })
+    }
+
+    /// The end-entity certificate.
+    #[cfg_attr(
+        not(feature = "test-util"),
+        expect(unreachable_pub, reason = "the integration tests use it")
+    )]
+    pub fn leaf(&self) -> &CertificateDer<'static> {
+        &self.leaf
+    }
+
+    /// The whole chain, leaf first, as a TLS server presents it.
+    pub(crate) fn chain(&self) -> Vec<CertificateDer<'static>> {
+        std::iter::once(self.leaf.clone())
+            .chain(self.intermediates.iter().cloned())
+            .collect()
     }
 
     /// PEM encoding of the leaf certificate.
     #[cfg(any(test, feature = "test-util"))]
     pub fn cert_pem(&self) -> String {
-        pem("CERTIFICATE", self.certs[0].as_ref())
+        crate::util::pem("CERTIFICATE", self.leaf.as_ref())
     }
 
     /// PEM encoding of the private key.
@@ -88,23 +112,8 @@ impl TlsIdentity {
             PrivateKeyDer::Sec1(_) => "EC PRIVATE KEY",
             _ => "PRIVATE KEY",
         };
-        pem(label, self.key.secret_der())
+        crate::util::pem(label, self.key.secret_der())
     }
-}
-
-#[cfg(any(test, feature = "test-util"))]
-fn pem(label: &str, der: &[u8]) -> String {
-    use base64::Engine;
-    let body = base64::engine::general_purpose::STANDARD.encode(der);
-    let lines: Vec<&str> = body
-        .as_bytes()
-        .chunks(64)
-        .map(|chunk| std::str::from_utf8(chunk).unwrap_or_default())
-        .collect();
-    format!(
-        "-----BEGIN {label}-----\n{}\n-----END {label}-----\n",
-        lines.join("\n")
-    )
 }
 
 /// Which client certificates a listener asks for and accepts.
@@ -189,7 +198,7 @@ pub fn server_config(
     };
 
     let mut config = builder
-        .with_single_cert(identity.certs.clone(), identity.key.clone_key())
+        .with_single_cert(identity.chain(), identity.key.clone_key())
         .context("loading server certificate and key")?;
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     Ok(Arc::new(config))

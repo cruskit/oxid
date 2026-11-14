@@ -35,6 +35,7 @@ use askama::Template;
 use axum::http::HeaderMap;
 use serde::Deserialize;
 
+use crate::cookie::SetCookie;
 use crate::authz::AuthorizationRequest;
 use crate::client::Client;
 use crate::error::ErrorCode;
@@ -133,7 +134,7 @@ impl Interaction<'_> {
 
     /// The value of a cookie the browser sent.
     pub(crate) fn cookie(&self, name: &str) -> Option<&str> {
-        cookie(self.headers, name)
+        crate::cookie::get(self.headers, name)
     }
 
     /// Where a form on a page of this experience posts to. A template with
@@ -192,27 +193,6 @@ pub(crate) fn duration_text(seconds: i64) -> String {
     format!("{count} {unit}{plural}")
 }
 
-/// The value of the cookie `name` in a request's headers.
-pub(crate) fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
-    headers
-        .get_all(axum::http::header::COOKIE)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(';'))
-        .filter_map(|pair| pair.trim().split_once('='))
-        .find_map(|(key, value)| (key == name).then_some(value))
-}
-
-/// A `Set-Cookie` value for a cookie scoped to this origin. The `__Host-`
-/// prefix requires `Secure` and `Path=/`, which are always set here.
-pub(crate) fn host_cookie(name: &str, value: &str, max_age_seconds: Option<i64>) -> String {
-    let base = format!("{name}={value}; Path=/; Secure; HttpOnly; SameSite=Lax");
-    match max_age_seconds {
-        Some(max_age) => format!("{base}; Max-Age={max_age}"),
-        None => base,
-    }
-}
-
 /// A page shown to the user.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Page {
@@ -265,8 +245,8 @@ pub(crate) enum Decision {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Step {
     pub decision: Decision,
-    /// `Set-Cookie` header values, e.g. from [`host_cookie`].
-    pub set_cookies: Vec<String>,
+    /// Cookies to set.
+    pub set_cookies: Vec<SetCookie>,
 }
 
 impl From<Decision> for Step {

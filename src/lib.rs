@@ -31,6 +31,7 @@ internal! {
     client;
     client_auth;
     client_sync;
+    cookie;
     error;
     experience;
     http;

@@ -161,7 +161,7 @@ impl ServerBuilder {
         Ok(Server {
             public_addr,
             mtls_addr,
-            certificate: identity.certs[0].clone(),
+            certificate: identity.leaf().clone(),
             #[cfg(feature = "test-util")]
             state,
             shutdown,

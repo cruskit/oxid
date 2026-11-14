@@ -24,7 +24,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use jsonwebtoken::jwk::JwkSet;
@@ -37,7 +37,7 @@ use crate::client::{Client, GRANT_AUTHORIZATION_CODE, GRANT_REFRESH_TOKEN, Profi
 use crate::client_auth::ASSERTION_TYPE;
 use crate::config::ClientConfig;
 use crate::keys::SigningKey;
-use crate::util::random_token;
+use crate::util::{Clock, random_token};
 
 /// Time allowed for each request to the registry.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -135,7 +135,7 @@ impl ClientSyncConfig {
     not(feature = "test-util"),
     expect(unreachable_pub, reason = "the integration tests use it")
 )]
-pub async fn fetch(config: &ClientSyncConfig) -> Result<Vec<Client>> {
+pub async fn fetch(config: &ClientSyncConfig, clock: &dyn Clock) -> Result<Vec<Client>> {
     config.validate()?;
     let signing_key = SigningKey::from_pem_file(&config.signing_key)?;
     let mtls = http_client(config, true)?;
@@ -144,7 +144,7 @@ pub async fn fetch(config: &ClientSyncConfig) -> Result<Vec<Client>> {
     let (token_endpoint, audience) = token_endpoint(config, &mtls).await?;
     tracing::info!(%token_endpoint, clients_url = %config.clients_url, "synchronising clients from the registry");
     let access_token =
-        access_token(config, &mtls, &signing_key, &token_endpoint, &audience).await?;
+        access_token(config, &mtls, &signing_key, &token_endpoint, &audience, clock.now()).await?;
     let entries = all_pages(config, &mtls, &access_token).await?;
     let found = entries.len();
 
@@ -228,14 +228,6 @@ fn discovered_token_endpoint(metadata: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
-        .unwrap_or_default()
-}
-
 /// The `private_key_jwt` assertion that authenticates this provider.
 fn client_assertion(
     config: &ClientSyncConfig,
@@ -266,8 +258,9 @@ async fn access_token(
     signing_key: &SigningKey,
     token_endpoint: &str,
     audience: &str,
+    now: i64,
 ) -> Result<String> {
-    let assertion = client_assertion(config, signing_key, audience, now())?;
+    let assertion = client_assertion(config, signing_key, audience, now)?;
     let request = http.post(token_endpoint).form(&[
         ("grant_type", "client_credentials"),
         ("scope", config.scope.as_str()),

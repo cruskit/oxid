@@ -29,12 +29,13 @@ use axum::response::{IntoResponse, Response};
 use url::Url;
 use uuid::Uuid;
 
-use super::page::{CSRF_COOKIE, Shell, add_cookies, csrf_cookie, error_page, is_csrf_token};
+use super::page::{CSRF_COOKIE, Shell, csrf_cookie, error_page, is_csrf_token};
+use crate::cookie::{self, SetCookie};
 use super::{Params, no_store};
 use crate::client::Client;
 use crate::error::ErrorCode;
 use crate::experience::{
-    Approval, Decision, FormTarget, Interaction, Page, Step, cookie, duration_text, render,
+    Approval, Decision, FormTarget, Interaction, Page, Step, duration_text, render,
 };
 use crate::state::AppState;
 use crate::store::{
@@ -98,7 +99,7 @@ fn session_expired_page(
         wide: false,
     }
     .render(&state.theme);
-    add_cookies(&mut response, &[csrf_cookie(csrf)]);
+    cookie::set(&mut response, &[csrf_cookie(csrf)]);
     response
 }
 
@@ -192,7 +193,7 @@ fn authorize_path(client_id: &str, request_uri: &str) -> String {
 /// The page reloads itself when the session ends, which replaces it with the
 /// session expiry page: the user is told, rather than finding out when they
 /// submit the form.
-fn experience_page(page: &Page, interaction: &Interaction<'_>, cookies: &[String]) -> Response {
+fn experience_page(page: &Page, interaction: &Interaction<'_>, cookies: &[SetCookie]) -> Response {
     let remaining = interaction.session.expires_at - interaction.state.now();
     let mut response = Shell {
         status: StatusCode::OK,
@@ -208,8 +209,8 @@ fn experience_page(page: &Page, interaction: &Interaction<'_>, cookies: &[String
         wide: page.wide,
     }
     .render(&interaction.state.theme);
-    add_cookies(&mut response, &[csrf_cookie(interaction.csrf)]);
-    add_cookies(&mut response, cookies);
+    cookie::set(&mut response, &[csrf_cookie(interaction.csrf)]);
+    cookie::set(&mut response, cookies);
     response
 }
 
@@ -291,7 +292,7 @@ pub(super) async fn authorize(
         Err(response) => return *response,
     };
 
-    let csrf = cookie(&headers, CSRF_COOKIE)
+    let csrf = cookie::get(&headers, CSRF_COOKIE)
         .filter(|v| is_csrf_token(v))
         .map_or_else(|| random_token(32), str::to_owned);
     let (pushed, session) = match visit {
@@ -326,7 +327,7 @@ pub(super) async fn decision(State(state): State<AppState>, headers: HeaderMap, 
 
     // Double-submit check: the form value must match the cookie this origin
     // set, which a cross-site attacker can neither read nor set.
-    let csrf_ok = match (cookie(&headers, CSRF_COOKIE), params.get("csrf")) {
+    let csrf_ok = match (cookie::get(&headers, CSRF_COOKIE), params.get("csrf")) {
         (Some(cookie), Some(form)) => is_csrf_token(cookie) && ct_eq(cookie, form),
         _ => false,
     };
@@ -467,7 +468,7 @@ async fn try_conclude(interaction: &Interaction<'_>, step: Step) -> StoreResult<
             redirect_to_client(state, &request.redirect_uri, &out)
         }
     };
-    add_cookies(&mut response, &step.set_cookies);
+    cookie::set(&mut response, &step.set_cookies);
     Ok(response)
 }
 

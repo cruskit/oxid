@@ -545,7 +545,7 @@ pub fn redirect_params(response: &Response) -> HashMap<String, String> {
 /// A self-signed client certificate, with its `x5t#S256` thumbprint.
 fn client_identity() -> (Identity, String) {
     let identity = TlsIdentity::self_signed(vec!["rp.example.com".to_owned()]).unwrap();
-    let thumbprint = b64url(sha256(identity.certs[0].as_ref()));
+    let thumbprint = b64url(sha256(identity.leaf().as_ref()));
     let pem = format!("{}{}", identity.cert_pem(), identity.key_pem());
     (Identity::from_pem(pem.as_bytes()).unwrap(), thumbprint)
 }

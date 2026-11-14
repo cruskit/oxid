@@ -8,6 +8,7 @@ use axum::response::{Html, IntoResponse, Response};
 use url::Url;
 
 use super::no_store;
+use crate::cookie::{SameSite, SetCookie};
 use crate::experience::render;
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -172,14 +173,8 @@ pub(super) fn is_csrf_token(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
 }
 
-pub(super) fn csrf_cookie(csrf: &str) -> String {
-    format!("{CSRF_COOKIE}={csrf}; Path=/; Secure; HttpOnly; SameSite=Strict")
-}
-
-pub(super) fn add_cookies(response: &mut Response, cookies: &[String]) {
-    for cookie in cookies {
-        if let Ok(value) = HeaderValue::from_str(cookie) {
-            response.headers_mut().append(header::SET_COOKIE, value);
-        }
-    }
+/// The CSRF cookie. Only this origin's own forms need it, so it is never
+/// sent on a request another site starts.
+pub(super) fn csrf_cookie(csrf: &str) -> SetCookie {
+    SetCookie::host(CSRF_COOKIE, csrf, SameSite::Strict)
 }

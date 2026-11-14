@@ -40,7 +40,7 @@ fn rejects_non_rsa_pem() {
 fn kid_is_stable_for_the_same_key() {
     let pair = KeyPair::generate(KeySize::Rsa2048).unwrap();
     let der = AsDer::<aws_lc_rs::encoding::Pkcs8V1Der<'_>>::as_der(&pair).unwrap();
-    let pem = pkcs8_pem(der.as_ref());
+    let pem = crate::util::pem("PRIVATE KEY", der.as_ref());
     let a = SigningKey::from_pem(pem.as_bytes()).unwrap();
     let b = SigningKey::from_pem(pem.as_bytes()).unwrap();
     assert_eq!(a.kid(), b.kid());

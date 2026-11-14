@@ -33,6 +33,7 @@ use oxid::http::ConnInfo;
 use oxid::jose::{Jws, SigningAlg};
 use oxid::keys::SigningKey;
 use oxid::tls::{self, ClientCertPolicy, TlsIdentity};
+use oxid::util::SystemClock;
 use serde_json::{Value, json};
 
 const IDP_CLIENT_ID: &str = "oxid-idp";
@@ -291,7 +292,7 @@ const REGISTRABLE: [&str; 5] = ["rp-one", "rp-two", "rp-three", "rp-four", "test
 #[tokio::test]
 async fn every_page_is_loaded_and_usable_clients_are_registered() {
     let registry = TestRegistry::start(3);
-    let clients = fetch(&registry.config).await.unwrap();
+    let clients = fetch(&registry.config, &SystemClock).await.unwrap();
 
     // Eight entries at three per page: all three pages were read.
     assert_eq!(registry.pages(), ["0", "1", "2"]);
@@ -322,7 +323,7 @@ async fn all_pages_are_loaded_whatever_the_page_size() {
         (1, vec!["0", "1", "2", "3", "4", "5", "6", "7"]),
     ] {
         let registry = TestRegistry::start(page_size);
-        let clients = fetch(&registry.config).await.unwrap();
+        let clients = fetch(&registry.config, &SystemClock).await.unwrap();
         assert_eq!(registry.pages(), expected_pages, "page size {page_size}");
         assert_eq!(ids(&clients), REGISTRABLE, "page size {page_size}");
         registry.stop();
@@ -333,7 +334,7 @@ async fn all_pages_are_loaded_whatever_the_page_size() {
 async fn an_empty_registry_yields_no_clients() {
     let registry = TestRegistry::start(50);
     registry.registry.entries.lock().unwrap().clear();
-    let clients = fetch(&registry.config).await.unwrap();
+    let clients = fetch(&registry.config, &SystemClock).await.unwrap();
     assert_eq!(clients.len(), 0);
     assert_eq!(registry.pages(), ["0"], "one request, then stop");
     registry.stop();
@@ -348,7 +349,10 @@ async fn authentication_failures_stop_the_synchronisation() {
         SigningKey::generate_pem().unwrap(),
     )
     .unwrap();
-    let error = format!("{:#}", fetch(&registry.config).await.unwrap_err());
+    let error = format!(
+        "{:#}",
+        fetch(&registry.config, &SystemClock).await.unwrap_err()
+    );
     assert!(
         error.contains("token endpoint") && error.contains("401"),
         "{error}"
@@ -364,23 +368,23 @@ async fn authentication_failures_stop_the_synchronisation() {
     let registry = TestRegistry::start(3);
     let mut config = registry.config.clone();
     config.signing_key_id = "some-other-kid".to_owned();
-    assert!(fetch(&config).await.is_err());
+    assert!(fetch(&config, &SystemClock).await.is_err());
 
     // The wrong scope.
     let mut config = registry.config.clone();
     config.scope = "something:else".to_owned();
-    let error = format!("{:#}", fetch(&config).await.unwrap_err());
+    let error = format!("{:#}", fetch(&config, &SystemClock).await.unwrap_err());
     assert!(error.contains("400"), "{error}");
 
     // A registry whose certificate is not trusted.
     let mut config = registry.config.clone();
     config.ca = None;
-    assert!(fetch(&config).await.is_err());
+    assert!(fetch(&config, &SystemClock).await.is_err());
 
     // Missing key material.
     let mut config = registry.config.clone();
     config.transport_key = registry.dir.join("nowhere.key");
-    let error = format!("{:#}", fetch(&config).await.unwrap_err());
+    let error = format!("{:#}", fetch(&config, &SystemClock).await.unwrap_err());
     assert!(error.contains("nowhere.key"), "{error}");
     registry.stop();
 }

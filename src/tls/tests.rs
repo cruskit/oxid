@@ -34,7 +34,7 @@ fn builds_configs_for_each_policy() {
     server_config(&identity, ClientCertPolicy::AnyProven).unwrap();
 
     let mut roots = RootCertStore::empty();
-    roots.add(identity.certs[0].clone()).unwrap();
+    roots.add(identity.leaf().clone()).unwrap();
     server_config(&identity, ClientCertPolicy::TrustedRoots(roots)).unwrap();
 }
 
@@ -68,7 +68,7 @@ fn pem_round_trips_through_the_file_loaders() {
     std::fs::write(&key, identity.key_pem()).unwrap();
 
     let loaded = TlsIdentity::from_pem_files(&cert, &key).unwrap();
-    assert_eq!(loaded.certs, identity.certs);
+    assert_eq!(loaded.chain(), identity.chain());
     server_config(&loaded, ClientCertPolicy::None).unwrap();
     assert!(matches!(
         ClientCertPolicy::from_ca_file(&cert).unwrap(),

@@ -41,6 +41,22 @@ fn tampered_payload_fails_verification() {
 }
 
 #[test]
+fn an_unreadable_signature_is_reported_as_such() {
+    let good = token(&json!({"sub": "a"}));
+    let (input, _) = good.rsplit_once('.').unwrap();
+    // One base64url character cannot encode a whole byte.
+    let jws = Jws::parse(&format!("{input}.A"), PS256).unwrap();
+    assert!(
+        matches!(
+            jws.verify(&jwks(key())),
+            Err(JoseError::UnreadableSignature(_))
+        ),
+        "{:?}",
+        jws.verify(&jwks(key()))
+    );
+}
+
+#[test]
 fn signature_from_another_key_is_rejected() {
     let other = SigningKey::generate().unwrap();
     let jws = Jws::parse(&other.sign(None, &json!({})).unwrap(), PS256).unwrap();

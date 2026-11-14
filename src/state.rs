@@ -65,13 +65,13 @@ impl AppState {
         config.validate()?;
         // Load clients from the registry before accepting any request, so
         // the provider never runs with a partial list.
+        let clock = clock.unwrap_or_else(|| Arc::new(SystemClock));
         let synced_clients = match &config.client_sync {
-            Some(sync) if sync.enabled => crate::client_sync::fetch(sync)
+            Some(sync) if sync.enabled => crate::client_sync::fetch(sync, clock.as_ref())
                 .await
                 .context("synchronising clients from the registry")?,
             _ => Vec::new(),
         };
-        let clock = clock.unwrap_or_else(|| Arc::new(SystemClock));
         Self::build(config, clock, synced_clients).await
     }
 

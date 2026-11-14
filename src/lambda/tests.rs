@@ -59,7 +59,7 @@ fn certificate_context(pem: &str) -> Value {
 #[test]
 fn certificate_comes_from_the_request_context_only() {
     let identity = TlsIdentity::self_signed(vec!["client.example".to_owned()]).unwrap();
-    let expected = ClientCert::from_der(identity.certs[0].as_ref());
+    let expected = ClientCert::from_der(identity.leaf().as_ref());
 
     let with = event(
         "POST",

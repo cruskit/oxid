@@ -51,7 +51,20 @@ impl ErrorCode {
             Self::InvalidClient => StatusCode::UNAUTHORIZED,
             Self::ServerError => StatusCode::INTERNAL_SERVER_ERROR,
             Self::TemporarilyUnavailable => StatusCode::SERVICE_UNAVAILABLE,
-            _ => StatusCode::BAD_REQUEST,
+            // Listed, not matched by a wildcard, so that a new code has to
+            // be given its status deliberately.
+            Self::InvalidRequest
+            | Self::InvalidGrant
+            | Self::UnauthorizedClient
+            | Self::UnsupportedGrantType
+            | Self::UnsupportedResponseType
+            | Self::InvalidScope
+            | Self::InvalidRequestObject
+            | Self::AccessDenied
+            | Self::LoginRequired
+            | Self::ConsentRequired
+            | Self::InteractionRequired
+            | Self::AccountSelectionRequired => StatusCode::BAD_REQUEST,
         }
     }
 }
