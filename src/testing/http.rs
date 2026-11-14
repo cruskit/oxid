@@ -14,7 +14,7 @@ use super::state::{ISSUER, state_with};
 use super::{VERIFIER, shared_key, valid_claims};
 use crate::client_auth::ASSERTION_TYPE;
 use crate::experience::login::LOGIN_COOKIE;
-use crate::http::authorize::CSRF_COOKIE;
+use crate::http::page::CSRF_COOKIE;
 use crate::http::{ConnInfo, PATH_AUTHORIZE, PATH_DECISION, PATH_PAR, PATH_TOKEN, router};
 use crate::state::AppState;
 use crate::tls::ClientCert;

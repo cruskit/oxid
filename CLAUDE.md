@@ -109,7 +109,8 @@ mise run build        # check + release build + conformance
   breaks in dark mode and ignores the theme. Name the provider with
   `{{ theme.name }}`, never a literal "oxID". The default theme is oxID's.
 
-  The endpoint (`http/authorize.rs`), not the experience, owns the page
+  The endpoint (`http/authorize.rs`, with the shell, CSP and CSRF cookie in
+  `http/page.rs`), not the experience, owns the page
   shell and the user's session: `request_uri_ttl` only limits how long the
   browser may take to arrive, then `session_ttl` (5 minutes) applies. An
   expired session gets its own page, with a way back to the client

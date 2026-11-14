@@ -25,10 +25,11 @@ use askama::Template;
 use axum::body::Bytes;
 use axum::extract::{RawQuery, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use url::Url;
 use uuid::Uuid;
 
+use super::page::{CSRF_COOKIE, Shell, add_cookies, csrf_cookie, error_page, is_csrf_token};
 use super::{Params, no_store};
 use crate::client::Client;
 use crate::error::ErrorCode;
@@ -40,137 +41,7 @@ use crate::store::{
     AuthorizationCode, ConsentOutcome, ConsentRecord, Grant, PushedRequest, StoreError,
     StoreResult, Visit,
 };
-use crate::theme::Theme;
 use crate::util::{ct_eq, random_token};
-
-/// Double-submit CSRF cookie. The `__Host-` prefix pins it to this origin,
-/// `Secure` and path `/` (RFC 6265bis §4.1.3.2).
-pub(crate) const CSRF_COOKIE: &str = "__Host-oxid-csrf";
-
-/// Content security policy for every page, before `form-action`, `img-src`
-/// and `script-src` are added by [`content_security_policy`].
-const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; style-src 'unsafe-inline'; \
-     frame-ancestors 'none'; base-uri 'none'";
-
-/// The policy for one page.
-///
-/// Forms post to this origin only. But the final post of an interaction is
-/// answered with a redirect to the client's redirect URI, and browsers apply
-/// `form-action` to that redirect as well (CSP3 §6.3.1; Chromium enforces
-/// it). A page of an interaction therefore also names the origin of the
-/// redirect URI of the request being decided, `redirect_to`, or the browser
-/// blocks the authorization response. That URI is an exact match for one
-/// the client registered, checked when the request was pushed.
-///
-/// A page loads nothing but the theme's logo, if the theme has one
-/// (`logo`), and that comes from this origin.
-fn content_security_policy(
-    redirect_to: Option<&str>,
-    nonce: Option<&str>,
-    logo: bool,
-) -> HeaderValue {
-    let mut policy = format!("{CONTENT_SECURITY_POLICY}; form-action 'self'");
-    let origin = redirect_to
-        .and_then(|uri| Url::parse(uri).ok())
-        .map(|uri| uri.origin())
-        .filter(url::Origin::is_tuple)
-        .map(|origin| origin.ascii_serialization());
-    if let Some(origin) = origin {
-        policy.push(' ');
-        policy.push_str(&origin);
-    }
-    if logo {
-        policy.push_str("; img-src 'self'");
-    }
-    if let Some(nonce) = nonce {
-        policy.push_str("; script-src 'nonce-");
-        policy.push_str(nonce);
-        policy.push('\'');
-    }
-    HeaderValue::from_str(&policy).unwrap_or_else(|_| {
-        HeaderValue::from_static(
-            "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
-        )
-    })
-}
-
-/// Styles shared by every page: the base, and the card that pages for end
-/// users sit in. They are written in terms of the theme's colours.
-const STYLE: &str = include_str!("../../templates/shell.css");
-
-/// The page shell, `templates/shell.html`: the document around a page's
-/// content, carrying the theme.
-#[derive(Template)]
-#[template(path = "shell.html")]
-struct ShellTemplate<'a> {
-    theme: &'a Theme,
-    title: &'a str,
-    /// The page's content, already rendered from its own template.
-    body: &'a str,
-    base_style: &'static str,
-    /// Extra CSS, after the shared styles.
-    style: &'a str,
-    wide: bool,
-    /// The nonce the scripts run under.
-    nonce: &'a str,
-    scripts: Vec<&'a str>,
-}
-
-/// One HTML page.
-struct Shell<'a> {
-    status: StatusCode,
-    title: &'a str,
-    body: &'a str,
-    /// Extra CSS, after the shared styles.
-    style: &'a str,
-    script: Option<&'a str>,
-    /// Where a form on the page may end up redirecting to; see
-    /// [`content_security_policy`].
-    redirect_to: Option<&'a str>,
-    /// Replace the page with `url` after this many seconds.
-    refresh: Option<(i64, String)>,
-    wide: bool,
-}
-
-impl Shell<'_> {
-    fn render(&self, theme: &Theme) -> Response {
-        // A page's own script runs under a nonce; nothing else can. The nonce
-        // is unguessable, so markup injected into the page could not carry it.
-        let nonce = random_token(16);
-        // The reload is a script timer, not a `<meta>` refresh: scripted
-        // browsers, such as the conformance suite's, follow those at once.
-        let reload = self.refresh.as_ref().map(|(after, url)| {
-            let url = serde_json::Value::from(url.as_str())
-                .to_string()
-                .replace('<', "\\u003c");
-            format!("setTimeout(function(){{location.replace({url})}},{after}000);")
-        });
-        let scripts: Vec<&str> = [self.script, reload.as_deref()]
-            .into_iter()
-            .flatten()
-            .collect();
-        let policy = content_security_policy(
-            self.redirect_to,
-            (!scripts.is_empty()).then_some(nonce.as_str()),
-            theme.has_logo(),
-        );
-        let html = render(&ShellTemplate {
-            theme,
-            title: self.title,
-            body: self.body,
-            base_style: STYLE,
-            style: self.style,
-            wide: self.wide,
-            nonce: &nonce,
-            scripts,
-        });
-        let mut response = no_store((self.status, Html(html)).into_response());
-        response
-            .headers_mut()
-            .insert(header::CONTENT_SECURITY_POLICY, policy);
-        response
-    }
-}
 
 /// The page shown when the store cannot be reached. The detail is logged,
 /// never shown.
@@ -181,29 +52,6 @@ fn store_unavailable(state: &AppState, error: &StoreError) -> Response {
         StatusCode::INTERNAL_SERVER_ERROR,
         "The server could not complete the request. Please try again from the application.",
     )
-}
-
-/// The error page: `templates/error.html`.
-#[derive(Template)]
-#[template(path = "error.html")]
-struct ErrorTemplate<'a> {
-    message: &'a str,
-}
-
-/// An error shown to the user because it is not safe to redirect.
-fn error_page(state: &AppState, status: StatusCode, message: &str) -> Response {
-    tracing::info!(message, "authorization request rejected with an error page");
-    Shell {
-        status,
-        title: "Request error",
-        body: &render(&ErrorTemplate { message }),
-        style: "",
-        script: None,
-        redirect_to: None,
-        refresh: None,
-        wide: false,
-    }
-    .render(&state.theme)
 }
 
 /// The `action` of the button on the session expiry page.
@@ -327,25 +175,6 @@ fn redirect_error(
         params.push(("state", client_state));
     }
     redirect_to_client(state, redirect_uri, &params)
-}
-
-fn is_csrf_token(value: &str) -> bool {
-    value.len() == 43
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
-}
-
-fn csrf_cookie(csrf: &str) -> String {
-    format!("{CSRF_COOKIE}={csrf}; Path=/; Secure; HttpOnly; SameSite=Strict")
-}
-
-fn add_cookies(response: &mut Response, cookies: &[String]) {
-    for cookie in cookies {
-        if let Ok(value) = HeaderValue::from_str(cookie) {
-            response.headers_mut().append(header::SET_COOKIE, value);
-        }
-    }
 }
 
 /// The authorization endpoint URL for a request, as the client sent the

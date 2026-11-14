@@ -16,9 +16,10 @@ use crate::error::OAuthError;
 use crate::state::AppState;
 use crate::tls::ClientCert;
 
-pub(crate) mod authorize;
+mod authorize;
 mod ci;
 mod discovery;
+pub(crate) mod page;
 mod par;
 mod theme;
 mod token;

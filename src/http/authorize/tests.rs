@@ -12,6 +12,7 @@ use crate::testing::http::{
     set_cookie, sign_in, submit, submit_with, ticked,
 };
 use crate::testing::state::ISSUER;
+use crate::theme::Theme;
 use crate::user::{DEMO_PASSWORD, DEMO_USERNAME};
 
 fn login_fields<'a>(csrf: &'a str, uri: &'a str, password: &'a str) -> [(&'a str, &'a str); 6] {
