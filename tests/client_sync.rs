@@ -5,6 +5,12 @@
 //! certificate, the `private_key_jwt` assertion, and that the access token
 //! is used with the certificate it was issued to.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test code panics on purpose"
+)]
+
 mod common;
 
 use std::collections::HashMap;

@@ -72,7 +72,7 @@ impl DynamoBackend {
     }
 }
 
-#[allow(clippy::needless_pass_by_value)] // used as `map_err(failure)`
+#[expect(clippy::needless_pass_by_value, reason = "used as `map_err(failure)`")]
 fn failure<E, R>(error: SdkError<E, R>) -> StoreError
 where
     E: std::error::Error + 'static,

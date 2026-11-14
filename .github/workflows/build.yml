@@ -50,8 +50,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Installs the toolchain pinned in mise.toml, so CI and local builds
-      # use the same tasks.
+      # Installs the toolchain and cargo-deny pinned in mise.toml, so CI and
+      # local builds use the same tasks.
       - uses: jdx/mise-action@v2
 
       - uses: Swatinem/rust-cache@v2
@@ -61,6 +61,10 @@ jobs:
 
       - name: Lint
         run: mise run lint
+
+      # Advisories, licences and sources (deny.toml).
+      - name: Audit dependencies
+        run: mise run deny
 
       - name: Unit and integration tests
         run: mise run test

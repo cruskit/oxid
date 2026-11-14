@@ -197,7 +197,10 @@ impl Jws {
     }
 
     /// A numeric date claim (seconds since the epoch), if present and numeric.
-    #[allow(clippy::cast_possible_truncation)]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "JSON numbers are floats; whole seconds fit an i64"
+    )]
     pub fn time_claim(&self, name: &str) -> Option<i64> {
         let value = self.claims.get(name)?;
         value.as_i64().or_else(|| {

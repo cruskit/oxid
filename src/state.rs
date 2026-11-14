@@ -214,7 +214,10 @@ impl AppState {
     }
 }
 
-#[cfg_attr(not(feature = "aws"), allow(clippy::unused_async))]
+#[cfg_attr(
+    not(feature = "aws"),
+    expect(clippy::unused_async, reason = "awaits only the DynamoDB backend")
+)]
 async fn open_store(config: &Config) -> Result<Store> {
     match config.store.backend {
         StoreBackend::Memory => Ok(Store::new(Arc::new(MemoryBackend::new()))),

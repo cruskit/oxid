@@ -2,7 +2,8 @@
 
 # Build stage. The same Debian release is used for both stages so the binary
 # links against the glibc it will run with.
-FROM rust:1-trixie AS build
+# Keep the Rust version equal to rust-toolchain.toml.
+FROM rust:1.99.1-trixie AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src

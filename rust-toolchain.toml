@@ -1,0 +1,8 @@
+# The exact toolchain oxID is built, linted and tested with, in CI and
+# locally. Keep equal to `rust` in mise.toml and `rust-version` in
+# Cargo.toml, and the Rust versions in Dockerfile and Dockerfile.lambda;
+# bump them all together.
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

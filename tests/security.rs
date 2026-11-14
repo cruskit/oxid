@@ -1,6 +1,12 @@
 //! Negative and security-focused tests against a running oxID instance:
 //! the FAPI 2.0 and ConnectID rules a compliant provider must enforce.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test code panics on purpose"
+)]
+
 mod common;
 
 use common::{ASSERTION_TYPE, CLIENT_ID, Pkce, REDIRECT_URI, TestOp, oauth_error, redirect_params};

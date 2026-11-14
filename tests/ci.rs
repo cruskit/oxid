@@ -1,6 +1,12 @@
 //! The `ci` experience, end to end against a running instance: nobody
 //! clicks anything, and the client chooses the response.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test code panics on purpose"
+)]
+
 mod common;
 
 use common::{ASSERTION_TYPE, Pkce, TestOp, redirect_params};

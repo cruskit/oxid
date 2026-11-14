@@ -1,5 +1,8 @@
 [tools]
-rust = "stable"
+# Keep equal to rust-toolchain.toml and `rust-version` in Cargo.toml. Bump
+# all three together, deliberately, and fix any new lints in the same change.
+rust = "1.99.1"
+cargo-deny = "0.20.2"
 
 [tasks.fmt]
 description = "Check formatting"
@@ -11,6 +14,10 @@ run = [
   "cargo clippy --all-targets --locked -- -D warnings",
   "cargo clippy --all-targets --locked --features aws -- -D warnings",
 ]
+
+[tasks.deny]
+description = "Check dependencies for advisories, licences and sources"
+run = "cargo deny --locked check"
 
 [tasks.test]
 description = "Run unit and integration tests (set OXID_TEST_DYNAMODB_ENDPOINT to include the DynamoDB store)"
@@ -26,7 +33,7 @@ run = "scripts/conformance.sh"
 
 [tasks.check]
 description = "Fast local checks: format, lint, test"
-depends = ["fmt", "lint", "test"]
+depends = ["fmt", "lint", "deny", "test"]
 
 [tasks.build]
 description = "Full local build: format, lint, test, release binary, then the conformance suite"

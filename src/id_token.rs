@@ -168,7 +168,7 @@ mod tests {
     use crate::state::test_support::{ISSUER, NOW, state};
     use crate::user::{DEMO_PASSWORD, DEMO_USERNAME};
 
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(clippy::needless_pass_by_value, reason = "called with json! literals")]
     fn grant(claims: Value) -> Grant {
         Grant {
             id: "g1".to_owned(),

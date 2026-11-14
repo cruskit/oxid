@@ -2,7 +2,7 @@
 name = "oxid"
 version = "0.5.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.99"
 description = "oxID - an OpenID Provider implementing the FAPI 2.0 and ConnectID security profiles"
 license = "MIT OR Apache-2.0"
 publish = false
@@ -71,6 +71,10 @@ missing_panics_doc = "allow"
 must_use_candidate = "allow"
 similar_names = "allow"
 too_many_lines = "allow"
+# Panics and stray debugging belong in tests only (see clippy.toml).
+dbg_macro = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
 
 # Password hashing and big-number maths are painfully slow unoptimised; keep
 # `cargo test` fast without giving up debug info for our own code.

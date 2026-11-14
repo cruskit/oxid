@@ -5,7 +5,10 @@
 //! listener for the browser leg and a mutual-TLS listener for the back
 //! channel.
 
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "each test binary uses a different part of the harness"
+)]
 
 use std::collections::HashMap;
 use std::net::TcpListener;

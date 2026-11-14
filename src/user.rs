@@ -128,6 +128,10 @@ impl BankAccount {
 pub const DEFAULT_TIME_ZONE: &str = "Australia/Sydney";
 
 /// The time zone named [`DEFAULT_TIME_ZONE`].
+#[expect(
+    clippy::expect_used,
+    reason = "the time zone database is compiled in and always has this zone"
+)]
 pub fn default_time_zone() -> TimeZone {
     TimeZone::get(DEFAULT_TIME_ZONE).expect("the bundled time zone database has Australia/Sydney")
 }
@@ -269,6 +273,16 @@ impl User {
     }
 }
 
+/// Verified against when a username is unknown (or its user has no password),
+/// so that response time does not reveal which usernames exist. It is the
+/// hash of a random password nobody kept, with the same parameters as
+/// [`hash_password`]: precomputed so that a cold start does not pay for it.
+const DECOY_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$TVs5tMgE/FS28BBEu7uI9A$e0EFOYlUFlmAwN2BIP5mQw7FqzrdWnB324v1gBurBM0";
+
+/// [`DEMO_PASSWORD`] hashed with [`hash_password`], precomputed for the
+/// same reason as [`DECOY_HASH`].
+const DEMO_PASSWORD_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$1pD2JL/Druui48zrii3E7A$WfVEWbPUbl1H0N8SBiJz7RupMKJgdRJ6UzfUZ9+EkUk";
+
 /// Hash a password with Argon2id, producing a PHC string for configuration.
 pub fn hash_password(password: &str) -> Result<String> {
     Argon2::default()
@@ -296,9 +310,6 @@ pub struct StaticUserStore {
     by_username: HashMap<String, Arc<User>>,
     /// Users in the order they were defined.
     ordered: Vec<Arc<User>>,
-    /// Verified against when the username is unknown, so that response time
-    /// does not reveal which usernames exist.
-    decoy_hash: String,
 }
 
 impl StaticUserStore {
@@ -323,7 +334,6 @@ impl StaticUserStore {
         Ok(Self {
             by_username,
             ordered,
-            decoy_hash: hash_password("oxid-decoy-password")?,
         })
     }
 
@@ -362,7 +372,7 @@ impl UserStore for StaticUserStore {
         if let Some(user) = self.by_username.get(username) {
             user.password_matches(password).then(|| Arc::clone(user))
         } else {
-            if let Ok(hash) = PasswordHash::new(&self.decoy_hash) {
+            if let Ok(hash) = PasswordHash::new(DECOY_HASH) {
                 let _ = Argon2::default().verify_password(password.as_bytes(), &hash);
             }
             None
@@ -389,7 +399,7 @@ impl UserStore for StaticUserStore {
 /// - `margaret`: over 65, no middle name, `PayID` by mobile number.
 /// - `sam`: sparse data: no birthdate, phone, address or bank account.
 fn demo_users() -> Result<Vec<User>> {
-    let hash = hash_password(DEMO_PASSWORD)?;
+    let hash = DEMO_PASSWORD_HASH.to_owned();
     let object = |value: Value| match value {
         Value::Object(map) => map,
         _ => Map::new(),
@@ -650,6 +660,24 @@ mod tests {
                 .unwrap()
                 .len(),
             2
+        );
+    }
+
+    #[test]
+    fn precomputed_hashes_match_the_current_parameters() {
+        // If the argon2 defaults change, regenerate both constants with
+        // `oxid hash-password` so the decoy costs what a real check costs.
+        // Algorithm, version and parameters: everything before the salt.
+        let settings = |hash: &str| hash.split('$').take(4).collect::<Vec<_>>().join("$");
+        let current = settings(&hash_password("x").unwrap());
+        for constant in [DECOY_HASH, DEMO_PASSWORD_HASH] {
+            assert_eq!(settings(constant), current);
+        }
+        let demo = PasswordHash::new(DEMO_PASSWORD_HASH).unwrap();
+        assert!(
+            Argon2::default()
+                .verify_password(DEMO_PASSWORD.as_bytes(), &demo)
+                .is_ok()
         );
     }
 

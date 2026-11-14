@@ -1,5 +1,11 @@
 //! The `technical` experience, end to end against a running instance.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test code panics on purpose"
+)]
+
 mod common;
 
 use std::collections::HashMap;

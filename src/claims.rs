@@ -651,13 +651,13 @@ mod tests {
         client
     }
 
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(clippy::needless_pass_by_value, reason = "called with json! literals")]
     fn obj(value: Value) -> Map<String, Value> {
         value.as_object().unwrap().clone()
     }
 
     /// A `verified_claims` request for `claims` under the ConnectID framework.
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(clippy::needless_pass_by_value, reason = "called with json! literals")]
     fn verified(claims: Value) -> Map<String, Value> {
         obj(json!({"verified_claims": {
             "verification": {"trust_framework": {"value": TRUST_FRAMEWORK}},

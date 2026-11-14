@@ -63,6 +63,10 @@ pub fn sha256(data: impl AsRef<[u8]>) -> [u8; 32] {
 ///
 /// FAPI 2.0 §5.4.1 requires at least 128 bits for credentials that are not
 /// handled by end users; callers in this crate use 32 bytes (256 bits).
+#[expect(
+    clippy::expect_used,
+    reason = "without a working random number generator no credential can be issued safely"
+)]
 pub fn random_token(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
     rand::fill(&mut buf).expect("system random number generator failed");

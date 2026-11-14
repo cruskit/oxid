@@ -1,5 +1,11 @@
 //! End-to-end authorization code flow against a running oxID instance.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test code panics on purpose"
+)]
+
 mod common;
 
 use common::{ASSERTION_TYPE, CLIENT_ID, Pkce, TestOp, oauth_error, redirect_params};

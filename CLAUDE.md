@@ -28,7 +28,8 @@ release and deploys it to AWS Lambda.
 The Rust toolchain comes from mise. Use `mise exec -- cargo …`, or a task:
 
 ```sh
-mise run check        # fmt + clippy (default and `aws` features) + tests
+mise run check        # fmt + clippy (default and `aws` features) + cargo deny + tests
+mise run deny         # cargo deny: advisories, licences, sources (deny.toml)
 mise run test         # cargo test --locked --features aws
 mise run lambda       # Lambda package into dist/lambda (Docker)
 mise run conformance  # OIDF conformance suite in Docker (slow: ~minutes per experience)
@@ -36,6 +37,11 @@ mise run build        # check + release build + conformance
 ```
 
 - On this machine, pass `-j 3` to cargo to limit build parallelism.
+- The toolchain is pinned to an exact version in `rust-toolchain.toml`, `mise.toml`
+  `rust-version` in `Cargo.toml` and both Dockerfiles. Bump them together, deliberately.
+- `unwrap`, `expect` and `dbg!` are linted outside tests. Where a panic is
+  truly an invariant, use `#[expect(clippy::expect_used, reason = "…")]`;
+  use `#[expect]` with a reason rather than `#[allow]` everywhere.
 - Clippy runs with `pedantic` and `-D warnings`. `unsafe_code` is forbidden.
   Add product names to `clippy.toml` `doc-valid-idents`, not to backticks.
 - The DynamoDB store tests run only when `OXID_TEST_DYNAMODB_ENDPOINT` is set
