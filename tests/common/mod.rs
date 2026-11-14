@@ -10,6 +10,8 @@
     reason = "each test binary uses a different part of the harness"
 )]
 
+pub mod html;
+
 use std::collections::HashMap;
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -468,16 +470,13 @@ pub struct LoginPage {
 }
 
 impl LoginPage {
+    /// The page, parsed.
+    pub fn page(&self) -> html::Page {
+        html::Page::parse(&self.html)
+    }
+
     fn checkboxes(&self, only_ticked: bool) -> Vec<String> {
-        self.html
-            .split("<input type=\"checkbox\"")
-            .skip(1)
-            .filter_map(|rest| {
-                let tag = rest.split('>').next()?;
-                let name = tag.split("name=\"").nth(1)?.split('"').next()?;
-                (!only_ticked || tag.contains(" checked")).then(|| name.to_owned())
-            })
-            .collect()
+        self.page().checkboxes(only_ticked)
     }
 
     /// Field names of the consent checkboxes: the voluntary claims.
@@ -514,12 +513,7 @@ impl LoginPage {
 
     async fn read(response: Response, cookie: String) -> Self {
         let html = response.text().await.unwrap();
-        let csrf = html
-            .split("name=\"csrf\" value=\"")
-            .nth(1)
-            .and_then(|rest| rest.split('"').next())
-            .expect("the page contains the CSRF field")
-            .to_owned();
+        let csrf = html::Page::parse(&html).field("csrf");
         Self { csrf, cookie, html }
     }
 }

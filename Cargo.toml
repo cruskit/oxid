@@ -54,6 +54,7 @@ path = "src/bin/oxid-lambda.rs"
 required-features = ["aws"]
 
 [dev-dependencies]
+scraper = "0.29"
 # Paused time, for testing the `ci` experience's wait without waiting.
 tokio = { version = "1", features = ["test-util"] }
 toml = "1"

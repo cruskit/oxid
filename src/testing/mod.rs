@@ -16,6 +16,12 @@ use crate::config::ClientConfig;
 use crate::keys::SigningKey;
 use crate::user::{StaticUserStore, default_time_zone};
 
+#[path = "../../tests/common/html.rs"]
+#[allow(
+    dead_code,
+    reason = "shared with the integration tests, which use the rest"
+)]
+pub mod html;
 pub mod http;
 pub mod state;
 

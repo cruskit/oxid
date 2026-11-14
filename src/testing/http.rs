@@ -235,14 +235,7 @@ pub fn redirect_params(response: &Response<Body>) -> (String, HashMap<String, St
 }
 
 fn checkboxes(html: &str, only_ticked: bool) -> Vec<String> {
-    html.split("<input type=\"checkbox\"")
-        .skip(1)
-        .filter_map(|rest| {
-            let tag = rest.split('>').next()?;
-            let name = tag.split("name=\"").nth(1)?.split('"').next()?;
-            (!only_ticked || tag.contains(" checked")).then(|| name.to_owned())
-        })
-        .collect()
+    super::html::Page::parse(html).checkboxes(only_ticked)
 }
 
 /// Names of the checkboxes on a consent page: the voluntary claims.

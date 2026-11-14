@@ -1,6 +1,7 @@
 use serde_json::json;
 
 use super::*;
+use crate::testing::html::{Page, has_id, text_of};
 
 fn text(value: &str) -> ClaimValue {
     ClaimValue::Text(value.to_owned())
@@ -67,9 +68,13 @@ fn the_consent_template_escapes_what_it_shows() {
         assert!(!html.contains(raw), "{raw} in {html}");
     }
     assert!(html.contains("<em>BSB:</em> &#60;1&#62;"), "{html}");
-    assert!(html.contains("name=\"share_given_name\" value=\"1\" checked>"));
+    assert!(
+        Page::parse(&html)
+            .checkboxes(true)
+            .contains(&"share_given_name".to_owned())
+    );
     // A claim the user has no value for is listed, without a switch.
-    assert!(html.contains("id=\"value-email\">Not on file"));
+    assert!(text_of(&html, "value-email").starts_with("Not on file"));
     assert!(!html.contains("share_email"));
-    assert!(html.contains("id=\"share-all\""));
+    assert!(has_id(&html, "share-all"));
 }

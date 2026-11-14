@@ -8,6 +8,7 @@
 
 mod common;
 
+use common::html::{Page, has_id, text_of};
 use std::collections::HashMap;
 
 use common::{CLIENT_ID, LoginPage, Pkce, REDIRECT_URI, TestOp, redirect_params};
@@ -24,46 +25,16 @@ async fn start() -> TestOp {
     TestOp::start_with(|config| config.experience = Kind::Technical).await
 }
 
-fn unescape(text: &str) -> String {
-    text.replace("&#60;", "<")
-        .replace("&#62;", ">")
-        .replace("&#34;", "\"")
-        .replace("&#39;", "'")
-        .replace("&#38;", "&")
-}
-
 /// The value of the form field `name` on a page.
 fn field(html: &str, name: &str) -> String {
-    let marker = format!("name=\"{name}\" value=\"");
-    let value = html
-        .split(&marker)
-        .nth(1)
-        .and_then(|rest| rest.split('"').next())
-        .unwrap_or_else(|| panic!("no field {name} in {html}"));
-    unescape(value)
-}
-
-/// The text of the element with `id`, for elements without nested tags.
-fn text_of(html: &str, id: &str) -> String {
-    let marker = format!("id=\"{id}\"");
-    let rest = html
-        .split(&marker)
-        .nth(1)
-        .unwrap_or_else(|| panic!("no element {id} in {html}"));
-    let rest = &rest[rest.find('>').unwrap() + 1..];
-    unescape(&rest[..rest.find('<').unwrap()])
+    Page::parse(html).field(name)
 }
 
 /// The subject of the customer selected in the page's customer list.
 fn selected_customer(html: &str) -> String {
-    let select = html.split("<select id=\"customer\"").nth(1).unwrap();
-    let select = &select[..select.find("</select>").unwrap()];
-    let option = select
-        .split("<option value=\"")
-        .skip(1)
-        .find(|option| option.split('>').next().unwrap().contains(" selected"))
-        .expect("an option is selected");
-    unescape(option.split('"').next().unwrap())
+    Page::parse(html)
+        .selected("customer")
+        .expect("an option is selected")
 }
 
 /// Post the experience's form with `fields`.
@@ -104,11 +75,7 @@ async fn id_token_claims(
 
 /// The page's data block, which its script reads.
 fn page_data(html: &str) -> Value {
-    let block = html
-        .split("<script type=\"application/json\" id=\"oxid-data\">")
-        .nth(1)
-        .expect("data block");
-    serde_json::from_str(&block[..block.find("</script>").unwrap()]).unwrap()
+    serde_json::from_str(&text_of(html, "oxid-data")).unwrap()
 }
 
 /// Send a success for `customer` using the claims on `html`, which must be
@@ -218,11 +185,11 @@ async fn one_page_shows_the_request_and_the_response_controls() {
         .next()
         .unwrap();
     assert!(html.contains(&format!("<script nonce=\"{nonce}\">")));
-    assert!(html.contains("id=\"technical-banner\""));
-    assert!(!html.contains("id=\"password\""), "there is no sign-in");
+    assert!(has_id(html, "technical-banner"));
+    assert!(!has_id(html, "password"), "there is no sign-in");
 
     // Request, decoded by default: header and payload as readable JSON.
-    assert!(html.contains("id=\"view-decoded\" checked"));
+    assert!(Page::parse(html).flag("view-decoded", "checked"));
     let header: Value = serde_json::from_str(&text_of(html, "request-header")).unwrap();
     assert_eq!(header["alg"], "PS256");
     let payload: Value = serde_json::from_str(&text_of(html, "request-payload")).unwrap();
@@ -235,7 +202,7 @@ async fn one_page_shows_the_request_and_the_response_controls() {
         true
     );
     // The original JWT is one click away, byte for byte.
-    assert!(html.contains("id=\"view-original\""));
+    assert!(has_id(html, "view-original"));
     assert_eq!(text_of(html, "request-encoded"), request_object);
     // Purpose is escaped wherever it is shown.
     assert_eq!(text_of(html, "purpose"), "Checking <your> identity & age");
@@ -249,7 +216,9 @@ async fn one_page_shows_the_request_and_the_response_controls() {
         (SAM, "Sam Lee (sam)"),
     ] {
         assert!(
-            html.contains(&format!("<option value=\"{subject}\"")),
+            Page::parse(html)
+                .options("customer")
+                .contains(&subject.to_owned()),
             "{subject}"
         );
         assert!(html.contains(label), "{label}");
@@ -267,8 +236,8 @@ async fn one_page_shows_the_request_and_the_response_controls() {
 
     // The anticipated ID token payload for the selected customer is already
     // there to edit, and success is the default outcome.
-    assert!(html.contains("id=\"outcome-success\" value=\"success\" checked"));
-    assert!(!html.contains("id=\"outcome-error\" value=\"error\" checked"));
+    assert!(Page::parse(html).flag("outcome-success", "checked"));
+    assert!(!Page::parse(html).flag("outcome-error", "checked"));
     let preview: Value = serde_json::from_str(&text_of(html, "id_token")).unwrap();
     assert_eq!(preview["given_name"], "Alex");
     assert_eq!(preview["at_hash"], "(set when the access token is issued)");
@@ -288,7 +257,9 @@ async fn one_page_shows_the_request_and_the_response_controls() {
         "temporarily_unavailable",
     ] {
         assert!(
-            html.contains(&format!("<option value=\"{code}\"")),
+            Page::parse(html)
+                .options("error")
+                .contains(&code.to_owned()),
             "{code}"
         );
     }
@@ -585,7 +556,7 @@ async fn last_customer_used_is_preselected_on_the_next_flow() {
     let op = start().await;
     let request_uri = op.push(&Pkce::new(), &json!({})).await;
     let page = op.open_login(&request_uri).await;
-    assert!(page.html.contains("id=\"remembered\" hidden"));
+    assert!(Page::parse(&page.html).flag("remembered", "hidden"));
     let html = page_for(&op, &page, &request_uri, MARGARET).await;
     let response = send_success(&op, &page, &request_uri, &html, MARGARET, None).await;
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
@@ -614,7 +585,7 @@ async fn last_customer_used_is_preselected_on_the_next_flow() {
         .unwrap();
     assert_eq!(selected_customer(&html), MARGARET);
     assert_eq!(field(&html, "base_customer"), MARGARET);
-    assert!(html.contains("id=\"remembered\">Used on your last flow"));
+    assert!(text_of(&html, "remembered").starts_with("Used on your last flow"));
     assert_eq!(page_data(&html)["remembered"], MARGARET);
     let preview: Value = serde_json::from_str(&text_of(&html, "id_token")).unwrap();
     assert_eq!(preview["sub"].as_str().unwrap().len(), 43);
@@ -748,9 +719,9 @@ async fn bad_submissions_show_the_page_again() {
         let response = submit(&op, &page, &request_uri, &fields).await;
         assert_eq!(response.status(), StatusCode::OK, "{fields:?}");
         let html = response.text().await.unwrap();
-        assert!(html.contains("id=\"error\""), "{fields:?}");
-        assert!(html.contains("id=\"request-payload\""), "{fields:?}");
-        assert!(html.contains("id=\"id_token\""), "{fields:?}");
+        assert!(has_id(&html, "error"), "{fields:?}");
+        assert!(has_id(&html, "request-payload"), "{fields:?}");
+        assert!(has_id(&html, "id_token"), "{fields:?}");
     }
     // The error outcome stays selected when the page comes back.
     let response = submit(
@@ -765,7 +736,7 @@ async fn bad_submissions_show_the_page_again() {
     )
     .await;
     let html = response.text().await.unwrap();
-    assert!(html.contains("id=\"outcome-error\" value=\"error\" checked"));
+    assert!(Page::parse(&html).flag("outcome-error", "checked"));
     op.stop().await;
 }
 

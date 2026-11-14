@@ -1,3 +1,4 @@
+use crate::testing::html::{Page, has_id, text_of};
 use axum::http::{StatusCode, header};
 use serde_json::json;
 
@@ -80,9 +81,9 @@ async fn login_page_names_the_client_but_not_what_is_requested() {
     // They are logging in to see the request, not to reach the client.
     assert!(html.contains("Log in to review this request:"));
     assert!(html.contains("is asking you to share some of your information."));
-    assert!(html.contains("<strong id=\"client-name\">Test RP</strong>"));
-    assert!(html.contains("id=\"username\"") && html.contains("id=\"password\""));
-    assert!(html.contains("id=\"sign-in\"") && html.contains("id=\"deny\""));
+    assert_eq!(text_of(&html, "client-name"), "Test RP");
+    assert!(has_id(&html, "username") && has_id(&html, "password"));
+    assert!(has_id(&html, "sign-in") && has_id(&html, "deny"));
     // Nothing about the request is shown before the user signs in.
     for hidden in ["checkout", "Given name", "data-claim", "Alex", "share_"] {
         assert!(!html.contains(hidden), "{hidden}");
@@ -192,7 +193,7 @@ async fn the_technical_experience_is_themed_too() {
     let harness = Harness::themed(crate::experience::Kind::Technical, theme);
     let uri = harness.push(&json!({})).await;
     let html = body_text(harness.get(None, &authorize_path(&uri)).await).await;
-    assert!(html.contains("id=\"technical-banner\""));
+    assert!(has_id(&html, "technical-banner"));
     assert!(html.contains("--accent: #0055ff;") && html.contains("--accent: #88aaff;"));
     assert!(html.contains("<span class=\"name\">Acme &#60;Bank&#62;</span>"));
     // A logo beside the name is decoration, and has no dark variant here.
@@ -217,8 +218,8 @@ async fn consent_page_shows_client_purpose_and_each_claim_with_its_value() {
         "purpose is shown, escaped"
     );
     // Each claim is listed with the value that would be shared.
-    assert!(html.contains("<span class=\"value\" id=\"value-given_name\">Alex</span>"));
-    assert!(html.contains("<span class=\"value\" id=\"value-over18\">Yes</span>"));
+    assert_eq!(text_of(html, "value-given_name"), "Alex");
+    assert_eq!(text_of(html, "value-over18"), "Yes");
     assert!(html.contains("Bank account (BSB and account number)"));
     assert!(html.contains("<em>BSB:</em> 123456") && html.contains("12345678"));
     assert!(html.contains("<li data-claim=\"beneficiary_account_au\" data-essential=\"true\">"));
@@ -229,7 +230,7 @@ async fn consent_page_shows_client_purpose_and_each_claim_with_its_value() {
         !html.contains("nickname"),
         "unsupported claims are not offered"
     );
-    assert!(!html.contains("id=\"password\""));
+    assert!(!has_id(html, "password"));
 }
 
 #[tokio::test]
@@ -290,18 +291,18 @@ async fn consent_is_only_taken_from_the_browser_that_signed_in() {
     let response = submit(&harness, Some(&other), &fields).await;
     assert_eq!(response.status(), StatusCode::OK);
     let html = body_text(response).await;
-    assert!(html.contains("id=\"password\"") && html.contains("Log in to continue."));
+    assert!(has_id(&html, "password") && html.contains("Log in to continue."));
 
     let forged = format!("{CSRF_COOKIE}={other}; {LOGIN_COOKIE}={}", random_token(32));
     let response = submit_with(&harness, Some(&forged), &fields).await;
-    assert!(body_text(response).await.contains("id=\"password\""));
+    assert!(has_id(&body_text(response).await, "password"));
     // They are shown the login page, not the user's details.
     let request = axum::http::Request::get(authorize_path(&uri))
         .header(header::COOKIE, &forged)
         .body(axum::body::Body::empty())
         .unwrap();
     let html = body_text(harness.send(None, request).await).await;
-    assert!(html.contains("id=\"password\"") && !html.contains("Alex"));
+    assert!(has_id(&html, "password") && !html.contains("Alex"));
 
     // The browser that signed in comes back to the consent page on a
     // reload, and can still complete.
@@ -310,7 +311,7 @@ async fn consent_is_only_taken_from_the_browser_that_signed_in() {
         .body(axum::body::Body::empty())
         .unwrap();
     let html = body_text(harness.send(None, request).await).await;
-    assert!(html.contains("id=\"approve\"") && !html.contains("id=\"password\""));
+    assert!(has_id(&html, "approve") && !has_id(&html, "password"));
     let response = consent(&harness, &uri, &browser, &[], "approve").await;
     assert!(redirect_params(&response).1.contains_key("code"));
 }
@@ -381,8 +382,8 @@ async fn voluntary_claims_are_shared_only_if_chosen_and_essential_ones_always() 
     assert_eq!(ticked(&browser.html), Vec::<String>::new());
     assert!(!browser.html.contains("share_given_name"));
     assert!(!browser.html.contains("share_over18"));
-    assert!(browser.html.contains("id=\"optional-hint\""));
-    assert!(browser.html.contains("id=\"required-hint\""));
+    assert!(has_id(&browser.html, "optional-hint"));
+    assert!(has_id(&browser.html, "required-hint"));
 
     // Fields for claims that were never offered are ignored.
     let share = ["share_phone_number", "share_birthdate", "share_name"].map(str::to_owned);
@@ -399,7 +400,7 @@ async fn voluntary_claims_are_shared_only_if_chosen_and_essential_ones_always() 
     // "Turn all on" shows the page again with every switch on.
     let uri = harness.push(&pushed).await;
     let browser = sign_in(&harness, &uri).await;
-    assert!(browser.html.contains("id=\"share-all\""));
+    assert!(has_id(&browser.html, "share-all"));
     let response = consent(&harness, &uri, &browser, &[], "share-all").await;
     assert_eq!(response.status(), StatusCode::OK);
     let html = body_text(response).await;
@@ -435,8 +436,8 @@ async fn consent_page_says_when_nothing_personal_is_shared() {
     let harness = Harness::new();
     let uri = harness.push(&json!({})).await;
     let browser = sign_in(&harness, &uri).await;
-    assert!(browser.html.contains("id=\"requested-none\""));
-    assert!(!browser.html.contains("id=\"purpose\""));
+    assert!(has_id(&browser.html, "requested-none"));
+    assert!(!has_id(&browser.html, "purpose"));
 }
 
 #[tokio::test]
@@ -497,7 +498,7 @@ async fn wrong_password_re_prompts_then_gives_up() {
         assert!(set_cookie(&response, LOGIN_COOKIE).is_none());
         let html = body_text(response).await;
         assert!(html.contains("username or password is incorrect"));
-        assert!(html.contains("id=\"password\""));
+        assert!(has_id(&html, "password"));
     }
     let last = submit(&harness, Some(&csrf), &login_fields(&csrf, &uri, "wrong")).await;
     assert_eq!(redirect_params(&last).1["error"], "access_denied");
@@ -542,8 +543,8 @@ async fn expired_request_uri_shows_an_error_page() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert!(!response.headers().contains_key(header::LOCATION));
     let html = body_text(response).await;
-    assert!(html.contains("id=\"error-message\""));
-    assert!(!html.contains("id=\"return\""), "no way back is offered");
+    assert!(has_id(&html, "error-message"));
+    assert!(!has_id(&html, "return"), "no way back is offered");
 }
 
 #[tokio::test]
@@ -602,7 +603,7 @@ async fn an_expired_session_is_explained_and_returns_access_denied_to_the_client
     let late = consent(&harness, &uri, &browser, &[], "approve").await;
     assert_eq!(late.status(), StatusCode::BAD_REQUEST);
     assert!(!late.headers().contains_key(header::LOCATION));
-    assert!(body_text(late).await.contains("id=\"session-expired\""));
+    assert!(has_id(&body_text(late).await, "session-expired"));
 
     // Reloading, as the page does by itself, shows the same.
     let response = harness.get(None, &authorize_path(&uri)).await;
@@ -617,7 +618,10 @@ async fn an_expired_session_is_explained_and_returns_access_denied_to_the_client
     let html = body_text(response).await;
     assert!(html.contains("Your session has expired"));
     assert!(html.contains("within 5 minutes"));
-    assert!(html.contains("value=\"session-expired-return\">Return to Test RP</button>"));
+    let page = Page::parse(&html);
+    let back = page.select("button[value=\"session-expired-return\"]");
+    assert_eq!(back.len(), 1);
+    assert_eq!(back[0].text().collect::<String>(), "Return to Test RP");
     assert!(!html.contains("Alex") && !html.contains("savings"));
 
     // The way back is the standard error redirect.
@@ -639,7 +643,7 @@ async fn an_expired_session_is_explained_and_returns_access_denied_to_the_client
     // It is recorded as a refusal, and the request is used up.
     let again = submit(&harness, Some(&browser.csrf), &fields).await;
     assert_eq!(again.status(), StatusCode::BAD_REQUEST);
-    assert!(!body_text(again).await.contains("id=\"return\""));
+    assert!(!has_id(&body_text(again).await, "return"));
     let history = harness
         .state
         .store
@@ -657,7 +661,7 @@ async fn the_way_back_is_only_for_expired_sessions() {
     let fields = base_fields(&csrf, &uri, "session-expired-return");
     let response = submit(&harness, Some(&csrf), &fields).await;
     assert_eq!(response.status(), StatusCode::OK);
-    assert!(body_text(response).await.contains("id=\"password\""));
+    assert!(has_id(&body_text(response).await, "password"));
 }
 
 #[tokio::test]
@@ -674,7 +678,7 @@ async fn the_technical_experience_has_the_same_session() {
     let fields = base_fields(&csrf, &uri, "send");
     let late = submit(&harness, Some(&csrf), &fields).await;
     assert_eq!(late.status(), StatusCode::BAD_REQUEST);
-    assert!(body_text(late).await.contains("id=\"session-expired\""));
+    assert!(has_id(&body_text(late).await, "session-expired"));
     let fields = base_fields(&csrf, &uri, "session-expired-return");
     let response = submit(&harness, Some(&csrf), &fields).await;
     assert_eq!(redirect_params(&response).1["error"], "access_denied");

@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use crate::testing::html::has_id;
 use axum::body::Body;
 use axum::http::{Response, StatusCode, header};
 use serde_json::{Value, json};
@@ -272,7 +273,7 @@ async fn an_abandoned_visit_gets_a_page_and_leaves_the_request_pending() {
     assert_eq!(response.status(), StatusCode::OK);
     assert!(!response.headers().contains_key(header::LOCATION));
     let html = crate::testing::http::body_text(response).await;
-    assert!(html.contains("id=\"abandoned\""), "{html}");
+    assert!(has_id(&html, "abandoned"), "{html}");
 
     // That was for one visit. The next is answered.
     let params = arrive(&harness, &uri).await;

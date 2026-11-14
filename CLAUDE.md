@@ -94,8 +94,10 @@ mise run build        # check + release build + conformance
   `format!`/`write!`, and do not call an escaping function by hand: the
   templates escape (as `&#60;`, not `&lt;`). Inside `<pre>` and
   `<textarea>` keep the tag and its content on one line. The tests and the
-  conformance suite find elements by `id` and by exact attribute order
-  (`name="…" value="…"`), so keep those when editing a template.
+  conformance suite find elements by `id` and form fields by `name`, so
+  keep those when editing a template. Tests parse pages with
+  `tests/common/html.rs` (also `crate::testing::html`); attribute order
+  does not matter.
 
   **Colours come from the theme** (`theme.rs`, the `[theme]` config
   section): a name, an optional logo (served at `/theme/logo`), and a light

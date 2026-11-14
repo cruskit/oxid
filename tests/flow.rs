@@ -8,6 +8,7 @@
 
 mod common;
 
+use common::html::text_of;
 use common::{ASSERTION_TYPE, CLIENT_ID, Pkce, TestOp, oauth_error, redirect_params};
 use oxid::user::{DEMO_PASSWORD, DEMO_USERNAME};
 use reqwest::StatusCode;
@@ -399,11 +400,11 @@ async fn users_choose_which_voluntary_claims_to_share() {
     // Voluntary claims are checkboxes, off until chosen; essential ones
     // have none. Each claim is shown with the value to be shared.
     assert_eq!(page.ticked(), Vec::<String>::new());
-    assert!(
-        page.html
-            .contains("id=\"value-email\">alex.citizen@example.com<")
+    assert_eq!(
+        text_of(&page.html, "value-email"),
+        "alex.citizen@example.com"
     );
-    assert!(page.html.contains("id=\"value-given_name\">Alex<"));
+    assert_eq!(text_of(&page.html, "value-given_name"), "Alex");
     assert_eq!(
         page.offered(),
         [
