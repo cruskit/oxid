@@ -21,6 +21,7 @@ pub mod server;
 pub mod state;
 pub mod store;
 pub mod subject;
+pub mod theme;
 pub mod tls;
 pub mod user;
 pub mod util;

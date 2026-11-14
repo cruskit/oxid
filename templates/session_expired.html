@@ -1,0 +1,11 @@
+{#-
+  Shown when the user's session ran out. The button posts to the decision
+  endpoint, which sends them back to the client with `access_denied`.
+-#}
+<div class="badge">!</div>
+<h1 id="session-expired">Your session has expired</h1>
+<p class="lead">To keep your details safe, we ended this request because it wasn't completed within {{ limit }}. Nothing has been shared with <strong>{{ client_name }}</strong>.</p>
+{% include "form_open.html" %}
+  <button id="return" class="primary" type="submit" name="action" value="session-expired-return">Return to {{ client_name }}</button>
+</form>
+<p class="fine">You can start again from {{ client_name }} at any time.</p>

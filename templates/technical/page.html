@@ -1,0 +1,130 @@
+{#-
+  The `technical` experience: the whole of it, on one page.
+
+  The request is on one side and the response on the other. It works as a
+  plain HTML form; technical.js improves it, using the JSON in the
+  `oxid-data` block at the end.
+
+  Inside <pre> and <textarea> every character counts, so those are kept on
+  one line with their content.
+-#}
+<div class="top">
+  <h1>Authorization request from <span id="client-name">{{ client_name }}</span></h1>
+  <p class="banner" id="technical-banner">Technical experience. No authentication: development and testing only.</p>
+</div>
+{%- if let Some(error) = error %}
+<p id="error" class="error" role="alert">{{ error }}</p>
+{%- endif %}
+{%- if let Some(notice) = notice %}
+<p id="notice" class="notice" role="status">{{ notice }}</p>
+{%- endif %}
+
+<div class="cols">
+  {#- 1. The request, as it was pushed. #}
+  <section class="panel request" aria-label="Request">
+    <h2>1 · Request</h2>
+    <dl>
+      {%- for row in request_rows %}
+      <dt>{{ row.label }}</dt>
+      <dd id="{{ row.id }}">{{ row.value }}</dd>
+      {%- endfor %}
+    </dl>
+
+    <div class="row">
+      <span class="label">Request object</span>
+      <div class="tabs" role="radiogroup" aria-label="Request object format">
+        <input type="radio" name="request-view" id="view-decoded" checked>
+        <label for="view-decoded">Decoded</label>
+        <input type="radio" name="request-view" id="view-original">
+        <label for="view-original">Original JWT</label>
+      </div>
+    </div>
+    <div id="request-decoded">
+      <p class="muted">Header</p>
+      <pre id="request-header">{{ request_header }}</pre>
+      <p class="muted">Payload</p>
+      <pre id="request-payload">{{ request_payload }}</pre>
+    </div>
+    <div id="request-original">
+      <p class="muted">As received</p>
+      <pre id="request-encoded">{{ request_object }}</pre>
+    </div>
+  </section>
+
+  {#- 2. The response: who it is about, and whether it succeeds. #}
+  <section class="panel response" aria-label="Response">
+    <h2>2 · Response</h2>
+    {% include "form_open.html" %}
+      <div class="row">
+        <label for="customer">Customer</label>
+        <span class="pill" id="remembered"{% if !remembered_is_selected %} hidden{% endif %}>Used on your last flow</span>
+      </div>
+      <select id="customer" name="customer">
+        {%- for customer in customers %}
+        <option value="{{ customer.subject }}"{% if customer.selected %} selected{% endif %}>{{ customer.display_name }} ({{ customer.username }})</option>
+        {%- endfor %}
+      </select>
+      <details>
+        <summary class="muted">Customer attributes</summary>
+        {%- for customer in customers %}
+        <div class="attributes" data-customer="{{ customer.subject }}">
+          <p class="muted">{{ customer.display_name }} ({{ customer.username }})</p>
+          <pre>{{ customer.attributes }}</pre>
+        </div>
+        {%- endfor %}
+      </details>
+
+      <span class="label" id="outcome-label">Outcome</span>
+      <div class="outcomes" role="radiogroup" aria-labelledby="outcome-label">
+        <input type="radio" name="outcome" id="outcome-success" value="success"{% if !error_outcome %} checked{% endif %}>
+        <label for="outcome-success">Success<span>Authorization code and ID token</span></label>
+        <input type="radio" name="outcome" id="outcome-error" value="error"{% if error_outcome %} checked{% endif %}>
+        <label for="outcome-error">Error<span>No code or ID token is issued</span></label>
+      </div>
+
+      {#- Success: the ID token claims, to edit. `base` is what was
+          generated, so the edits can be told apart from it. #}
+      <div id="panel-success">
+        <input type="hidden" name="txn" value="{{ txn }}">
+        <input type="hidden" id="base" name="base" value="{{ base }}">
+        <input type="hidden" id="base_customer" name="base_customer" value="{{ base_customer }}">
+        <div class="row">
+          <label for="id_token">ID token claims, before signing</label>
+          <span class="row">
+            <span class="pill edited" id="edited" hidden>Edited</span>
+            <span id="json-status" role="status"></span>
+            <button type="button" id="reset" hidden>Reset</button>
+          </span>
+        </div>
+        <p class="notice" id="script-notice" hidden>Your edits were replaced with this customer's generated claims.</p>
+        <textarea id="id_token" name="id_token" rows="{{ claims_rows }}" spellcheck="false">{{ claims_text }}</textarea>
+        <p class="muted">Change, add or remove any claim. Claims you leave alone get their real values when the token is issued: <code>iat</code>, <code>exp</code> and <code>auth_time</code> are set then, and <code>at_hash</code> is computed from the access token.</p>
+      </div>
+
+      {#- Error: a predefined condition and its description. #}
+      <div id="panel-error">
+        <label for="error">Error condition</label>
+        <select id="error" name="error">
+          {%- for condition in conditions %}
+          <option value="{{ condition.code }}"{% if condition.selected %} selected{% endif %}>{{ condition.code }} · {{ condition.label }}</option>
+          {%- endfor %}
+        </select>
+        <label for="error_description">error_description</label>
+        <input type="text" id="error_description" name="error_description" value="{{ error_description }}" maxlength="500">
+      </div>
+
+      {#- What goes back to the client, and the button that sends it. #}
+      <div class="send">
+        <span class="label">Authorization response</span>
+        <pre id="redirect-preview">{{ redirect_uri }}
+  &amp;iss={{ issuer }}</pre>
+        <button id="send" type="submit" name="action" value="send">Send response</button>
+      </div>
+    </form>
+  </section>
+</div>
+
+{#- Data for the script: JSON in a block that is never executed. It is not
+    HTML-escaped; `<` is escaped in the JSON instead, so that no value can
+    close the block. #}
+<script type="application/json" id="oxid-data">{{ data|safe }}</script>

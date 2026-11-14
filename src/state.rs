@@ -11,6 +11,7 @@ use crate::config::{CiConfig, Config, SecurityConfig, StoreBackend};
 use crate::experience::{self, Experience, Kind};
 use crate::keys::SigningKey;
 use crate::store::{MemoryBackend, Store};
+use crate::theme::Theme;
 use crate::user::{StaticUserStore, UserStore};
 use crate::util::{Clock, SystemClock, random_token};
 
@@ -26,6 +27,8 @@ pub struct Inner {
     pub users: Arc<dyn UserStore>,
     /// The user experience at the authorization endpoint.
     pub experience: Arc<dyn Experience>,
+    /// The name, logo and colours of the pages users see.
+    pub theme: Theme,
     pub store: Store,
     pub clock: Arc<dyn Clock>,
     pub pairwise_salt: Vec<u8>,
@@ -171,6 +174,13 @@ impl AppState {
         tracing::info!(experience = %config.experience, "user experience selected");
         let experience = experience::build(config.experience, Arc::clone(&users));
 
+        let theme = Theme::from_config(&config.theme).context("theme")?;
+        tracing::info!(
+            name = %theme.name,
+            logo = theme.has_logo(),
+            "theme loaded"
+        );
+
         Ok(Self(Arc::new(Inner {
             issuer: config.issuer.clone(),
             mtls_base_url: config.mtls_base_url.clone(),
@@ -180,6 +190,7 @@ impl AppState {
             clients: Arc::new(clients),
             users,
             experience,
+            theme,
             store,
             clock,
             pairwise_salt,
@@ -287,6 +298,11 @@ pub(crate) mod test_support {
 
     /// As [`state_with`], with the given settings for the `ci` experience.
     pub fn state_with_ci(kind: Kind, ci: CiConfig) -> (AppState, Arc<ManualClock>) {
+        state_from(kind, ci, Theme::default())
+    }
+
+    /// As [`state_with_ci`], with the given theme.
+    pub fn state_from(kind: Kind, ci: CiConfig, theme: Theme) -> (AppState, Arc<ManualClock>) {
         let clock = Arc::new(ManualClock::new(NOW));
         let users: Arc<dyn UserStore> = Arc::new(SharedUsers);
         let clients = StaticClientRegistry::new([client_with_key("rp", shared_key())]).unwrap();
@@ -299,6 +315,7 @@ pub(crate) mod test_support {
             clients: Arc::new(clients),
             experience: experience::build(kind, Arc::clone(&users)),
             users,
+            theme,
             store: Store::default(),
             clock: Arc::clone(&clock) as Arc<dyn Clock>,
             pairwise_salt: b"unit-test-pairwise-salt".to_vec(),

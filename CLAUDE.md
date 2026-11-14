@@ -65,7 +65,7 @@ mise run build        # check + release build + conformance
   `id_token.rs` and `subject.rs` (pairwise subjects).
 - `src/experience/` holds the pluggable UI at the authorization endpoint (the
   `Experience` trait, a state machine over HTML forms):
-  - `login`: the end-user demonstration, branded as oxID. A login page
+  - `login`: the end-user demonstration. A login page
     (which shows nothing about the request), then a consent page listing
     each claim with the value to be shared. Voluntary claims start off.
   - `technical`: pick a predefined customer and edit the ID token, with **no
@@ -80,14 +80,34 @@ mise run build        # check + release build + conformance
     PAR. The choice lives in the store, so it works on Lambda. **No
     authentication**: it also logs a startup warning, which must stay.
 
+  **Pages are templates, not strings built in code.** Every page is an
+  Askama template in `templates/` (compiled in, checked at build time),
+  rendered from a struct in the module that shows it with
+  `experience::render`. Styles and the technical page's script are files
+  there too, pulled in with `include_str!`. Do not build HTML with
+  `format!`/`write!`, and do not call an escaping function by hand: the
+  templates escape (as `&#60;`, not `&lt;`). Inside `<pre>` and
+  `<textarea>` keep the tag and its content on one line. The tests and the
+  conformance suite find elements by `id` and by exact attribute order
+  (`name="…" value="…"`), so keep those when editing a template.
+
+  **Colours come from the theme** (`theme.rs`, the `[theme]` config
+  section): a name, an optional logo (served at `/theme/logo`), and a light
+  and a dark palette of twelve hexadecimal colours. `shell.html` writes both
+  palettes as CSS custom properties and the browser picks by
+  `prefers-color-scheme`. Styles must use those properties (or the tints
+  mixed from them in `shell.css`), never a colour literal, or the page
+  breaks in dark mode and ignores the theme. Name the provider with
+  `{{ theme.name }}`, never a literal "oxID". The default theme is oxID's.
+
   The endpoint (`http/authorize.rs`), not the experience, owns the page
   shell and the user's session: `request_uri_ttl` only limits how long the
   browser may take to arrive, then `session_ttl` (5 minutes) applies. An
   expired session gets its own page, with a way back to the client
   (`access_denied`).
 
-  To add an experience, implement the trait, add a `Kind` variant, and
-  construct it in `build`.
+  To add an experience, implement the trait, add a `Kind` variant,
+  construct it in `build`, and put its pages in `templates/<name>/`.
 - `src/store/`: `Store` holds the expiry, single-use, replay and revocation
   rules on top of a `Backend` trait. There are two backends: `memory` (the
   default) and `dynamodb` (feature `aws`). Bearer secrets are keyed by

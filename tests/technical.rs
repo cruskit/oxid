@@ -19,11 +19,11 @@ async fn start() -> TestOp {
 }
 
 fn unescape(text: &str) -> String {
-    text.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#x27;", "'")
-        .replace("&amp;", "&")
+    text.replace("&#60;", "<")
+        .replace("&#62;", ">")
+        .replace("&#34;", "\"")
+        .replace("&#39;", "'")
+        .replace("&#38;", "&")
 }
 
 /// The value of the form field `name` on a page.

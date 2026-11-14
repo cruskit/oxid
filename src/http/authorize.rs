@@ -21,6 +21,7 @@
 //! redirected (the provider must not be an open redirector, §5.3.2.1-7).
 //! Otherwise the error goes back to the client's redirect URI.
 
+use askama::Template;
 use axum::body::Bytes;
 use axum::extract::{RawQuery, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
@@ -32,21 +33,22 @@ use super::{Params, no_store};
 use crate::client::Client;
 use crate::error::ErrorCode;
 use crate::experience::{
-    Approval, Decision, Interaction, Page, Step, cookie, duration_text, form_open,
+    Approval, Decision, FormTarget, Interaction, Page, Step, cookie, duration_text, render,
 };
 use crate::state::AppState;
 use crate::store::{
     AuthorizationCode, ConsentOutcome, ConsentRecord, Grant, PushedRequest, StoreError,
     StoreResult, Visit,
 };
-use crate::util::{ct_eq, html_escape, random_token};
+use crate::theme::Theme;
+use crate::util::{ct_eq, random_token};
 
 /// Double-submit CSRF cookie. The `__Host-` prefix pins it to this origin,
 /// `Secure` and path `/` (RFC 6265bis §4.1.3.2).
 const CSRF_COOKIE: &str = "__Host-oxid-csrf";
 
-/// Content security policy for every page, before `form-action` and
-/// `script-src` are added by [`content_security_policy`].
+/// Content security policy for every page, before `form-action`, `img-src`
+/// and `script-src` are added by [`content_security_policy`].
 const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; style-src 'unsafe-inline'; \
      frame-ancestors 'none'; base-uri 'none'";
 
@@ -59,7 +61,14 @@ const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; style-src 'unsafe-inl
 /// redirect URI of the request being decided, `redirect_to`, or the browser
 /// blocks the authorization response. That URI is an exact match for one
 /// the client registered, checked when the request was pushed.
-fn content_security_policy(redirect_to: Option<&str>, nonce: Option<&str>) -> HeaderValue {
+///
+/// A page loads nothing but the theme's logo, if the theme has one
+/// (`logo`), and that comes from this origin.
+fn content_security_policy(
+    redirect_to: Option<&str>,
+    nonce: Option<&str>,
+    logo: bool,
+) -> HeaderValue {
     let mut policy = format!("{CONTENT_SECURITY_POLICY}; form-action 'self'");
     let origin = redirect_to
         .and_then(|uri| Url::parse(uri).ok())
@@ -69,6 +78,9 @@ fn content_security_policy(redirect_to: Option<&str>, nonce: Option<&str>) -> He
     if let Some(origin) = origin {
         policy.push(' ');
         policy.push_str(&origin);
+    }
+    if logo {
+        policy.push_str("; img-src 'self'");
     }
     if let Some(nonce) = nonce {
         policy.push_str("; script-src 'nonce-");
@@ -82,47 +94,27 @@ fn content_security_policy(redirect_to: Option<&str>, nonce: Option<&str>) -> He
     })
 }
 
-/// Styles shared by every page. The first rules are a plain base that a wide
-/// page (the technical experience) builds on. The `.card` rules are the
-/// oxID look for pages meant for end users.
-const STYLE: &str = "body{margin:0;padding:0 1rem 2.5rem;color:#0e1320;background:#f3f4f8;\
-font-family:Inter,ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;\
--webkit-font-smoothing:antialiased}h1{font-size:1.4rem}label{display:block;margin:.8rem 0 .2rem}\
-input{width:100%;padding:.5rem;box-sizing:border-box}\
-input[type=checkbox]{width:auto;margin-right:.5rem}button{padding:.6rem 1.2rem;margin:1rem .5rem 0 0}\
-.error{color:#b00020}.box{background:#f4f4f4;padding:.8rem;border-radius:.3rem}\
-.brand{display:flex;align-items:center;justify-content:center;gap:.6rem;padding:2.25rem 0 1.5rem;\
-font-size:1.35rem;font-weight:700;letter-spacing:-.03em}\
-.brand i{width:1.9rem;height:1.9rem;border-radius:.6rem;display:grid;place-items:center;\
-background:linear-gradient(135deg,#ff4d2e,#ff9a1f);box-shadow:0 4px 12px rgba(255,86,48,.35)}\
-.brand i::after{content:'';width:.7rem;height:.7rem;border-radius:50%;border:.2rem solid #fff}\
-.brand b{color:#ff5630}\
-.card{max-width:27rem;margin:0 auto;background:#fff;border-radius:1.25rem;padding:2rem 1.75rem;\
-box-sizing:border-box;box-shadow:0 1px 2px rgba(14,19,32,.06),0 16px 48px rgba(14,19,32,.09)}\
-.card h1{font-size:1.5rem;line-height:1.25;letter-spacing:-.02em;margin:0 0 .5rem}\
-.card h2{font-size:.75rem;letter-spacing:.07em;text-transform:uppercase;color:#5d6577;\
-margin:1.5rem 0 .5rem}.card p{line-height:1.55;margin:.5rem 0}\
-.card .lead{color:#5d6577;margin:0 0 1.25rem}.card .fine{color:#5d6577;font-size:.8rem;\
-text-align:center;margin:1.25rem 0 0}\
-.card .field{display:block;font-size:.85rem;font-weight:600;margin:1rem 0 .35rem}\
-.card input[type=text],.card input[type=password]{width:100%;min-height:3rem;padding:0 .9rem;\
-border:1.5px solid #d9dce4;border-radius:.75rem;font:inherit;color:inherit;background:#fff}\
-.card input:focus-visible,.card button:focus-visible{outline:none;border-color:#0e1320;\
-box-shadow:0 0 0 3px rgba(255,86,48,.3)}\
-.card button{display:block;width:100%;min-height:3.1rem;margin:.6rem 0 0;padding:0 1rem;border:0;\
-border-radius:999px;font:inherit;font-weight:600;cursor:pointer}\
-.card .primary{background:#0e1320;color:#fff;margin-top:1.5rem}.card .primary:hover{background:#252c40}\
-.card .ghost{background:none;color:#0e1320}.card .ghost:hover{background:#f3f4f8}\
-.card .alert{background:#fdecea;color:#a1241a;border-radius:.75rem;padding:.75rem .9rem;\
-font-size:.9rem;margin:0 0 1rem}\
-.rp{display:flex;gap:.8rem;align-items:center;background:#f6f7fa;border-radius:.9rem;\
-padding:.9rem 1rem;margin:0 0 1.25rem}.rp .avatar{flex:none;width:2.6rem;height:2.6rem;\
-border-radius:.8rem;background:#0e1320;color:#fff;display:grid;place-items:center;font-weight:700;\
-font-size:1.1rem}.rp strong{display:block}.rp span{font-size:.85rem;color:#5d6577;line-height:1.4}\
-.badge{width:3.25rem;height:3.25rem;border-radius:50%;display:grid;place-items:center;\
-background:#fff1e8;color:#d9480f;font-size:1.6rem;font-weight:700;margin:0 0 1.25rem}\
-.legal{max-width:27rem;margin:1.25rem auto 0;text-align:center;font-size:.75rem;color:#7b8394;\
-line-height:1.5}";
+/// Styles shared by every page: the base, and the card that pages for end
+/// users sit in. They are written in terms of the theme's colours.
+const STYLE: &str = include_str!("../../templates/shell.css");
+
+/// The page shell, `templates/shell.html`: the document around a page's
+/// content, carrying the theme.
+#[derive(Template)]
+#[template(path = "shell.html")]
+struct ShellTemplate<'a> {
+    theme: &'a Theme,
+    title: &'a str,
+    /// The page's content, already rendered from its own template.
+    body: &'a str,
+    base_style: &'static str,
+    /// Extra CSS, after the shared styles.
+    style: &'a str,
+    wide: bool,
+    /// The nonce the scripts run under.
+    nonce: &'a str,
+    scripts: Vec<&'a str>,
+}
 
 /// One HTML page.
 struct Shell<'a> {
@@ -141,7 +133,7 @@ struct Shell<'a> {
 }
 
 impl Shell<'_> {
-    fn render(&self) -> Response {
+    fn render(&self, theme: &Theme) -> Response {
         // A page's own script runs under a nonce; nothing else can. The nonce
         // is unguessable, so markup injected into the page could not carry it.
         let nonce = random_token(16);
@@ -153,35 +145,25 @@ impl Shell<'_> {
                 .replace('<', "\\u003c");
             format!("setTimeout(function(){{location.replace({url})}},{after}000);")
         });
-        let mut scripts = String::new();
-        for script in [self.script, reload.as_deref()].into_iter().flatten() {
-            scripts.push_str("<script nonce=\"");
-            scripts.push_str(&nonce);
-            scripts.push_str("\">");
-            scripts.push_str(script);
-            scripts.push_str("</script>");
-        }
+        let scripts: Vec<&str> = [self.script, reload.as_deref()]
+            .into_iter()
+            .flatten()
+            .collect();
         let policy = content_security_policy(
             self.redirect_to,
             (!scripts.is_empty()).then_some(nonce.as_str()),
+            theme.has_logo(),
         );
-        let html = format!(
-            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
-             <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-             <title>{title} - oxID</title><style>{STYLE}{style}</style></head>\
-             <body><header class=\"brand\"><i></i><span>ox<b>ID</b></span></header>\
-             <main class=\"{class}\">{body}</main>{footer}{scripts}</body></html>",
-            title = html_escape(self.title),
-            style = self.style,
-            class = if self.wide { "wide" } else { "card" },
-            body = self.body,
-            footer = if self.wide {
-                ""
-            } else {
-                "<footer class=\"legal\">Protected by oxID. We never share your details \
-                 without your say-so.</footer>"
-            },
-        );
+        let html = render(&ShellTemplate {
+            theme,
+            title: self.title,
+            body: self.body,
+            base_style: STYLE,
+            style: self.style,
+            wide: self.wide,
+            nonce: &nonce,
+            scripts,
+        });
         let mut response = no_store((self.status, Html(html)).into_response());
         response
             .headers_mut()
@@ -192,38 +174,50 @@ impl Shell<'_> {
 
 /// The page shown when the store cannot be reached. The detail is logged,
 /// never shown.
-fn store_unavailable(error: &StoreError) -> Response {
+fn store_unavailable(state: &AppState, error: &StoreError) -> Response {
     tracing::error!(%error, "authorization endpoint could not use the store");
     error_page(
+        state,
         StatusCode::INTERNAL_SERVER_ERROR,
         "The server could not complete the request. Please try again from the application.",
     )
 }
 
+/// The error page: `templates/error.html`.
+#[derive(Template)]
+#[template(path = "error.html")]
+struct ErrorTemplate<'a> {
+    message: &'a str,
+}
+
 /// An error shown to the user because it is not safe to redirect.
-fn error_page(status: StatusCode, message: &str) -> Response {
+fn error_page(state: &AppState, status: StatusCode, message: &str) -> Response {
     tracing::info!(message, "authorization request rejected with an error page");
     Shell {
         status,
         title: "Request error",
-        body: &format!(
-            "<div class=\"badge\">!</div>\
-             <h1 id=\"error-title\">We couldn't complete this request</h1>\
-             <p id=\"error-message\" class=\"alert\">{}</p>\
-             <p class=\"lead\">Please return to the application and try again.</p>",
-            html_escape(message)
-        ),
+        body: &render(&ErrorTemplate { message }),
         style: "",
         script: None,
         redirect_to: None,
         refresh: None,
         wide: false,
     }
-    .render()
+    .render(&state.theme)
 }
 
 /// The `action` of the button on the session expiry page.
 const ACTION_RETURN_EXPIRED: &str = "session-expired-return";
+
+/// The session expiry page: `templates/session_expired.html`.
+#[derive(Template)]
+#[template(path = "session_expired.html")]
+struct SessionExpiredTemplate<'a> {
+    form: FormTarget<'a>,
+    client_name: &'a str,
+    /// How long the user had, in words.
+    limit: String,
+}
 
 /// The `error_description` sent to the client when a user goes back to it
 /// from the session expiry page.
@@ -240,19 +234,11 @@ fn session_expired_page(
     pushed: &PushedRequest,
     csrf: &str,
 ) -> Response {
-    let name = html_escape(&client.name);
-    let body = format!(
-        "<div class=\"badge\">!</div>\
-         <h1 id=\"session-expired\">Your session has expired</h1>\
-         <p class=\"lead\">To keep your details safe, we ended this request because it \
-         wasn't completed within {limit}. Nothing has been shared with \
-         <strong>{name}</strong>.</p>{form}\
-         <button id=\"return\" class=\"primary\" type=\"submit\" name=\"action\" \
-         value=\"{ACTION_RETURN_EXPIRED}\">Return to {name}</button></form>\
-         <p class=\"fine\">You can start again from {name} at any time.</p>",
-        limit = duration_text(state.security.session_ttl),
-        form = form_open(csrf, &client.id, request_uri),
-    );
+    let body = render(&SessionExpiredTemplate {
+        form: FormTarget::new(csrf, &client.id, request_uri),
+        client_name: &client.name,
+        limit: duration_text(state.security.session_ttl),
+    });
     let mut response = Shell {
         status: StatusCode::BAD_REQUEST,
         title: "Session expired",
@@ -263,7 +249,7 @@ fn session_expired_page(
         refresh: None,
         wide: false,
     }
-    .render();
+    .render(&state.theme);
     add_cookies(&mut response, &[csrf_cookie(csrf)]);
     response
 }
@@ -278,6 +264,7 @@ async fn return_expired(
     let now = state.now();
     let Some(pushed) = state.store.take_request(request_uri, now).await? else {
         return Ok(error_page(
+            state,
             StatusCode::BAD_REQUEST,
             "The request_uri is invalid, has expired, or has already been used.",
         ));
@@ -308,6 +295,7 @@ async fn return_expired(
 fn redirect_to_client(state: &AppState, redirect_uri: &str, params: &[(&str, &str)]) -> Response {
     let Ok(mut url) = Url::parse(redirect_uri) else {
         return error_page(
+            state,
             StatusCode::INTERNAL_SERVER_ERROR,
             "The redirect URI is invalid.",
         );
@@ -317,6 +305,7 @@ fn redirect_to_client(state: &AppState, redirect_uri: &str, params: &[(&str, &st
         .append_pair("iss", &state.issuer);
     let Ok(location) = HeaderValue::from_str(url.as_str()) else {
         return error_page(
+            state,
             StatusCode::INTERNAL_SERVER_ERROR,
             "The redirect URI is invalid.",
         );
@@ -389,7 +378,7 @@ fn experience_page(page: &Page, interaction: &Interaction<'_>, cookies: &[String
         )),
         wide: page.wide,
     }
-    .render();
+    .render(&interaction.state.theme);
     add_cookies(&mut response, &[csrf_cookie(interaction.csrf)]);
     add_cookies(&mut response, cookies);
     response
@@ -405,7 +394,7 @@ async fn load_request(
     request_uri: Option<&str>,
     arriving: bool,
 ) -> Result<(std::sync::Arc<Client>, String, Visit), Box<Response>> {
-    let bad = |message: &str| Box::new(error_page(StatusCode::BAD_REQUEST, message));
+    let bad = |message: &str| Box::new(error_page(state, StatusCode::BAD_REQUEST, message));
 
     let client_id = client_id.ok_or_else(|| bad("The client_id parameter is missing."))?;
     let client = state
@@ -421,7 +410,7 @@ async fn load_request(
     } else {
         state.store.resume(request_uri, now).await
     }
-    .map_err(|error| Box::new(store_unavailable(&error)))?
+    .map_err(|error| Box::new(store_unavailable(state, &error)))?
     .ok_or_else(|| bad("The request_uri is invalid, has expired, or has already been used."))?;
     let (Visit::Active(pushed, _) | Visit::Expired(pushed)) = &visit;
     // RFC 9126 §4: a request_uri is only usable by the client that pushed it.
@@ -439,6 +428,7 @@ pub async fn authorize(
 ) -> Response {
     let Ok(params) = Params::parse(query.unwrap_or_default().as_bytes()) else {
         return error_page(
+            &state,
             StatusCode::BAD_REQUEST,
             "A request parameter was sent more than once.",
         );
@@ -499,6 +489,7 @@ pub async fn authorize(
 pub async fn decision(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
     let Ok(params) = Params::parse(&body) else {
         return error_page(
+            &state,
             StatusCode::BAD_REQUEST,
             "A form field was sent more than once.",
         );
@@ -512,6 +503,7 @@ pub async fn decision(State(state): State<AppState>, headers: HeaderMap, body: B
     };
     if !csrf_ok {
         return error_page(
+            &state,
             StatusCode::FORBIDDEN,
             "This form could not be verified. Please start again from the application.",
         );
@@ -536,7 +528,7 @@ pub async fn decision(State(state): State<AppState>, headers: HeaderMap, body: B
         Visit::Expired(_) if params.get("action") == Some(ACTION_RETURN_EXPIRED) => {
             return match return_expired(&state, &client, &request_uri).await {
                 Ok(response) => response,
-                Err(error) => store_unavailable(&error),
+                Err(error) => store_unavailable(&state, &error),
             };
         }
         Visit::Expired(pushed) => {
@@ -561,7 +553,7 @@ pub async fn decision(State(state): State<AppState>, headers: HeaderMap, body: B
 async fn conclude(interaction: &Interaction<'_>, step: Step) -> Response {
     match try_conclude(interaction, step).await {
         Ok(response) => response,
-        Err(error) => store_unavailable(&error),
+        Err(error) => store_unavailable(interaction.state, &error),
     }
 }
 
@@ -605,6 +597,7 @@ async fn try_conclude(interaction: &Interaction<'_>, step: Step) -> StoreResult<
                 .await?
             else {
                 return Ok(error_page(
+                    state,
                     StatusCode::BAD_REQUEST,
                     "The request_uri is invalid, has expired, or has already been used.",
                 ));
@@ -960,6 +953,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pages_carry_the_oxid_theme_in_light_and_dark_by_default() {
+        let harness = Harness::new();
+        let uri = harness.push(&json!({})).await;
+        let response = harness.get(None, &authorize_path(&uri)).await;
+        let policy = response.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(!policy.contains("img-src"), "nothing is loaded: {policy}");
+        let html = body_text(response).await;
+        assert!(html.contains("<title>Log in - oxID</title>"));
+        assert!(html.contains("<i class=\"mark\"></i>") && html.contains("ox<b>ID</b>"));
+        assert!(!html.contains("<img"));
+        assert!(html.contains("Protected by oxID."));
+        // Both palettes are on the page, and the browser picks one from the
+        // user's system setting.
+        assert!(html.contains("<meta name=\"color-scheme\" content=\"light dark\">"));
+        let (light, dark) = html
+            .split_once("@media (prefers-color-scheme: dark)")
+            .expect("a dark palette");
+        assert!(light.contains("--accent: #ff5630;") && light.contains("--surface: #ffffff;"));
+        assert!(dark.contains("--accent: #ff6b4a;") && dark.contains("--surface: #161b27;"));
+        // The styles use the palette, never a colour of their own.
+        assert!(html.contains("background: var(--background);"));
+    }
+
+    fn acme() -> Theme {
+        use crate::theme::{Logo, Palette};
+        let logo = |bytes: &'static [u8]| Logo {
+            content_type: "image/png",
+            bytes: Bytes::from_static(bytes),
+        };
+        Theme {
+            name: "Acme <Bank>".to_owned(),
+            logo: Some(logo(b"light")),
+            logo_dark: Some(logo(b"dark")),
+            show_name: false,
+            light: Palette {
+                accent: "#0055ff".parse().unwrap(),
+                ..Palette::light()
+            },
+            dark: Palette {
+                accent: "#88aaff".parse().unwrap(),
+                background: "#000".parse().unwrap(),
+                ..Palette::dark()
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn a_theme_sets_the_name_logo_and_colours_of_every_page() {
+        let harness = Harness::with_theme(acme());
+        let uri = harness.push(&json!({})).await;
+        let response = harness.get(None, &authorize_path(&uri)).await;
+        assert!(
+            response.headers()[header::CONTENT_SECURITY_POLICY]
+                .to_str()
+                .unwrap()
+                .contains("; img-src 'self'"),
+            "the logo may be loaded"
+        );
+        let html = body_text(response).await;
+        assert!(html.contains("<title>Log in - Acme &#60;Bank&#62;</title>"));
+        assert!(html.contains("<h1>Log in to Acme &#60;Bank&#62;</h1>"));
+        assert!(html.contains("Protected by Acme &#60;Bank&#62;."));
+        assert!(html.contains(
+            "<source srcset=\"/theme/logo-dark\" media=\"(prefers-color-scheme: dark)\">"
+        ));
+        // The logo stands in for the name, so it carries it as its text.
+        assert!(
+            html.contains("<img class=\"logo\" src=\"/theme/logo\" alt=\"Acme &#60;Bank&#62;\">")
+        );
+        assert!(!html.contains("class=\"name\"") && !html.contains("class=\"mark\""));
+        let (light, dark) = html
+            .split_once("@media (prefers-color-scheme: dark)")
+            .unwrap();
+        assert!(light.contains("--accent: #0055ff;") && light.contains("--text: #0e1320;"));
+        assert!(dark.contains("--accent: #88aaff;") && dark.contains("--background: #000;"));
+
+        // The consent page, and the pages the endpoint shows itself.
+        let browser = sign_in(&harness, &uri).await;
+        assert!(browser.html.contains("logged in with Acme &#60;Bank&#62;."));
+        harness.clock.advance(harness.state.security.session_ttl);
+        let expired = body_text(harness.get(None, &authorize_path(&uri)).await).await;
+        let error = body_text(harness.get(None, PATH_AUTHORIZE).await).await;
+        for html in [&browser.html, &expired, &error] {
+            assert!(html.contains("--accent: #0055ff;"));
+            assert!(html.contains("src=\"/theme/logo\""));
+            assert!(!html.contains("oxID") && !html.contains("<Bank>"), "{html}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_technical_experience_is_themed_too() {
+        let theme = Theme {
+            show_name: true,
+            logo_dark: None,
+            ..acme()
+        };
+        let harness = Harness::themed(crate::experience::Kind::Technical, theme);
+        let uri = harness.push(&json!({})).await;
+        let html = body_text(harness.get(None, &authorize_path(&uri)).await).await;
+        assert!(html.contains("id=\"technical-banner\""));
+        assert!(html.contains("--accent: #0055ff;") && html.contains("--accent: #88aaff;"));
+        assert!(html.contains("<span class=\"name\">Acme &#60;Bank&#62;</span>"));
+        // A logo beside the name is decoration, and has no dark variant here.
+        assert!(html.contains("<img class=\"logo\" src=\"/theme/logo\" alt=\"\">"));
+        assert!(!html.contains("<source") && !html.contains("oxID"));
+    }
+
+    #[tokio::test]
     async fn consent_page_shows_client_purpose_and_each_claim_with_its_value() {
         let harness = Harness::new();
         let uri = harness.push(&everything_requested()).await;
@@ -970,8 +1074,8 @@ mod tests {
         assert!(
             html.contains(
                 "<p><strong id=\"client-name\">Test RP</strong> is asking you to share your \
-                 information for the purpose of</p>\
-                 <p id=\"purpose\" class=\"purpose\">Verify your &lt;age&gt; for checkout</p>"
+                 information for the purpose of</p>\n  \
+                 <p id=\"purpose\" class=\"purpose\">Verify your &#60;age&#62; for checkout</p>"
             ),
             "purpose is shown, escaped"
         );

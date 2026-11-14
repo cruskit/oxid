@@ -6,6 +6,8 @@ FROM rust:1-trixie AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+# The pages: compiled into the binary by askama.
+COPY templates ./templates
 # Cache mounts keep the registry and build artefacts between builds, so only
 # changed crates are recompiled.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \

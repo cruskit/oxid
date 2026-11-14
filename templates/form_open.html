@@ -1,0 +1,10 @@
+{#-
+  The opening tag of a form that posts back to the authorization endpoint,
+  with the hidden fields the endpoint needs to route and verify the
+  submission. The including template closes the form, and has a `form` field
+  (a FormTarget) to say where this one goes.
+-#}
+<form method="post" action="{{ form.action }}">
+  <input type="hidden" name="csrf" value="{{ form.csrf }}">
+  <input type="hidden" name="client_id" value="{{ form.client_id }}">
+  <input type="hidden" name="request_uri" value="{{ form.request_uri }}">
