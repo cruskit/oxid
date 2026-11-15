@@ -404,7 +404,7 @@ impl Technical {
             "remembered": remembered.as_ref().map(|user| user.subject.clone()),
             "redirect_uri": request.redirect_uri,
             "state": request.state,
-            "issuer": interaction.state.issuer,
+            "issuer": interaction.issuer(),
         });
 
         let template = PageTemplate {
@@ -444,7 +444,7 @@ impl Technical {
                 .collect(),
             error_description,
             redirect_uri: &request.redirect_uri,
-            issuer: &interaction.state.issuer,
+            issuer: interaction.issuer(),
             data: data.to_string().replace('<', "\\u003c"),
         };
 
@@ -468,13 +468,13 @@ fn preview(interaction: &Interaction<'_>, user: &User, txn: &str) -> Map<String,
         scope: request.scope.clone(),
         claims: request.claims.clone(),
         shared_claims: everything_requested(interaction),
-        auth_time: interaction.state.now(),
+        auth_time: interaction.now(),
         txn: txn.to_owned(),
         purpose: request.purpose.clone(),
         id_token_edits: None,
     };
     id_token::preview(
-        interaction.state,
+        &interaction.issuer_context(),
         interaction.client,
         user,
         &grant,

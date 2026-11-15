@@ -47,12 +47,6 @@ impl Deref for AppState {
 }
 
 impl AppState {
-    /// Wrap already-built state. Unit test fixtures build [`Inner`] directly.
-    #[cfg(test)]
-    pub(crate) fn from_inner(inner: Inner) -> Self {
-        Self(Arc::new(inner))
-    }
-
     #[cfg(test)]
     pub(crate) async fn from_config(config: &Config) -> Result<Self> {
         Self::build(config, Arc::new(SystemClock), Vec::new()).await
@@ -82,128 +76,65 @@ impl AppState {
         clock: Arc<dyn Clock>,
         synced_clients: Vec<crate::client::Client>,
     ) -> Result<Self> {
-        let store = open_store(config)
-            .await?
-            .grant_lifetime(config.security.refresh_token_ttl + config.security.access_token_ttl)
-            .session_ttl(config.security.session_ttl);
-        let shared = config.store.backend != StoreBackend::Memory;
-
-        // Without a configured key, one is generated and kept in the store:
-        // every instance sharing the store then signs with the same key.
-        let signing_key = if let Some(path) = &config.keys.signing_key {
-            SigningKey::from_pem_file(path)?
-        } else {
-            if shared {
-                tracing::info!("keys.signing_key is not set: using the signing key in the store");
-            } else {
-                tracing::warn!(
-                    "keys.signing_key is not set: using an ephemeral signing key (development only)"
-                );
-            }
-            let pem = store
-                .secret("signing-key", SigningKey::generate_pem)
-                .await
-                .context("signing key")?;
-            SigningKey::from_pem(pem.as_bytes()).context("signing key held in the store")?
+        let store = configure_store(open_store(config).await?, config);
+        let parts = Parts {
+            signing_key: load_signing_key(config, &store).await?,
+            clients: load_clients(config, synced_clients)?,
+            users: load_users(config)?,
+            pairwise_salt: load_salt(config, &store).await?,
+            store,
+            clock,
         };
-
-        let mut clients = config
-            .clients
-            .iter()
-            .map(crate::client::Client::from_config)
-            .collect::<Result<Vec<_>>>()
-            .context("clients")?;
-        let configured = clients.len();
-        for client in synced_clients {
-            if clients.iter().any(|existing| existing.id == client.id) {
-                tracing::warn!(
-                    client_id = %client.id,
-                    "client from the registry is also in the configuration file; \
-                     the configured one is used"
-                );
-            } else {
-                clients.push(client);
-            }
-        }
+        log_experience(config);
         tracing::info!(
-            configured,
-            synced = clients.len() - configured,
-            "clients registered"
-        );
-        let clients = StaticClientRegistry::new(clients).context("clients")?;
-        if clients.is_empty() {
-            tracing::warn!("no clients are configured; no client will be able to authenticate");
-        }
-
-        let time_zone = &config.time_zone;
-        let users = if config.users.is_empty() {
-            tracing::warn!(
-                "no users are configured: using the built-in demo customers (development only)"
-            );
-            StaticUserStore::demo(time_zone)?
-        } else {
-            StaticUserStore::from_config(&config.users, time_zone).context("users")?
-        };
-
-        let pairwise_salt = if let Some(salt) = &config.keys.pairwise_salt {
-            Secret::new(salt.expose().clone().into_bytes())
-        } else {
-            if shared {
-                tracing::info!("keys.pairwise_salt is not set: using the salt in the store");
-            } else {
-                tracing::warn!(
-                    "keys.pairwise_salt is not set: subject identifiers will change on restart"
-                );
-            }
-            store
-                .secret("pairwise-salt", || Ok(random_token(32)))
-                .await
-                .context("pairwise salt")
-                .map(|salt| Secret::new(salt.into_bytes()))?
-        };
-
-        let users: Arc<dyn UserStore> = Arc::new(users);
-        if config.experience == Kind::Technical {
-            tracing::warn!(
-                "experience is 'technical': anyone who can reach the authorization endpoint \
-                 can act as any customer and edit responses (development and testing only)"
-            );
-        }
-        if config.experience == Kind::Ci {
-            tracing::warn!(
-                response_delay = config.ci.response_delay.get(),
-                "experience is 'ci': authorization requests are answered automatically, with \
-                 no user and no authentication (automated testing only)"
-            );
-        }
-        tracing::info!(experience = %config.experience, "user experience selected");
-        let experience = experience::build(config.experience, Arc::clone(&users));
-
-        let theme = config.theme.clone();
-        tracing::info!(
-            name = %theme.name,
-            logo = theme.has_logo(),
+            name = %config.theme.name,
+            logo = config.theme.has_logo(),
             "theme loaded"
         );
+        Ok(Self::assemble(config, parts))
+    }
 
-        Ok(Self(Arc::new(Inner {
+    /// The state for `config` and `parts`. The only place [`Inner`] is
+    /// built, so a new field is added here once; the unit test fixture comes
+    /// through here too, with parts of its own.
+    pub(crate) fn assemble(config: &Config, parts: Parts) -> Self {
+        let Parts {
+            signing_key,
+            clients,
+            users,
+            pairwise_salt,
+            store,
+            clock,
+        } = parts;
+        Self(Arc::new(Inner {
             issuer: config.issuer.clone(),
             mtls_base_url: config.mtls_base_url.clone(),
             security: config.security.clone(),
             ci: config.ci.clone(),
             signing_key,
             clients: Arc::new(clients),
+            experience: experience::build(config.experience, Arc::clone(&users)),
             users,
-            experience,
-            theme,
+            theme: config.theme.clone(),
             store,
             clock,
             pairwise_salt,
-        })))
+        }))
     }
 
     pub(crate) fn now(&self) -> Timestamp {
         self.clock.now()
+    }
+
+    /// What issuing tokens needs, as of now.
+    pub(crate) fn issuer_context(&self) -> crate::id_token::IssuerContext<'_> {
+        crate::id_token::IssuerContext {
+            issuer: &self.issuer,
+            signing_key: &self.signing_key,
+            pairwise_salt: self.pairwise_salt.expose(),
+            id_token_ttl: self.security.id_token_ttl,
+            now: self.now(),
+        }
     }
 
     /// URL of an endpoint on the public listener.
@@ -215,6 +146,134 @@ impl AppState {
     pub(crate) fn mtls_url(&self, path: &str) -> String {
         format!("{}{path}", self.mtls_base_url)
     }
+}
+
+/// What [`AppState::assemble`] needs besides the configuration: the parts
+/// that are loaded, generated or (in tests) made up.
+pub(crate) struct Parts {
+    pub signing_key: SigningKey,
+    pub clients: StaticClientRegistry,
+    pub users: Arc<dyn UserStore>,
+    pub pairwise_salt: Secret<Vec<u8>>,
+    pub store: Store,
+    pub clock: Arc<dyn Clock>,
+}
+
+/// Give the store the lifetimes the configuration sets.
+pub(crate) fn configure_store(store: Store, config: &Config) -> Store {
+    store
+        .grant_lifetime(config.security.refresh_token_ttl + config.security.access_token_ttl)
+        .session_ttl(config.security.session_ttl)
+}
+
+fn store_is_shared(config: &Config) -> bool {
+    config.store.backend != StoreBackend::Memory
+}
+
+/// The configured signing key or, without one, the key kept in the store
+/// (generated on first use): every instance sharing the store then signs
+/// with the same key.
+async fn load_signing_key(config: &Config, store: &Store) -> Result<SigningKey> {
+    if let Some(path) = &config.keys.signing_key {
+        return SigningKey::from_pem_file(path);
+    }
+    if store_is_shared(config) {
+        tracing::info!("keys.signing_key is not set: using the signing key in the store");
+    } else {
+        tracing::warn!(
+            "keys.signing_key is not set: using an ephemeral signing key (development only)"
+        );
+    }
+    let pem = store
+        .secret("signing-key", SigningKey::generate_pem)
+        .await
+        .context("signing key")?;
+    SigningKey::from_pem(pem.as_bytes()).context("signing key held in the store")
+}
+
+/// The configured clients, then those from the registry that are not also
+/// configured.
+fn load_clients(
+    config: &Config,
+    synced_clients: Vec<crate::client::Client>,
+) -> Result<StaticClientRegistry> {
+    let mut clients = config
+        .clients
+        .iter()
+        .map(crate::client::Client::from_config)
+        .collect::<Result<Vec<_>>>()
+        .context("clients")?;
+    let configured = clients.len();
+    for client in synced_clients {
+        if clients.iter().any(|existing| existing.id == client.id) {
+            tracing::warn!(
+                client_id = %client.id,
+                "client from the registry is also in the configuration file; \
+                 the configured one is used"
+            );
+        } else {
+            clients.push(client);
+        }
+    }
+    tracing::info!(
+        configured,
+        synced = clients.len() - configured,
+        "clients registered"
+    );
+    let clients = StaticClientRegistry::new(clients).context("clients")?;
+    if clients.is_empty() {
+        tracing::warn!("no clients are configured; no client will be able to authenticate");
+    }
+    Ok(clients)
+}
+
+/// The configured users or, without any, the built-in demo customers.
+fn load_users(config: &Config) -> Result<Arc<dyn UserStore>> {
+    let time_zone = &config.time_zone;
+    let users = if config.users.is_empty() {
+        tracing::warn!(
+            "no users are configured: using the built-in demo customers (development only)"
+        );
+        StaticUserStore::demo(time_zone)?
+    } else {
+        StaticUserStore::from_config(&config.users, time_zone).context("users")?
+    };
+    Ok(Arc::new(users))
+}
+
+/// The configured pairwise salt or, without one, the salt kept in the store.
+async fn load_salt(config: &Config, store: &Store) -> Result<Secret<Vec<u8>>> {
+    if let Some(salt) = &config.keys.pairwise_salt {
+        return Ok(Secret::new(salt.expose().clone().into_bytes()));
+    }
+    if store_is_shared(config) {
+        tracing::info!("keys.pairwise_salt is not set: using the salt in the store");
+    } else {
+        tracing::warn!("keys.pairwise_salt is not set: subject identifiers will change on restart");
+    }
+    store
+        .secret("pairwise-salt", || Ok(random_token(32)))
+        .await
+        .context("pairwise salt")
+        .map(|salt| Secret::new(salt.into_bytes()))
+}
+
+/// The startup warnings the unauthenticated experiences must give.
+fn log_experience(config: &Config) {
+    if config.experience == Kind::Technical {
+        tracing::warn!(
+            "experience is 'technical': anyone who can reach the authorization endpoint \
+             can act as any customer and edit responses (development and testing only)"
+        );
+    }
+    if config.experience == Kind::Ci {
+        tracing::warn!(
+            response_delay = config.ci.response_delay.get(),
+            "experience is 'ci': authorization requests are answered automatically, with \
+             no user and no authentication (automated testing only)"
+        );
+    }
+    tracing::info!(experience = %config.experience, "user experience selected");
 }
 
 #[cfg_attr(

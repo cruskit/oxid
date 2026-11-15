@@ -77,23 +77,16 @@ impl Ci {
     /// The delay runs from when the session started, that is from the
     /// browser's first arrival, so a retry does not wait all over again.
     async fn respond(&self, interaction: &Interaction<'_>) -> StepResult {
-        let state = interaction.state;
-        let arrived = interaction.session.expires_at - state.security.session_ttl;
+        let arrived = interaction.session.expires_at - interaction.session_ttl();
         // Negative once the delay has passed, which `to_std` makes zero.
-        let left = (arrived + state.ci.response_delay) - state.now();
+        let left = (arrived + interaction.ci_response_delay()) - interaction.now();
         let deadline = Instant::now() + left.to_std();
         loop {
-            match state
-                .store
-                .planned_response(interaction.request_uri, state.now())
-                .await?
+            match interaction.store().planned_response().await?
             {
                 Some(PlannedResponse::Abandon) => {
                     // One visit only: the next one is answered as usual.
-                    state
-                        .store
-                        .clear_planned_response(interaction.request_uri)
-                        .await?;
+                    interaction.store().clear_planned_response().await?;
                     return Ok(abandoned_page(interaction)?.into());
                 }
                 Some(plan) => return self.planned(interaction, plan),

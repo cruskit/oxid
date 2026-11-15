@@ -151,7 +151,7 @@ async fn declined_claims_are_left_out_of_tokens_and_userinfo() {
         .users
         .find_by_subject(&grant.user_subject)
         .unwrap();
-    let userinfo = crate::id_token::userinfo(&harness.state, &client, &user, &grant);
+    let userinfo = crate::id_token::userinfo(&harness.state.issuer_context(), &client, &user, &grant);
     assert!(!userinfo.contains_key("email"), "declined everywhere");
     assert_eq!(userinfo["phone_number"], "+61 400 000 000");
 }

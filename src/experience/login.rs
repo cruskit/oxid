@@ -119,7 +119,7 @@ impl Login {
     }
 
     async fn sign_in(&self, interaction: &Interaction<'_>, form: &Form) -> StepResult {
-        let store = &interaction.state.store;
+        let store = interaction.store();
 
         let username = form.get("username").unwrap_or_default().to_owned();
         let password = form.get("password").unwrap_or_default().to_owned();
@@ -131,7 +131,7 @@ impl Login {
             .flatten();
 
         let Some(user) = user else {
-            return Ok(if store.record_failed_login(interaction.request_uri).await? {
+            return Ok(if store.record_failed_login().await? {
                 login_page(interaction, Some("The username or password is incorrect."))?.into()
             } else {
                 {
@@ -150,10 +150,8 @@ impl Login {
 
         let secret = random_token(32);
         let session = interaction.session;
-        store
-            .sign_in(interaction.request_uri, session, &user.subject, &secret)
-            .await?;
-        let remaining = (session.expires_at - interaction.state.now()).max(Seconds::new(1));
+        store.sign_in(&user.subject, &secret).await?;
+        let remaining = (session.expires_at - interaction.now()).max(Seconds::new(1));
         Ok(Step {
             decision: Decision::Page(consent_page(interaction, &user, false)?),
             set_cookies: vec![SetCookie::host(LOGIN_COOKIE, secret, SameSite::Lax).max_age(remaining)],
@@ -350,7 +348,7 @@ fn consent_page(interaction: &Interaction<'_>, user: &User, all_on: bool) -> ask
     let values =
         request
             .claims
-            .shareable_values(user, client, &request.scope, interaction.state.now());
+            .shareable_values(user, client, &request.scope, interaction.now());
     let rows = |essential: bool| -> Vec<ClaimRow> {
         requested
             .iter()
@@ -367,7 +365,7 @@ fn consent_page(interaction: &Interaction<'_>, user: &User, all_on: bool) -> ask
         purpose: request.purpose.as_deref(),
         required: rows(true),
         optional: rows(false),
-        limit: duration_text(interaction.state.security.session_ttl),
+        limit: duration_text(interaction.session_ttl()),
     };
     Ok(Page {
         title: format!("Share with {}", client.name),

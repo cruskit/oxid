@@ -86,7 +86,7 @@ pub(super) async fn userinfo(
         return invalid_token("the access token is no longer valid");
     };
 
-    let claims = id_token::userinfo(&state, &client, &user, grant);
+    let claims = id_token::userinfo(&state.issuer_context(), &client, &user, grant);
     no_store(Json(Value::Object(claims)).into_response())
 }
 

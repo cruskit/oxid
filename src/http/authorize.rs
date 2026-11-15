@@ -233,11 +233,12 @@ fn authorize_path(client_id: &str, request_uri: &str) -> String {
 /// session expiry page: the user is told, rather than finding out when they
 /// submit the form.
 fn experience_page(
+    state: &AppState,
     page: &Page,
     interaction: &Interaction<'_>,
     cookies: &[SetCookie],
 ) -> Result<Response, AuthorizeError> {
-    let remaining = interaction.session.expires_at - interaction.state.now();
+    let remaining = interaction.session.expires_at - state.now();
     let mut response = Shell {
         status: StatusCode::OK,
         title: &page.title,
@@ -251,7 +252,7 @@ fn experience_page(
         )),
         wide: page.wide,
     }
-    .render(&interaction.state.theme)?;
+    .render(&state.theme)?;
     cookie::set(&mut response, &[csrf_cookie(interaction.csrf)]);
     cookie::set(&mut response, cookies);
     Ok(response)
@@ -344,17 +345,17 @@ async fn arrive(
             return session_expired_page(state, &client, &request_uri, &pushed, &csrf);
         }
     };
-    let interaction = Interaction {
+    let interaction = Interaction::new(
         state,
-        client: &client,
-        request_uri: &request_uri,
-        pushed: &pushed,
-        session: &session,
-        csrf: &csrf,
+        &client,
+        &request_uri,
+        &pushed,
+        &session,
+        &csrf,
         headers,
-    };
+    );
     let step = state.experience.start(&interaction).await;
-    conclude(&interaction, step).await
+    conclude(state, &interaction, step).await
 }
 
 /// `POST /authorize/decision`: a form submitted from an experience's page,
@@ -404,17 +405,17 @@ async fn decide(
             return session_expired_page(state, &client, &request_uri, &pushed, csrf);
         }
     };
-    let interaction = Interaction {
+    let interaction = Interaction::new(
         state,
-        client: &client,
-        request_uri: &request_uri,
-        pushed: &pushed,
-        session: &session,
+        &client,
+        &request_uri,
+        &pushed,
+        &session,
         csrf,
         headers,
-    };
+    );
     let step = state.experience.submit(&interaction, &params).await;
-    conclude(&interaction, step).await
+    conclude(state, &interaction, step).await
 }
 
 /// Turn an experience's step into the HTTP response, completing the
@@ -425,10 +426,10 @@ async fn decide(
 /// so the browser goes back to the client with `server_error`, as RFC 6749
 /// §4.1.2.1 provides. The failure is logged here, once.
 async fn conclude(
+    state: &AppState,
     interaction: &Interaction<'_>,
     step: StepResult,
 ) -> Result<Response, AuthorizeError> {
-    let state = interaction.state;
     let request = interaction.request();
     let now = state.now();
     let step = step.unwrap_or_else(|error| {
@@ -446,7 +447,7 @@ async fn conclude(
     });
     let mut response = match step.decision {
         Decision::Page(page) => {
-            return experience_page(&page, interaction, &step.set_cookies);
+            return experience_page(state, &page, interaction, &step.set_cookies);
         }
         Decision::Deny { code, description } => {
             // Only the caller that consumes the request records the

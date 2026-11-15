@@ -4,10 +4,10 @@ use crate::epoch::Timestamp;
 use std::sync::Arc;
 
 use crate::client::StaticClientRegistry;
-use crate::config::{BaseUrl, CiConfig, SecurityConfig};
-use crate::experience::{self, Kind};
+use crate::config::{CiConfig, RawConfig};
+use crate::experience::Kind;
 use crate::keys::SigningKey;
-use crate::state::{AppState, Inner};
+use crate::state::{AppState, Parts, configure_store};
 use crate::store::Store;
 use crate::theme::Theme;
 use crate::user::UserStore;
@@ -55,22 +55,26 @@ pub fn state_with_ci(kind: Kind, ci: CiConfig) -> (AppState, Arc<ManualClock>) {
 
 /// As [`state_with_ci`], with the given theme.
 pub fn state_from(kind: Kind, ci: CiConfig, theme: Theme) -> (AppState, Arc<ManualClock>) {
+    let mut raw: RawConfig = toml::from_str(&format!(
+        "issuer = \"{ISSUER}\"\nmtls_base_url = \"{MTLS}\"\n"
+    ))
+    .unwrap();
+    raw.experience = kind;
+    raw.ci = ci;
+    let mut config = raw.validate().unwrap();
+    config.theme = theme;
+
     let clock = Arc::new(ManualClock::new(NOW));
-    let users: Arc<dyn UserStore> = Arc::new(SharedUsers);
-    let clients = StaticClientRegistry::new([client_with_key("rp", shared_key())]).unwrap();
-    let state = AppState::from_inner(Inner {
-        issuer: BaseUrl::parse(ISSUER).unwrap(),
-        mtls_base_url: BaseUrl::parse(MTLS).unwrap(),
-        security: SecurityConfig::default(),
-        ci,
-        signing_key: SigningKey::generate().unwrap(),
-        clients: Arc::new(clients),
-        experience: experience::build(kind, Arc::clone(&users)),
-        users,
-        theme,
-        store: Store::default(),
-        clock: Arc::clone(&clock) as Arc<dyn Clock>,
-        pairwise_salt: Secret::new(b"unit-test-pairwise-salt".to_vec()),
-    });
+    let state = AppState::assemble(
+        &config,
+        Parts {
+            signing_key: SigningKey::generate().unwrap(),
+            clients: StaticClientRegistry::new([client_with_key("rp", shared_key())]).unwrap(),
+            users: Arc::new(SharedUsers),
+            pairwise_salt: Secret::new(b"unit-test-pairwise-salt".to_vec()),
+            store: configure_store(Store::default(), &config),
+            clock: Arc::clone(&clock) as Arc<dyn Clock>,
+        },
+    );
     (state, clock)
 }

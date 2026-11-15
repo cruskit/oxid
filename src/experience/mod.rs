@@ -32,22 +32,19 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use askama::Template;
-use axum::http::HeaderMap;
 
 use crate::epoch::Seconds;
 use crate::cookie::SetCookie;
-use crate::authz::AuthorizationRequest;
-use crate::client::Client;
 use crate::error::ErrorCode;
 use crate::id_token::ClaimEdits;
-use crate::state::AppState;
-use crate::store::{PushedRequest, Session};
-use crate::theme::Theme;
 use crate::user::UserStore;
 
 pub(crate) mod ci;
+mod interaction;
 pub(crate) mod login;
 pub(crate) mod technical;
+
+pub(crate) use interaction::Interaction;
 
 crate::wire::wire_enum! {
     /// The experiences that can be selected in configuration.
@@ -72,46 +69,6 @@ pub(crate) fn build(kind: Kind, users: Arc<dyn UserStore>) -> Arc<dyn Experience
         Kind::Technical => Arc::new(technical::Technical::new(users)),
         Kind::Login => Arc::new(login::Login::new(users)),
         Kind::Ci => Arc::new(ci::Ci::new(users)),
-    }
-}
-
-/// Everything an experience may need to know about the request in hand.
-#[derive(Debug)]
-pub(crate) struct Interaction<'a> {
-    pub state: &'a AppState,
-    pub client: &'a Client,
-    pub request_uri: &'a str,
-    /// The pushed request, including the request object as it was received.
-    pub pushed: &'a PushedRequest,
-    /// The user's session for this request: how long they have left, and
-    /// whether they have signed in.
-    pub session: &'a Session,
-    /// CSRF token to embed in forms; [`Interaction::form`] carries it.
-    pub csrf: &'a str,
-    /// The browser's request headers, for reading cookies.
-    pub headers: &'a HeaderMap,
-}
-
-impl Interaction<'_> {
-    pub(crate) fn request(&self) -> &AuthorizationRequest {
-        &self.pushed.request
-    }
-
-    /// The value of a cookie the browser sent.
-    pub(crate) fn cookie(&self, name: &str) -> Option<&str> {
-        crate::cookie::get(self.headers, name)
-    }
-
-    /// Where a form on a page of this experience posts to. A template with
-    /// this in its `form` field opens the form with
-    /// `{% include "form_open.html" %}`.
-    pub(crate) fn form(&self) -> FormTarget<'_> {
-        FormTarget::new(self.csrf, &self.client.id, self.request_uri)
-    }
-
-    /// The name, logo and colours the pages are shown with.
-    pub(crate) fn theme(&self) -> &Theme {
-        &self.state.theme
     }
 }
 

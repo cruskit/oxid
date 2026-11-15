@@ -6,16 +6,28 @@ use serde_json::{Map, Value, json};
 
 use crate::claims;
 use crate::client::Client;
-use crate::state::AppState;
+use crate::epoch::{Seconds, Timestamp};
+use crate::keys::SigningKey;
 use crate::store::Grant;
 use crate::subject;
 use crate::user::User;
 use crate::util::{b64url, sha256};
 
+/// What issuing an ID token or a `UserInfo` response needs from the
+/// provider, and nothing more: no store, no other client, no other user.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct IssuerContext<'a> {
+    pub issuer: &'a str,
+    pub signing_key: &'a SigningKey,
+    pub pairwise_salt: &'a [u8],
+    pub id_token_ttl: Seconds,
+    pub now: Timestamp,
+}
+
 /// The `sub` that `client` sees for `user`.
-pub(crate) fn subject_for(state: &AppState, client: &Client, user: &User) -> String {
+pub(crate) fn subject_for(issuer: &IssuerContext<'_>, client: &Client, user: &User) -> String {
     subject::pairwise(
-        state.pairwise_salt.expose(),
+        issuer.pairwise_salt,
         &client.sector_identifier,
         &user.subject,
     )
@@ -75,42 +87,42 @@ impl ClaimEdits {
 
 /// Build and sign an ID token, applying any manual edits on the grant.
 pub(crate) fn issue(
-    state: &AppState,
+    issuer: &IssuerContext<'_>,
     client: &Client,
     user: &User,
     grant: &Grant,
     nonce: Option<&str>,
     access_token: &str,
 ) -> Result<String, crate::jose::JoseError> {
-    let mut claims = claims(state, client, user, grant, nonce, &at_hash(access_token));
+    let mut claims = claims(issuer, client, user, grant, nonce, &at_hash(access_token));
     if let Some(edits) = &grant.id_token_edits {
         edits.apply(&mut claims);
     }
-    state.signing_key.sign(Some("JWT"), &claims)
+    issuer.signing_key.sign(Some("JWT"), &claims)
 }
 
 /// The ID token claims for a grant as they would be issued now, with
 /// [`AT_HASH_PLACEHOLDER`] for `at_hash` and before any manual edits.
 pub(crate) fn preview(
-    state: &AppState,
+    issuer: &IssuerContext<'_>,
     client: &Client,
     user: &User,
     grant: &Grant,
     nonce: Option<&str>,
 ) -> Map<String, Value> {
-    claims(state, client, user, grant, nonce, AT_HASH_PLACEHOLDER)
+    claims(issuer, client, user, grant, nonce, AT_HASH_PLACEHOLDER)
 }
 
 /// The claims of an ID token, before signing.
 fn claims(
-    state: &AppState,
+    issuer: &IssuerContext<'_>,
     client: &Client,
     user: &User,
     grant: &Grant,
     nonce: Option<&str>,
     at_hash: &str,
 ) -> Map<String, Value> {
-    let now = state.now();
+    let now = issuer.now;
     // Requested identity claims first, so they can never override the
     // protocol claims set below.
     let mut claims = claims::release(
@@ -122,11 +134,11 @@ fn claims(
         now,
     );
     let protocol = json!({
-        "iss": state.issuer,
-        "sub": subject_for(state, client, user),
+        "iss": issuer.issuer,
+        "sub": subject_for(issuer, client, user),
         "aud": client.id,
         "iat": now,
-        "exp": now + state.security.id_token_ttl,
+        "exp": now + issuer.id_token_ttl,
         "auth_time": grant.auth_time,
         // ConnectID: every ID token carries a transaction identifier.
         "txn": grant.txn,
@@ -143,7 +155,7 @@ fn claims(
 
 /// The `UserInfo` response body for a grant.
 pub(crate) fn userinfo(
-    state: &AppState,
+    issuer: &IssuerContext<'_>,
     client: &Client,
     user: &User,
     grant: &Grant,
@@ -154,9 +166,9 @@ pub(crate) fn userinfo(
         &grant.claims.userinfo,
         &grant.scope,
         &grant.shared_claims,
-        state.now(),
+        issuer.now,
     );
-    claims.insert("sub".to_owned(), subject_for(state, client, user).into());
+    claims.insert("sub".to_owned(), subject_for(issuer, client, user).into());
     claims
 }
 

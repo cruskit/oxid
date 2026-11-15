@@ -2,6 +2,7 @@ use axum::http::HeaderValue;
 use axum::http::header;
 
 use super::*;
+use axum::http::HeaderMap;
 use crate::epoch::Seconds;
 
 #[test]

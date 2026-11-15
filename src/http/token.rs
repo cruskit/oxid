@@ -199,7 +199,7 @@ async fn issue_tokens(
             .users
             .find_by_subject(&grant.user_subject)
             .ok_or_else(|| OAuthError::invalid_grant("the user no longer exists"))?;
-        let id_token = id_token::issue(state, client, &user, grant, nonce, &access_token)
+        let id_token = id_token::issue(&state.issuer_context(), client, &user, grant, nonce, &access_token)
             .map_err(OAuthError::server_error)?;
         body.insert("id_token".to_owned(), id_token.into());
     }

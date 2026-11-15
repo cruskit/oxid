@@ -30,7 +30,7 @@ fn id_token_has_required_claims_and_verifies() {
         .authenticate(DEMO_USERNAME, DEMO_PASSWORD)
         .unwrap();
     let token = issue(
-        &state,
+        &state.issuer_context(),
         &client,
         &user,
         &grant(json!({})),
@@ -53,7 +53,7 @@ fn id_token_has_required_claims_and_verifies() {
     assert_eq!(jws.time_claim("auth_time"), Some(NOW - Seconds::new(5)));
     assert_eq!(
         jws.str_claim("sub"),
-        Some(subject_for(&state, &client, &user).as_str())
+        Some(subject_for(&state.issuer_context(), &client, &user).as_str())
     );
     assert_ne!(
         jws.str_claim("sub"),
@@ -74,7 +74,7 @@ fn nonce_is_omitted_when_not_requested() {
         .users
         .authenticate(DEMO_USERNAME, DEMO_PASSWORD)
         .unwrap();
-    let token = issue(&state, &client, &user, &grant(json!({})), None, "at").unwrap();
+    let token = issue(&state.issuer_context(), &client, &user, &grant(json!({})), None, "at").unwrap();
     let jws = UnverifiedJws::parse(&token, &[SigningAlg::PS256])
         .unwrap()
         .skip_verification_in_tests();
@@ -94,7 +94,7 @@ fn requested_claims_are_included_but_cannot_override_protocol_claims() {
         "iss": {"value": "https://evil.example.com"},
         "txn": {"essential": true},
     }}));
-    let token = issue(&state, &client, &user, &grant, None, "at").unwrap();
+    let token = issue(&state.issuer_context(), &client, &user, &grant, None, "at").unwrap();
     let jws = UnverifiedJws::parse(&token, &[SigningAlg::PS256])
         .unwrap()
         .skip_verification_in_tests();
@@ -136,10 +136,10 @@ fn preview_matches_the_issued_token_apart_from_at_hash() {
         .authenticate(DEMO_USERNAME, DEMO_PASSWORD)
         .unwrap();
     let grant = grant(json!({"id_token": {"given_name": null}}));
-    let preview = preview(&state, &client, &user, &grant, Some("n-1"));
+    let preview = preview(&state.issuer_context(), &client, &user, &grant, Some("n-1"));
     assert_eq!(preview["at_hash"], AT_HASH_PLACEHOLDER);
 
-    let token = issue(&state, &client, &user, &grant, Some("n-1"), "at").unwrap();
+    let token = issue(&state.issuer_context(), &client, &user, &grant, Some("n-1"), "at").unwrap();
     let mut issued = UnverifiedJws::parse(&token, &[SigningAlg::PS256])
         .unwrap()
         .skip_verification_in_tests()
@@ -158,7 +158,7 @@ fn manual_edits_are_applied_to_the_issued_token() {
         .authenticate(DEMO_USERNAME, DEMO_PASSWORD)
         .unwrap();
     let mut grant = grant(json!({"id_token": {"given_name": null, "family_name": null}}));
-    let base = preview(&state, &client, &user, &grant, Some("n-1"));
+    let base = preview(&state.issuer_context(), &client, &user, &grant, Some("n-1"));
     let mut edited = base.clone();
     edited.insert("given_name".to_owned(), "Edited".into());
     edited.insert("custom".to_owned(), json!({"nested": [1, 2]}));
@@ -169,7 +169,7 @@ fn manual_edits_are_applied_to_the_issued_token() {
 
     // Time passes between the preview and the token request.
     clock.advance(Seconds::new(7));
-    let token = issue(&state, &client, &user, &grant, Some("n-1"), "at").unwrap();
+    let token = issue(&state.issuer_context(), &client, &user, &grant, Some("n-1"), "at").unwrap();
     let jws = UnverifiedJws::parse(&token, &[SigningAlg::PS256])
         .unwrap()
         .verify(&state.signing_key.jwks())
@@ -200,8 +200,8 @@ fn userinfo_returns_sub_and_requested_claims_only() {
         .authenticate(DEMO_USERNAME, DEMO_PASSWORD)
         .unwrap();
     let grant = grant(json!({"userinfo": {"email": null}, "id_token": {"given_name": null}}));
-    let body = userinfo(&state, &client, &user, &grant);
-    assert_eq!(body["sub"], subject_for(&state, &client, &user));
+    let body = userinfo(&state.issuer_context(), &client, &user, &grant);
+    assert_eq!(body["sub"], subject_for(&state.issuer_context(), &client, &user));
     assert_eq!(body["email"], "alex.citizen@example.com");
     assert_eq!(body.len(), 2, "{body:?}");
 }
@@ -221,7 +221,7 @@ fn id_token_carries_connectid_verified_claims_and_never_acr() {
             "claims": {"over18": null, "beneficiary_account_au": null},
         },
     }}));
-    let token = issue(&state, &client, &user, &grant, None, "at").unwrap();
+    let token = issue(&state.issuer_context(), &client, &user, &grant, None, "at").unwrap();
     let jws = UnverifiedJws::parse(&token, &[SigningAlg::PS256])
         .unwrap()
         .skip_verification_in_tests();
