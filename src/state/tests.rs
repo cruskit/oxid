@@ -1,11 +1,16 @@
 use super::*;
+use crate::config::RawConfig;
 use crate::epoch::{Seconds, Timestamp};
 
-fn config(extra: &str) -> Config {
+fn raw(extra: &str) -> RawConfig {
     toml::from_str(&format!(
             "issuer = \"https://op.example.com:9443\"\nmtls_base_url = \"https://mtls.example.com:9444\"\n{extra}"
         ))
         .unwrap()
+}
+
+fn config(extra: &str) -> Config {
+    raw(extra).validate().unwrap()
 }
 
 #[tokio::test]
@@ -39,18 +44,20 @@ async fn secrets_are_not_in_debug_output() {
     let config_without_salt = || config("");
     let salt = "0123456789abcdef";
     let hash = crate::user::hash_password("pw").unwrap();
-    let config = config(&format!(
+    let raw = raw(&format!(
         "[keys]\npairwise_salt = \"{salt}\"\n\
              [[users]]\nusername = \"sam\"\nsubject = \"s\"\npassword_hash = \"{hash}\"\n"
     ));
     let salt_bytes = format!("{:?}", salt.as_bytes());
     let salt_bytes = salt_bytes.trim_matches(['[', ']']);
 
-    let printed = format!("{config:?}");
-    assert!(
-        !printed.contains(salt) && !printed.contains(&hash),
-        "{printed}"
-    );
+    for printed in [format!("{raw:?}"), format!("{:?}", raw.clone().validate().unwrap())] {
+        assert!(
+            !printed.contains(salt) && !printed.contains(&hash),
+            "{printed}"
+        );
+    }
+    let config = raw.validate().unwrap();
 
     let state = AppState::from_config(&config).await.unwrap();
     let printed = format!("{state:?}");
@@ -71,9 +78,9 @@ async fn secrets_are_not_in_debug_output() {
 
 #[tokio::test]
 async fn invalid_config_is_rejected() {
-    let mut bad = config("");
+    let mut bad = raw("");
     bad.security.access_token_ttl = Seconds::new(3600);
-    assert!(AppState::from_config(&bad).await.is_err());
+    assert!(bad.validate().is_err());
 
     let missing_key = config("[keys]\nsigning_key = \"/nonexistent/key.pem\"");
     assert!(AppState::from_config(&missing_key).await.is_err());
@@ -91,9 +98,11 @@ fn certificate_names_include_configured_hosts_once() {
             "mtls.example.com"
         ]
     );
-    let local: Config = toml::from_str(
+    let local = toml::from_str::<RawConfig>(
         "issuer = \"https://localhost:9443\"\nmtls_base_url = \"https://localhost:9444\"",
     )
+    .unwrap()
+    .validate()
     .unwrap();
     assert_eq!(certificate_names(&local), ["localhost", "127.0.0.1"]);
 }

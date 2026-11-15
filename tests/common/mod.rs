@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::net::TcpListener;
 use std::sync::Arc;
 
-use oxid::config::{ClientConfig, Config};
+use oxid::config::{ClientConfig, RawConfig};
 use oxid::jose::{SigningAlg, UnverifiedJws};
 use oxid::keys::SigningKey;
 use oxid::server::{Server, ServerBuilder};
@@ -75,20 +75,20 @@ impl TestOp {
     }
 
     /// Start a provider, letting the test adjust the configuration first.
-    pub async fn start_with(adjust: impl FnOnce(&mut Config)) -> Self {
+    pub async fn start_with(adjust: impl FnOnce(&mut RawConfig)) -> Self {
         Self::try_start_with(adjust).await.expect("server starts")
     }
 
     /// As [`Self::start_with`], for tests of configurations that must not
     /// start.
-    pub async fn try_start_with(adjust: impl FnOnce(&mut Config)) -> anyhow::Result<Self> {
+    pub async fn try_start_with(adjust: impl FnOnce(&mut RawConfig)) -> anyhow::Result<Self> {
         let public = TcpListener::bind("127.0.0.1:0").unwrap();
         let mtls = TcpListener::bind("127.0.0.1:0").unwrap();
         let issuer = format!("https://localhost:{}", public.local_addr().unwrap().port());
         let mtls_base = format!("https://localhost:{}", mtls.local_addr().unwrap().port());
 
         let rp_key = SigningKey::generate().unwrap();
-        let mut config: Config = toml::from_str(&format!(
+        let mut config: RawConfig = toml::from_str(&format!(
             "issuer = \"{issuer}\"\nmtls_base_url = \"{mtls_base}\"\n\
              [keys]\npairwise_salt = \"integration-test-salt\"\n"
         ))
@@ -113,7 +113,7 @@ impl TestOp {
         // A manual clock started at the real time: flows behave normally and
         // expiry tests can jump forward instead of sleeping.
         let clock = Arc::new(ManualClock::new(SystemClock.now()));
-        let server = ServerBuilder::new(config)
+        let server = ServerBuilder::new(config.validate()?)
             .clock(Arc::clone(&clock) as Arc<dyn Clock>)
             .listeners(public, mtls)
             .start()

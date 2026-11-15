@@ -28,7 +28,7 @@ use axum::routing::{get, post};
 use axum::{Extension, Form, Json, Router};
 use common::TestOp;
 use oxid::client::Profile;
-use oxid::client_sync::{ClientSyncConfig, fetch};
+use oxid::client_sync::{ClientSync, ClientSyncConfig};
 use oxid::http::ConnInfo;
 use oxid::jose::{SigningAlg, UnverifiedJws};
 use oxid::keys::SigningKey;
@@ -284,6 +284,14 @@ impl TestRegistry {
         let _ = self.shutdown.send(true);
         let _ = std::fs::remove_dir_all(&self.dir);
     }
+}
+
+/// Validate the settings, then load the clients.
+async fn fetch(
+    config: &ClientSyncConfig,
+    clock: &dyn oxid::Clock,
+) -> anyhow::Result<Vec<oxid::client::Client>> {
+    oxid::client_sync::fetch(&ClientSync::try_from(config.clone())?, clock).await
 }
 
 fn ids(clients: &[oxid::client::Client]) -> Vec<&str> {

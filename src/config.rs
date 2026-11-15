@@ -40,9 +40,11 @@ pub const MAX_HEADER_READ_TIMEOUT: u64 = 60;
 /// The longest a listener lets one request take, in seconds.
 pub const MAX_REQUEST_TIMEOUT: u64 = 300;
 
+/// The configuration file as written. Turn it into a [`Config`] with
+/// [`RawConfig::validate`]; nothing else accepts it.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Config {
+pub struct RawConfig {
     /// The issuer identifier, e.g. `https://op.example.com`. Also the base URL
     /// of the public (non-mTLS) listener.
     pub issuer: String,
@@ -298,8 +300,93 @@ pub struct UserConfig {
     pub bank_account: Option<crate::user::BankAccount>,
 }
 
+/// A configuration that has been checked: every limit holds, URLs and the
+/// time zone are parsed, and the theme is loaded. It can only be made by
+/// [`RawConfig::validate`], so whatever holds one need not check again.
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub(crate) issuer: BaseUrl,
+    pub(crate) mtls_base_url: BaseUrl,
+    pub(crate) experience: crate::experience::Kind,
+    pub(crate) ci: CiConfig,
+    pub(crate) server: ServerConfig,
+    pub(crate) keys: KeysConfig,
+    pub(crate) security: SecurityConfig,
+    pub(crate) store: StoreConfig,
+    pub(crate) clients: Vec<ClientConfig>,
+    pub(crate) client_sync: Option<crate::client_sync::ClientSync>,
+    pub(crate) users: Vec<UserConfig>,
+    pub(crate) theme: crate::theme::Theme,
+    pub(crate) time_zone: jiff::tz::TimeZone,
+}
+
 impl Config {
-    /// Load, resolve relative paths against the file's directory, and validate.
+    /// Load, resolve relative paths against the file's directory, and
+    /// validate.
+    pub fn load(path: &Path) -> Result<Self> {
+        RawConfig::load(path)?.validate()
+    }
+}
+
+impl TryFrom<RawConfig> for Config {
+    type Error = anyhow::Error;
+
+    fn try_from(raw: RawConfig) -> Result<Self> {
+        raw.validate()
+    }
+}
+
+/// An issuer-style base URL: https, a host, no query, fragment or trailing
+/// slash. Endpoint URLs are made by appending a path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BaseUrl {
+    text: String,
+    url: Url,
+}
+
+impl BaseUrl {
+    pub(crate) fn parse(value: &str) -> Result<Self> {
+        let url = Url::parse(value).with_context(|| format!("'{value}' is not a URL"))?;
+        ensure!(url.scheme() == "https", "'{value}' must use https");
+        ensure!(url.host_str().is_some(), "'{value}' must have a host");
+        if url.query().is_some() || url.fragment().is_some() {
+            bail!("'{value}' must not have a query or fragment");
+        }
+        ensure!(!value.ends_with('/'), "'{value}' must not end with '/'");
+        Ok(Self {
+            text: value.to_owned(),
+            url,
+        })
+    }
+
+    pub(crate) fn host(&self) -> Option<&str> {
+        self.url.host_str()
+    }
+}
+
+impl std::ops::Deref for BaseUrl {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.text
+    }
+}
+
+impl std::fmt::Display for BaseUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
+impl serde::Serialize for BaseUrl {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.text)
+    }
+}
+
+impl RawConfig {
+    /// Read and parse a configuration file, resolving relative paths
+    /// against its directory. Not yet validated.
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading config {}", path.display()))?;
@@ -307,7 +394,6 @@ impl Config {
             toml::from_str(&text).with_context(|| format!("parsing config {}", path.display()))?;
         let base = path.parent().unwrap_or_else(|| Path::new("."));
         config.resolve_paths(base);
-        config.validate()?;
         Ok(config)
     }
 
@@ -341,13 +427,38 @@ impl Config {
         }
     }
 
-    pub fn validate(&self) -> Result<()> {
-        validate_base_url(&self.issuer).context("issuer")?;
-        validate_base_url(&self.mtls_base_url).context("mtls_base_url")?;
-        self.theme.validate().context("theme")?;
-        jiff::tz::TimeZone::get(&self.time_zone)
+    /// Check every limit and parse what can be parsed, giving the
+    /// [`Config`] the provider runs with. Reads the theme's logo files.
+    pub fn validate(self) -> Result<Config> {
+        self.check_limits()?;
+        let issuer = BaseUrl::parse(&self.issuer).context("issuer")?;
+        let mtls_base_url = BaseUrl::parse(&self.mtls_base_url).context("mtls_base_url")?;
+        let theme = crate::theme::Theme::from_config(&self.theme).context("theme")?;
+        let time_zone = jiff::tz::TimeZone::get(&self.time_zone)
             .with_context(|| format!("time_zone '{}' is not a known time zone", self.time_zone))?;
+        let client_sync = self
+            .client_sync
+            .map(crate::client_sync::ClientSync::try_from)
+            .transpose()
+            .context("client_sync")?;
+        Ok(Config {
+            issuer,
+            mtls_base_url,
+            experience: self.experience,
+            ci: self.ci,
+            server: self.server,
+            keys: self.keys,
+            security: self.security,
+            store: self.store,
+            clients: self.clients,
+            client_sync,
+            users: self.users,
+            theme,
+            time_zone,
+        })
+    }
 
+    fn check_limits(&self) -> Result<()> {
         ensure!(
             self.server.tls_cert.is_some() == self.server.tls_key.is_some(),
             "server.tls_cert and server.tls_key must be set together"
@@ -412,9 +523,6 @@ impl Config {
             "server.request_timeout must be longer than ci.response_delay"
         );
 
-        if let Some(sync) = &self.client_sync {
-            sync.validate().context("client_sync")?;
-        }
         self.store.validate().context("store")?;
 
         if let Some(salt) = &self.keys.pairwise_salt {
@@ -425,18 +533,6 @@ impl Config {
         }
         Ok(())
     }
-}
-
-/// Issuer-style URLs: https, a host, and no query, fragment or trailing slash.
-fn validate_base_url(value: &str) -> Result<()> {
-    let url = Url::parse(value).with_context(|| format!("'{value}' is not a URL"))?;
-    ensure!(url.scheme() == "https", "'{value}' must use https");
-    ensure!(url.host_str().is_some(), "'{value}' must have a host");
-    if url.query().is_some() || url.fragment().is_some() {
-        bail!("'{value}' must not have a query or fragment");
-    }
-    ensure!(!value.ends_with('/'), "'{value}' must not end with '/'");
-    Ok(())
 }
 
 #[cfg(test)]

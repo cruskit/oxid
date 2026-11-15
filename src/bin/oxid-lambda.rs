@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use oxid::Config;
+use oxid::RawConfig;
 
 fn main() -> ExitCode {
     tracing_subscriber::fmt()
@@ -32,7 +32,7 @@ fn main() -> ExitCode {
 async fn run() -> anyhow::Result<()> {
     let path =
         std::env::var_os("OXID_CONFIG").map_or_else(|| PathBuf::from("oxid.toml"), Into::into);
-    let mut config = Config::load(&path)?;
+    let mut config = RawConfig::load(&path)?;
     if let Some(experience) = std::env::var("OXID_EXPERIENCE")
         .ok()
         .filter(|value| !value.is_empty())
@@ -41,5 +41,5 @@ async fn run() -> anyhow::Result<()> {
             .parse()
             .map_err(|error| anyhow::anyhow!("OXID_EXPERIENCE: {error}"))?;
     }
-    oxid::lambda::run(&config).await
+    oxid::lambda::run(&config.validate()?).await
 }

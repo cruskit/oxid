@@ -131,13 +131,38 @@ impl ClientSyncConfig {
     }
 }
 
+/// A [`ClientSyncConfig`] that passed [`ClientSyncConfig::validate`]. Only
+/// this is accepted by [`fetch`], so the checks happen once.
+#[derive(Debug, Clone)]
+#[cfg_attr(
+    not(feature = "test-util"),
+    expect(unreachable_pub, reason = "the integration tests use it")
+)]
+pub struct ClientSync(ClientSyncConfig);
+
+impl TryFrom<ClientSyncConfig> for ClientSync {
+    type Error = anyhow::Error;
+
+    fn try_from(config: ClientSyncConfig) -> Result<Self> {
+        config.validate()?;
+        Ok(Self(config))
+    }
+}
+
+impl std::ops::Deref for ClientSync {
+    type Target = ClientSyncConfig;
+
+    fn deref(&self) -> &ClientSyncConfig {
+        &self.0
+    }
+}
+
 /// Fetch every client from the registry.
 #[cfg_attr(
     not(feature = "test-util"),
     expect(unreachable_pub, reason = "the integration tests use it")
 )]
-pub async fn fetch(config: &ClientSyncConfig, clock: &dyn Clock) -> Result<Vec<Client>> {
-    config.validate()?;
+pub async fn fetch(config: &ClientSync, clock: &dyn Clock) -> Result<Vec<Client>> {
     let signing_key = SigningKey::from_pem_file(&config.signing_key)?;
     let mtls = http_client(config, true)?;
     let plain = http_client(config, false)?;

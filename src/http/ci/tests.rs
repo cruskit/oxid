@@ -87,7 +87,7 @@ async fn with_no_response_chosen_the_first_user_shares_everything() {
     let uri = harness.push(&request()).await;
     let params = arrive(&harness, &uri).await;
     assert_eq!(params["state"], "s-1");
-    assert_eq!(params["iss"], harness.state.issuer);
+    assert_eq!(params["iss"], *harness.state.issuer);
     assert!(!params.contains_key("error"));
 
     let grant = grant(&harness, &params["code"]).await;
@@ -177,7 +177,7 @@ async fn a_response_chosen_before_arriving_is_given_without_waiting() {
     assert_eq!(params["error"], "login_required");
     assert_eq!(params["error_description"], "the user must authenticate");
     assert_eq!(params["state"], "s-1");
-    assert_eq!(params["iss"], harness.state.issuer);
+    assert_eq!(params["iss"], *harness.state.issuer);
     assert!(!params.contains_key("code"));
 }
 

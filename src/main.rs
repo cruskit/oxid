@@ -6,7 +6,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use oxid::Config;
+use oxid::RawConfig;
 use oxid::ServerBuilder;
 
 #[derive(Debug, Parser)]
@@ -62,11 +62,11 @@ fn main() -> ExitCode {
 
 #[tokio::main]
 async fn serve(config_path: &std::path::Path, experience: Option<oxid::Kind>) -> Result<()> {
-    let mut config = Config::load(config_path)?;
+    let mut config = RawConfig::load(config_path)?;
     if let Some(experience) = experience {
         config.experience = experience;
     }
-    let server = ServerBuilder::new(config).start().await?;
+    let server = ServerBuilder::new(config.validate()?).start().await?;
     shutdown_signal().await;
     tracing::info!("shutting down");
     server.shutdown().await;

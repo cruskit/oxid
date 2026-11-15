@@ -4,7 +4,7 @@ use crate::epoch::Timestamp;
 use std::sync::Arc;
 
 use crate::client::StaticClientRegistry;
-use crate::config::{CiConfig, SecurityConfig};
+use crate::config::{BaseUrl, CiConfig, SecurityConfig};
 use crate::experience::{self, Kind};
 use crate::keys::SigningKey;
 use crate::state::{AppState, Inner};
@@ -59,8 +59,8 @@ pub fn state_from(kind: Kind, ci: CiConfig, theme: Theme) -> (AppState, Arc<Manu
     let users: Arc<dyn UserStore> = Arc::new(SharedUsers);
     let clients = StaticClientRegistry::new([client_with_key("rp", shared_key())]).unwrap();
     let state = AppState::from_inner(Inner {
-        issuer: ISSUER.to_owned(),
-        mtls_base_url: MTLS.to_owned(),
+        issuer: BaseUrl::parse(ISSUER).unwrap(),
+        mtls_base_url: BaseUrl::parse(MTLS).unwrap(),
         security: SecurityConfig::default(),
         ci,
         signing_key: SigningKey::generate().unwrap(),

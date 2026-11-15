@@ -4,11 +4,10 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use url::Url;
 
 use crate::client::{ClientRegistry, StaticClientRegistry};
 use crate::epoch::Timestamp;
-use crate::config::{CiConfig, Config, SecurityConfig, StoreBackend};
+use crate::config::{BaseUrl, CiConfig, Config, SecurityConfig, StoreBackend};
 use crate::experience::{self, Experience, Kind};
 use crate::keys::SigningKey;
 use crate::store::{MemoryBackend, Store};
@@ -18,8 +17,8 @@ use crate::util::{Clock, Secret, SystemClock, random_token};
 
 #[derive(Debug)]
 pub(crate) struct Inner {
-    pub issuer: String,
-    pub mtls_base_url: String,
+    pub issuer: BaseUrl,
+    pub mtls_base_url: BaseUrl,
     pub security: SecurityConfig,
     /// Settings of the `ci` experience.
     pub ci: CiConfig,
@@ -59,11 +58,10 @@ impl AppState {
         Self::build(config, Arc::new(SystemClock), Vec::new()).await
     }
 
-    /// Everything that happens before the first request: validate the
-    /// configuration, load clients from the registry if that is enabled,
-    /// and open the store.
+    /// Everything that happens before the first request: load clients from
+    /// the registry if that is enabled, and open the store. The
+    /// configuration was validated when the [`Config`] was made.
     pub(crate) async fn start(config: &Config, clock: Option<Arc<dyn Clock>>) -> Result<Self> {
-        config.validate()?;
         // Load clients from the registry before accepting any request, so
         // the provider never runs with a partial list.
         let clock = clock.unwrap_or_else(|| Arc::new(SystemClock));
@@ -84,8 +82,6 @@ impl AppState {
         clock: Arc<dyn Clock>,
         synced_clients: Vec<crate::client::Client>,
     ) -> Result<Self> {
-        config.validate()?;
-
         let store = open_store(config)
             .await?
             .grant_lifetime(config.security.refresh_token_ttl + config.security.access_token_ttl)
@@ -139,15 +135,14 @@ impl AppState {
             tracing::warn!("no clients are configured; no client will be able to authenticate");
         }
 
-        let time_zone = jiff::tz::TimeZone::get(&config.time_zone)
-            .with_context(|| format!("time_zone '{}'", config.time_zone))?;
+        let time_zone = &config.time_zone;
         let users = if config.users.is_empty() {
             tracing::warn!(
                 "no users are configured: using the built-in demo customers (development only)"
             );
-            StaticUserStore::demo(&time_zone)?
+            StaticUserStore::demo(time_zone)?
         } else {
-            StaticUserStore::from_config(&config.users, &time_zone).context("users")?
+            StaticUserStore::from_config(&config.users, time_zone).context("users")?
         };
 
         let pairwise_salt = if let Some(salt) = &config.keys.pairwise_salt {
@@ -184,7 +179,7 @@ impl AppState {
         tracing::info!(experience = %config.experience, "user experience selected");
         let experience = experience::build(config.experience, Arc::clone(&users));
 
-        let theme = Theme::from_config(&config.theme).context("theme")?;
+        let theme = config.theme.clone();
         tracing::info!(
             name = %theme.name,
             logo = theme.has_logo(),
@@ -255,12 +250,10 @@ async fn open_store(config: &Config) -> Result<Store> {
 pub(crate) fn certificate_names(config: &Config) -> Vec<String> {
     let mut names = vec!["localhost".to_owned(), "127.0.0.1".to_owned()];
     for base in [&config.issuer, &config.mtls_base_url] {
-        if let Some(host) = Url::parse(base)
-            .ok()
-            .and_then(|u| u.host_str().map(str::to_owned))
-            && !names.contains(&host)
+        if let Some(host) = base.host()
+            && !names.iter().any(|name| name == host)
         {
-            names.push(host);
+            names.push(host.to_owned());
         }
     }
     names

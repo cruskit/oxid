@@ -1,7 +1,7 @@
 use super::*;
 use crate::epoch::Seconds;
 
-fn minimal() -> Config {
+fn minimal() -> RawConfig {
     toml::from_str(
         r#"
             issuer = "https://op.example.com"
@@ -14,7 +14,7 @@ fn minimal() -> Config {
 #[test]
 fn minimal_config_gets_compliant_defaults() {
     let config = minimal();
-    config.validate().unwrap();
+    config.clone().validate().unwrap();
     assert_eq!(config.security.access_token_ttl, Seconds::new(300));
     assert_eq!(config.security.authorization_code_ttl, Seconds::new(60));
     assert_eq!(
@@ -25,14 +25,14 @@ fn minimal_config_gets_compliant_defaults() {
     assert!(config.users.is_empty());
     assert_eq!(config.experience, crate::experience::Kind::Technical);
 
-    let login: Config = toml::from_str(
+    let login: RawConfig = toml::from_str(
         "issuer = \"https://op.example.com\"\nmtls_base_url = \"https://m.example.com\"\n\
              experience = \"login\"",
     )
     .unwrap();
     assert_eq!(login.experience, crate::experience::Kind::Login);
     assert!(
-        toml::from_str::<Config>(
+        toml::from_str::<RawConfig>(
             "issuer = \"https://op.example.com\"\nmtls_base_url = \"https://m.example.com\"\n\
                  experience = \"wizard\"",
         )
@@ -45,22 +45,25 @@ fn store_defaults_to_memory_and_dynamodb_needs_a_table() {
     let config = minimal();
     assert_eq!(config.store.backend, StoreBackend::Memory);
 
-    let with = |store: &str| -> Config {
+    let with = |store: &str| -> RawConfig {
         toml::from_str(&format!(
                 "issuer = \"https://op.example.com\"\nmtls_base_url = \"https://m.example.com\"\n[store]\n{store}"
             ))
             .unwrap()
     };
     let no_table = with("backend = \"dynamodb\"");
-    assert!(no_table.validate().is_err());
+    assert!(no_table.clone().validate().is_err());
     let table = with("backend = \"dynamodb\"\ntable = \"oxid\"\nregion = \"ap-southeast-2\"");
     assert_eq!(table.store.backend, StoreBackend::Dynamodb);
     // Usable only when the binary was built with DynamoDB support.
-    assert_eq!(table.validate().is_ok(), cfg!(feature = "aws"));
+    assert_eq!(table.clone().validate().is_ok(), cfg!(feature = "aws"));
     let stray = with("table = \"oxid\"");
-    assert!(stray.validate().is_err(), "a table without the backend");
     assert!(
-        toml::from_str::<Config>(
+        stray.clone().validate().is_err(),
+        "a table without the backend"
+    );
+    assert!(
+        toml::from_str::<RawConfig>(
             "issuer = \"https://op.example.com\"\nmtls_base_url = \"https://m.example.com\"\n\
                  [store]\nbackend = \"redis\"",
         )
@@ -70,7 +73,7 @@ fn store_defaults_to_memory_and_dynamodb_needs_a_table() {
 
 #[test]
 fn unknown_fields_are_rejected() {
-    let err = toml::from_str::<Config>(
+    let err = toml::from_str::<RawConfig>(
         r#"
             issuer = "https://op.example.com"
             mtls_base_url = "https://mtls.op.example.com"
@@ -92,7 +95,7 @@ fn issuer_must_be_a_clean_https_url() {
     ] {
         let mut config = minimal();
         config.issuer = bad.to_owned();
-        assert!(config.validate().is_err(), "{bad}");
+        assert!(config.clone().validate().is_err(), "{bad}");
     }
 }
 
@@ -125,7 +128,7 @@ fn lifetimes_cannot_exceed_profile_limits() {
     for (name, set) in cases {
         let mut config = minimal();
         set(&mut config.security);
-        assert!(config.validate().is_err(), "{name}");
+        assert!(config.clone().validate().is_err(), "{name}");
     }
 }
 
@@ -133,14 +136,14 @@ fn lifetimes_cannot_exceed_profile_limits() {
 fn tls_cert_and_key_must_come_as_a_pair() {
     let mut config = minimal();
     config.server.tls_cert = Some("cert.pem".into());
-    assert!(config.validate().is_err());
+    assert!(config.clone().validate().is_err());
     config.server.tls_key = Some("key.pem".into());
-    config.validate().unwrap();
+    config.clone().validate().unwrap();
 }
 
 #[test]
 fn users_and_clients_carry_connectid_claim_settings() {
-    let config: Config = toml::from_str(
+    let config: RawConfig = toml::from_str(
         r#"
             issuer = "https://op.example.com"
             mtls_base_url = "https://mtls.op.example.com"
@@ -188,11 +191,11 @@ fn users_and_clients_carry_connectid_claim_settings() {
     let user = &config.users[0];
     assert_eq!(user.claims["address"]["locality"], "Sydney");
     let account = user.bank_account.as_ref().unwrap();
-    account.validate().unwrap();
+    account.clone().validate().unwrap();
     assert_eq!(account.payid_type, Some(crate::user::PayIdType::Mobile));
     assert_eq!(account.international_number(), "12345612345678");
 
-    let typo = toml::from_str::<Config>(
+    let typo = toml::from_str::<RawConfig>(
         r#"
             issuer = "https://op.example.com"
             mtls_base_url = "https://mtls.op.example.com"
@@ -213,7 +216,7 @@ fn users_and_clients_carry_connectid_claim_settings() {
 fn short_pairwise_salt_is_rejected() {
     let mut config = minimal();
     config.keys.pairwise_salt = Some(String::from("short").into());
-    assert!(config.validate().is_err());
+    assert!(config.clone().validate().is_err());
 }
 
 #[test]
@@ -222,7 +225,7 @@ fn the_theme_is_configured_and_validated() {
     assert_eq!(config.theme.name, None, "the default is the oxID theme");
     assert!(config.theme.show_name && config.theme.logo.is_none());
 
-    let mut config: Config = toml::from_str(
+    let mut config: RawConfig = toml::from_str(
         r##"
             issuer = "https://op.example.com"
             mtls_base_url = "https://mtls.op.example.com"
@@ -237,7 +240,9 @@ fn the_theme_is_configured_and_validated() {
             "##,
     )
     .unwrap();
-    config.validate().unwrap();
+    // The theme's own rules; validating the whole configuration would also
+    // read the (fictional) logo files.
+    config.theme.validate().unwrap();
     config.resolve_paths(Path::new("/etc/oxid"));
     assert_eq!(
         config.theme.logo.as_deref().unwrap(),
@@ -253,7 +258,7 @@ fn the_theme_is_configured_and_validated() {
     );
 
     config.theme.name = Some(String::new());
-    let error = config.validate().unwrap_err();
+    let error = config.clone().validate().unwrap_err();
     assert!(format!("{error:#}").starts_with("theme: "), "{error:#}");
 
     // Only hexadecimal colours, and only the colours there are.
@@ -263,13 +268,13 @@ fn the_theme_is_configured_and_validated() {
     ] {
         let text =
             format!("issuer = \"https://a.example\"\nmtls_base_url = \"https://b.example\"\n{bad}");
-        assert!(toml::from_str::<Config>(&text).is_err(), "{bad}");
+        assert!(toml::from_str::<RawConfig>(&text).is_err(), "{bad}");
     }
 }
 
 #[test]
 fn relative_paths_resolve_against_the_config_directory() {
-    let mut config: Config = toml::from_str(
+    let mut config: RawConfig = toml::from_str(
         r#"
             issuer = "https://op.example.com"
             mtls_base_url = "https://mtls.op.example.com"
@@ -307,10 +312,16 @@ fn relative_paths_resolve_against_the_config_directory() {
 fn token_lifetimes_have_upper_bounds() {
     let mut config = minimal();
     config.security.refresh_token_ttl = MAX_REFRESH_TOKEN_TTL + Seconds::new(1);
-    assert!(config.validate().is_err(), "refresh_token_ttl is bounded");
+    assert!(
+        config.clone().validate().is_err(),
+        "refresh_token_ttl is bounded"
+    );
     config.security.refresh_token_ttl = MAX_REFRESH_TOKEN_TTL;
-    config.validate().unwrap();
+    config.clone().validate().unwrap();
 
     config.security.id_token_ttl = MAX_ID_TOKEN_TTL + Seconds::new(1);
-    assert!(config.validate().is_err(), "id_token_ttl is bounded");
+    assert!(
+        config.clone().validate().is_err(),
+        "id_token_ttl is bounded"
+    );
 }

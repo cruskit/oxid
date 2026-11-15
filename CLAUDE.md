@@ -141,8 +141,11 @@ mise run build        # check + release build + conformance
 - `src/lambda.rs` and `src/bin/oxid-lambda.rs` (feature `aws`) run the app
   behind an API Gateway HTTP API. The mTLS client certificate comes from
   `requestContext.authentication.clientCert`.
-- Config: `oxid.example.toml` is the reference, and `config.rs` validates
-  it. The `[store]` section selects the backend.
+- Config: `oxid.example.toml` is the reference. `config.rs` parses it into a
+  `RawConfig` (serde, editable), and `RawConfig::validate` turns that into
+  the `Config` everything else takes: limits checked, URLs, time zone and
+  client sync settings parsed, theme loaded. Nothing re-validates a
+  `Config`. The `[store]` section selects the backend.
 
 ## Releases and the infrastructure contract
 
