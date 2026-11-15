@@ -1,2 +1,7 @@
 # Product and specification names that are not code and need no backticks.
 doc-valid-idents = ["OpenID", "ConnectID", "oxID", "UserInfo", "OAuth", "mTLS", "DynamoDB", ".."]
+
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-indexing-slicing-in-tests = true
+allow-dbg-in-tests = true

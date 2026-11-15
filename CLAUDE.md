@@ -28,7 +28,8 @@ release and deploys it to AWS Lambda.
 The Rust toolchain comes from mise. Use `mise exec -- cargo …`, or a task:
 
 ```sh
-mise run check        # fmt + clippy (default and `aws` features) + tests
+mise run check        # fmt + clippy (default and `aws` features) + cargo deny + tests
+mise run deny         # cargo deny: advisories, licences, sources (deny.toml)
 mise run test         # cargo test --locked --features aws
 mise run lambda       # Lambda package into dist/lambda (Docker)
 mise run conformance  # OIDF conformance suite in Docker (slow: ~minutes per experience)
@@ -36,6 +37,11 @@ mise run build        # check + release build + conformance
 ```
 
 - On this machine, pass `-j 3` to cargo to limit build parallelism.
+- The toolchain is pinned to an exact version in `rust-toolchain.toml`, `mise.toml`
+  `rust-version` in `Cargo.toml` and both Dockerfiles. Bump them together, deliberately.
+- `unwrap`, `expect` and `dbg!` are linted outside tests. Where a panic is
+  truly an invariant, use `#[expect(clippy::expect_used, reason = "…")]`;
+  use `#[expect]` with a reason rather than `#[allow]` everywhere.
 - Clippy runs with `pedantic` and `-D warnings`. `unsafe_code` is forbidden.
   Add product names to `clippy.toml` `doc-valid-idents`, not to backticks.
 - The DynamoDB store tests run only when `OXID_TEST_DYNAMODB_ENDPOINT` is set
@@ -55,13 +61,21 @@ mise run build        # check + release build + conformance
 
 ## Architecture
 
-- `src/lib.rs` re-exports the crate. `main.rs` is the CLI. `server.rs` and
+- `src/lib.rs` exports a small facade (`Config`, `ServerBuilder`, `lambda::run`
+  and the types they name); every other module is `pub(crate)`, and
+  `unreachable_pub` is linted. The integration tests in `tests/` reach the
+  internals through the `test-util` feature (enabled by a dev-dependency on
+  the crate itself); an item they need stays `pub` with
+  `#[cfg_attr(not(feature = "test-util"), expect(unreachable_pub, …))]`.
+  `mise run lint` also lints the library without that feature, which is
+  where dead code shows. `main.rs` is the CLI. `server.rs` and
   `tls.rs` set up the two TLS listeners: public, and mTLS for the token, PAR
   and UserInfo endpoints.
 - `src/http/` holds the endpoints: discovery/JWKS, PAR, authorize, token and
   UserInfo. The protocol rules sit in `authz.rs`, `request_object.rs` (JAR),
   `client_auth.rs` (private_key_jwt only), `pkce.rs` (S256 only),
-  `claims.rs` (the claims parameter, `verified_claims`, release decisions),
+  `claims/` (the claim catalogue, the claims parameter and consent,
+  release decisions and `verified_claims`),
   `id_token.rs` and `subject.rs` (pairwise subjects).
 - `src/experience/` holds the pluggable UI at the authorization endpoint (the
   `Experience` trait, a state machine over HTML forms):
@@ -88,8 +102,10 @@ mise run build        # check + release build + conformance
   `format!`/`write!`, and do not call an escaping function by hand: the
   templates escape (as `&#60;`, not `&lt;`). Inside `<pre>` and
   `<textarea>` keep the tag and its content on one line. The tests and the
-  conformance suite find elements by `id` and by exact attribute order
-  (`name="…" value="…"`), so keep those when editing a template.
+  conformance suite find elements by `id` and form fields by `name`, so
+  keep those when editing a template. Tests parse pages with
+  `tests/common/html.rs` (also `crate::testing::html`); attribute order
+  does not matter.
 
   **Colours come from the theme** (`theme.rs`, the `[theme]` config
   section): a name, an optional logo (served at `/theme/logo`), and a light
@@ -100,7 +116,8 @@ mise run build        # check + release build + conformance
   breaks in dark mode and ignores the theme. Name the provider with
   `{{ theme.name }}`, never a literal "oxID". The default theme is oxID's.
 
-  The endpoint (`http/authorize.rs`), not the experience, owns the page
+  The endpoint (`http/authorize.rs`, with the shell, CSP and CSRF cookie in
+  `http/page.rs`), not the experience, owns the page
   shell and the user's session: `request_uri_ttl` only limits how long the
   browser may take to arrive, then `session_ttl` (5 minutes) applies. An
   expired session gets its own page, with a way back to the client
@@ -124,14 +141,18 @@ mise run build        # check + release build + conformance
 - `src/lambda.rs` and `src/bin/oxid-lambda.rs` (feature `aws`) run the app
   behind an API Gateway HTTP API. The mTLS client certificate comes from
   `requestContext.authentication.clientCert`.
-- Config: `oxid.example.toml` is the reference, and `config.rs` validates
-  it. The `[store]` section selects the backend.
+- Config: `oxid.example.toml` is the reference. `config.rs` parses it into a
+  `RawConfig` (serde, editable), and `RawConfig::validate` turns that into
+  the `Config` everything else takes: limits checked, URLs, time zone and
+  client sync settings parsed, theme loaded. Nothing re-validates a
+  `Config`. The `[store]` section selects the backend.
 
 ## Releases and the infrastructure contract
 
 - CI (`.github/workflows/build.yml`) runs on every PR and push to `main`:
-  format, lint, tests with DynamoDB Local, conformance for both
-  experiences, and the Lambda package.
+  format, lint, dependency audit (`cargo deny`), tests with DynamoDB
+  Local, conformance for each of the three experiences, and the Lambda
+  package. Pushing a branch without a pull request runs nothing.
 - To release: bump `version` in `Cargo.toml`, merge to `main`, then run the
   Build workflow by hand with "Create a GitHub release" ticked. The release
   publishes the Linux binary, `oxid-lambda-<v>-x86_64.zip` and

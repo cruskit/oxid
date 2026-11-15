@@ -17,6 +17,7 @@ use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, crypto};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::epoch::Timestamp;
 use crate::util::{b64url, b64url_decode};
 
 /// Minimum RSA modulus size accepted, in bits (FAPI 2.0 §5.4.1).
@@ -24,6 +25,10 @@ const MIN_RSA_BITS: usize = 2048;
 
 /// Signature algorithms permitted by FAPI 2.0 §5.4.1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(
+    not(feature = "test-util"),
+    expect(unreachable_pub, reason = "the integration tests use it")
+)]
 pub enum SigningAlg {
     PS256,
     ES256,
@@ -31,7 +36,7 @@ pub enum SigningAlg {
 }
 
 impl SigningAlg {
-    pub fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::PS256 => "PS256",
             Self::ES256 => "ES256",
@@ -68,6 +73,10 @@ impl FromStr for SigningAlg {
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[cfg_attr(
+    not(feature = "test-util"),
+    expect(unreachable_pub, reason = "the integration tests use it")
+)]
 pub enum JoseError {
     #[error("malformed JWS: {0}")]
     Malformed(&'static str),
@@ -77,26 +86,63 @@ pub enum JoseError {
     NoMatchingKey,
     #[error("signature verification failed")]
     BadSignature,
+    /// The signature could not be checked at all, for example because it
+    /// is not valid base64url or has the wrong length for the key.
+    #[error("signature could not be checked: {0}")]
+    UnreadableSignature(String),
     #[error("signing failed: {0}")]
     Signing(String),
 }
 
-/// A parsed, not-yet-verified compact JWS whose payload is a JSON object.
+/// The protected header of a JWS: what may be read before the signature is
+/// checked.
 #[derive(Debug, Clone)]
-pub struct Jws {
+#[cfg_attr(
+    not(feature = "test-util"),
+    expect(unreachable_pub, reason = "the integration tests use it")
+)]
+pub struct JwsHeader {
     pub alg: SigningAlg,
     pub kid: Option<String>,
     pub typ: Option<String>,
-    pub claims: Map<String, Value>,
+}
+
+/// A parsed compact JWS whose signature has **not** been checked.
+///
+/// Its claims cannot be read: only the header, and the issuer under the
+/// name [`UnverifiedJws::unverified_issuer`], which a caller needs to find
+/// the keys to verify with. [`UnverifiedJws::verify`] consumes it and
+/// returns a [`VerifiedJws`], the only way to the claims.
+#[derive(Debug, Clone)]
+#[cfg_attr(
+    not(feature = "test-util"),
+    expect(unreachable_pub, reason = "the integration tests use it")
+)]
+pub struct UnverifiedJws {
+    header: JwsHeader,
+    claims: Map<String, Value>,
     signing_input: String,
     signature: String,
 }
 
-impl Jws {
+/// A JWS whose signature has been verified, with its claims.
+#[derive(Debug, Clone)]
+#[cfg_attr(
+    not(feature = "test-util"),
+    expect(unreachable_pub, reason = "the integration tests use it")
+)]
+pub struct VerifiedJws {
+    header: JwsHeader,
+    claims: Map<String, Value>,
+}
+
+impl UnverifiedJws {
     /// Split and decode a compact JWS, checking its `alg` against `allowed`.
-    ///
-    /// No signature verification happens here; call [`Jws::verify`] before
-    /// trusting any claim.
+    /// No signature verification happens here.
+    #[cfg_attr(
+        not(feature = "test-util"),
+        expect(unreachable_pub, reason = "the integration tests use it")
+    )]
     pub fn parse(token: &str, allowed: &[SigningAlg]) -> Result<Self, JoseError> {
         let mut parts = token.split('.');
         let (Some(header_b64), Some(payload_b64), Some(signature), None) =
@@ -135,13 +181,44 @@ impl Jws {
 
         let str_header = |name: &str| header.get(name).and_then(Value::as_str).map(str::to_owned);
         Ok(Self {
-            alg,
-            kid: str_header("kid"),
-            typ: str_header("typ"),
+            header: JwsHeader {
+                alg,
+                kid: str_header("kid"),
+                typ: str_header("typ"),
+            },
             claims,
             signing_input: format!("{header_b64}.{payload_b64}"),
             signature: signature.to_owned(),
         })
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    #[cfg_attr(
+        not(feature = "test-util"),
+        expect(unreachable_pub, reason = "the integration tests use it")
+    )]
+    pub fn header(&self) -> &JwsHeader {
+        &self.header
+    }
+
+    /// The `iss` claim, **before** the signature is checked: only for
+    /// choosing whose keys to verify with. Never trust it otherwise.
+    #[cfg_attr(
+        not(feature = "test-util"),
+        expect(unreachable_pub, reason = "the integration tests use it")
+    )]
+    pub fn unverified_issuer(&self) -> Option<&str> {
+        self.claims.get("iss").and_then(Value::as_str)
+    }
+
+    /// The claims without checking the signature. Unit tests only, for
+    /// looking inside a token whose signature is not what they test.
+    #[cfg(test)]
+    pub(crate) fn skip_verification_in_tests(self) -> VerifiedJws {
+        VerifiedJws {
+            header: self.header,
+            claims: self.claims,
+        }
     }
 
     /// Verify the signature against a key from `keys`.
@@ -149,33 +226,43 @@ impl Jws {
     /// Key selection follows FAPI 2.0 §5.4.3: match on `kid` when the JWS has
     /// one, then narrow by `alg`, `use` and key type. Every remaining
     /// candidate is tried.
-    pub fn verify(&self, keys: &JwkSet) -> Result<(), JoseError> {
-        let mut tried_any = false;
+    #[cfg_attr(
+        not(feature = "test-util"),
+        expect(unreachable_pub, reason = "the integration tests use it")
+    )]
+    pub fn verify(self, keys: &JwkSet) -> Result<VerifiedJws, JoseError> {
+        let mut outcome = Err(JoseError::NoMatchingKey);
         for jwk in keys.keys.iter().filter(|jwk| self.key_is_candidate(jwk)) {
             let Ok(key) = DecodingKey::from_jwk(jwk) else {
                 continue;
             };
-            tried_any = true;
-            if crypto::verify(
+            match crypto::verify(
                 &self.signature,
                 self.signing_input.as_bytes(),
                 &key,
-                self.alg.algorithm(),
-            )
-            .unwrap_or(false)
-            {
-                return Ok(());
+                self.header.alg.algorithm(),
+            ) {
+                Ok(true) => {
+                    return Ok(VerifiedJws {
+                        header: self.header,
+                        claims: self.claims,
+                    });
+                }
+                // A wrong signature outranks an unreadable one: it is the
+                // more useful thing to report when keys disagree.
+                Ok(false) => outcome = Err(JoseError::BadSignature),
+                Err(error) => {
+                    if !matches!(outcome, Err(JoseError::BadSignature)) {
+                        outcome = Err(JoseError::UnreadableSignature(error.to_string()));
+                    }
+                }
             }
         }
-        if tried_any {
-            Err(JoseError::BadSignature)
-        } else {
-            Err(JoseError::NoMatchingKey)
-        }
+        outcome
     }
 
     fn key_is_candidate(&self, jwk: &Jwk) -> bool {
-        if let Some(kid) = &self.kid
+        if let Some(kid) = &self.header.kid
             && jwk.common.key_id.as_deref() != Some(kid.as_str())
         {
             return false;
@@ -184,33 +271,74 @@ impl Jws {
             return false;
         }
         if let Some(key_alg) = jwk.common.key_algorithm
-            && key_alg.to_string() != self.alg.as_str()
+            && key_alg.to_string() != self.header.alg.as_str()
         {
             return false;
         }
-        key_supports_alg(jwk, self.alg)
+        key_supports_alg(jwk, self.header.alg)
+    }
+
+}
+
+impl VerifiedJws {
+    #[cfg_attr(
+        not(feature = "test-util"),
+        expect(unreachable_pub, reason = "the integration tests use it")
+    )]
+    pub fn header(&self) -> &JwsHeader {
+        &self.header
+    }
+
+    #[cfg_attr(
+        not(feature = "test-util"),
+        expect(unreachable_pub, reason = "the integration tests use it")
+    )]
+    pub fn claims(&self) -> &Map<String, Value> {
+        &self.claims
+    }
+
+    #[cfg_attr(
+        not(feature = "test-util"),
+        expect(unreachable_pub, reason = "the integration tests use it")
+    )]
+    pub fn into_claims(self) -> Map<String, Value> {
+        self.claims
     }
 
     /// A string claim, if present and a string.
+    #[cfg_attr(
+        not(feature = "test-util"),
+        expect(unreachable_pub, reason = "the integration tests use it")
+    )]
     pub fn str_claim(&self, name: &str) -> Option<&str> {
         self.claims.get(name).and_then(Value::as_str)
     }
 
     /// A numeric date claim (seconds since the epoch), if present and numeric.
-    #[allow(clippy::cast_possible_truncation)]
-    pub fn time_claim(&self, name: &str) -> Option<i64> {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "JSON numbers are floats; whole seconds fit an i64"
+    )]
+    #[cfg_attr(
+        not(feature = "test-util"),
+        expect(unreachable_pub, reason = "the integration tests use it")
+    )]
+    pub fn time_claim(&self, name: &str) -> Option<Timestamp> {
         let value = self.claims.get(name)?;
-        value.as_i64().or_else(|| {
-            value
-                .as_f64()
-                .filter(|f| f.is_finite())
-                .map(|f| f.floor() as i64)
-        })
+        value
+            .as_i64()
+            .or_else(|| {
+                value
+                    .as_f64()
+                    .filter(|f| f.is_finite())
+                    .map(|f| f.floor() as i64)
+            })
+            .map(Timestamp::from_unix)
     }
 }
 
 /// Whether `jwk` is the right kind of key, and strong enough, for `alg`.
-pub fn key_supports_alg(jwk: &Jwk, alg: SigningAlg) -> bool {
+pub(crate) fn key_supports_alg(jwk: &Jwk, alg: SigningAlg) -> bool {
     match (&jwk.algorithm, alg) {
         (AlgorithmParameters::RSA(rsa), SigningAlg::PS256) => {
             b64url_decode(&rsa.n).is_some_and(|n| {
@@ -229,7 +357,7 @@ pub fn key_supports_alg(jwk: &Jwk, alg: SigningAlg) -> bool {
 }
 
 /// Produce a compact JWS over `claims`.
-pub fn sign(
+pub(crate) fn sign(
     alg: SigningAlg,
     kid: Option<&str>,
     typ: Option<&str>,
@@ -244,187 +372,15 @@ pub fn sign(
     if let Some(typ) = typ {
         header.insert("typ".into(), typ.into());
     }
-    let to_json = |v: &dyn erased::Json| v.to_vec().map_err(|e| JoseError::Signing(e.to_string()));
     let signing_input = format!("{}.{}", b64url(to_json(&header)?), b64url(to_json(claims)?));
     let signature = crypto::sign(signing_input.as_bytes(), key, alg.algorithm())
         .map_err(|e| JoseError::Signing(e.to_string()))?;
     Ok(format!("{signing_input}.{signature}"))
 }
 
-mod erased {
-    /// Object-safe "serialise to JSON bytes", so one closure can handle both
-    /// the header map and the caller's claims type.
-    pub trait Json {
-        fn to_vec(&self) -> serde_json::Result<Vec<u8>>;
-    }
-
-    impl<T: serde::Serialize> Json for T {
-        fn to_vec(&self) -> serde_json::Result<Vec<u8>> {
-            serde_json::to_vec(self)
-        }
-    }
+fn to_json(value: &impl Serialize) -> Result<Vec<u8>, JoseError> {
+    serde_json::to_vec(value).map_err(|e| JoseError::Signing(e.to_string()))
 }
 
 #[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::*;
-    use crate::keys::SigningKey;
-
-    const PS256: &[SigningAlg] = &[SigningAlg::PS256];
-
-    fn key() -> &'static SigningKey {
-        crate::keys::test_support::shared_key()
-    }
-
-    fn jwks(key: &SigningKey) -> JwkSet {
-        JwkSet {
-            keys: vec![key.public_jwk().clone()],
-        }
-    }
-
-    fn token(claims: &Value) -> String {
-        key().sign(Some("JWT"), claims).unwrap()
-    }
-
-    #[test]
-    fn sign_then_verify_round_trips() {
-        let jws = Jws::parse(&token(&json!({"sub": "a", "exp": 10})), PS256).unwrap();
-        assert_eq!(jws.alg, SigningAlg::PS256);
-        assert_eq!(jws.kid.as_deref(), Some(key().kid()));
-        assert_eq!(jws.typ.as_deref(), Some("JWT"));
-        assert_eq!(jws.str_claim("sub"), Some("a"));
-        assert_eq!(jws.time_claim("exp"), Some(10));
-        jws.verify(&jwks(key())).unwrap();
-    }
-
-    #[test]
-    fn tampered_payload_fails_verification() {
-        let good = token(&json!({"sub": "a"}));
-        let mut parts: Vec<&str> = good.split('.').collect();
-        let forged = b64url(br#"{"sub":"b"}"#);
-        parts[1] = &forged;
-        let jws = Jws::parse(&parts.join("."), PS256).unwrap();
-        assert_eq!(jws.verify(&jwks(key())), Err(JoseError::BadSignature));
-    }
-
-    #[test]
-    fn signature_from_another_key_is_rejected() {
-        let other = SigningKey::generate().unwrap();
-        let jws = Jws::parse(&other.sign(None, &json!({})).unwrap(), PS256).unwrap();
-        // Different kid, so no key is even a candidate.
-        assert_eq!(jws.verify(&jwks(key())), Err(JoseError::NoMatchingKey));
-    }
-
-    #[test]
-    fn alg_none_and_unlisted_algs_are_rejected() {
-        for alg in ["none", "RS256", "HS256", "PS512"] {
-            let header = b64url(json!({"alg": alg}).to_string());
-            let token = format!("{header}.{}.sig", b64url("{}"));
-            assert_eq!(
-                Jws::parse(&token, PS256).unwrap_err(),
-                JoseError::UnsupportedAlg(alg.to_owned()),
-                "{alg}"
-            );
-        }
-        // A FAPI algorithm that this deployment has not enabled.
-        let header = b64url(json!({"alg": "ES256"}).to_string());
-        let token = format!("{header}.{}.sig", b64url("{}"));
-        assert!(matches!(
-            Jws::parse(&token, PS256),
-            Err(JoseError::UnsupportedAlg(_))
-        ));
-    }
-
-    #[test]
-    fn malformed_tokens_are_rejected() {
-        let h = b64url(json!({"alg": "PS256"}).to_string());
-        let p = b64url("{}");
-        for bad in [
-            String::new(),
-            "a.b".into(),
-            "a.b.c.d".into(),
-            format!("!!!.{p}.sig"),
-            format!("{h}.!!!.sig"),
-            format!("{h}.{}.sig", b64url("[1,2]")),
-            format!("{h}.{p}."),
-            format!("{}.{p}.sig", b64url(json!({"kid": "x"}).to_string())),
-            format!(
-                "{}.{p}.sig",
-                b64url(json!({"alg": "PS256", "crit": ["x"]}).to_string())
-            ),
-        ] {
-            assert!(
-                matches!(Jws::parse(&bad, PS256), Err(JoseError::Malformed(_))),
-                "{bad}"
-            );
-        }
-    }
-
-    #[test]
-    fn key_selection_honours_use_alg_and_kid() {
-        let jws = Jws::parse(&token(&json!({})), PS256).unwrap();
-
-        let mut enc_only = key().public_jwk().clone();
-        enc_only.common.public_key_use = Some(PublicKeyUse::Encryption);
-        assert_eq!(
-            jws.verify(&JwkSet {
-                keys: vec![enc_only]
-            }),
-            Err(JoseError::NoMatchingKey)
-        );
-
-        let mut wrong_alg = key().public_jwk().clone();
-        wrong_alg.common.key_algorithm = Some(jsonwebtoken::jwk::KeyAlgorithm::RS256);
-        assert_eq!(
-            jws.verify(&JwkSet {
-                keys: vec![wrong_alg]
-            }),
-            Err(JoseError::NoMatchingKey)
-        );
-
-        let mut wrong_kid = key().public_jwk().clone();
-        wrong_kid.common.key_id = Some("other".into());
-        assert_eq!(
-            jws.verify(&JwkSet {
-                keys: vec![wrong_kid]
-            }),
-            Err(JoseError::NoMatchingKey)
-        );
-    }
-
-    #[test]
-    fn duplicate_kids_are_resolved_by_trying_each_candidate() {
-        let other = SigningKey::generate().unwrap();
-        let mut impostor = other.public_jwk().clone();
-        impostor.common.key_id = Some(key().kid().to_owned());
-        let set = JwkSet {
-            keys: vec![impostor, key().public_jwk().clone()],
-        };
-        Jws::parse(&token(&json!({})), PS256)
-            .unwrap()
-            .verify(&set)
-            .unwrap();
-    }
-
-    #[test]
-    fn weak_rsa_keys_are_not_usable() {
-        let mut weak = key().public_jwk().clone();
-        if let AlgorithmParameters::RSA(rsa) = &mut weak.algorithm {
-            rsa.n = b64url([0xffu8; 128]); // 1024-bit modulus
-        }
-        assert!(!key_supports_alg(&weak, SigningAlg::PS256));
-        assert!(key_supports_alg(key().public_jwk(), SigningAlg::PS256));
-        assert!(!key_supports_alg(key().public_jwk(), SigningAlg::ES256));
-    }
-
-    #[test]
-    fn time_claims_accept_integers_and_floats_only() {
-        let jws = Jws::parse(&token(&json!({"a": 5, "b": 5.9, "c": "5"})), PS256).unwrap();
-        assert_eq!(jws.time_claim("a"), Some(5));
-        assert_eq!(jws.time_claim("b"), Some(5));
-        assert_eq!(jws.time_claim("c"), None);
-        assert_eq!(jws.time_claim("missing"), None);
-    }
-}
+mod tests;

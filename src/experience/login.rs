@@ -20,9 +20,11 @@ use std::sync::Arc;
 use askama::Template;
 use serde_json::{Map, Value};
 
+use crate::epoch::Seconds;
+use crate::cookie::{SameSite, SetCookie};
 use super::{
-    Approval, Decision, Experience, Form, FormTarget, Interaction, Kind, Page, Step, StepFuture,
-    duration_text, host_cookie, render,
+    Approval, Decision, Experience, Form, FormTarget, Interaction, Kind, Page, Step,
+    StepResult, duration_text, render,
 };
 use crate::claims::{self, ConsentItem};
 use crate::error::ErrorCode;
@@ -35,68 +37,70 @@ use crate::util::random_token;
 const SHARE_FIELD_PREFIX: &str = "share_";
 
 /// Holds the secret that ties a signed-in session to this browser.
-pub const LOGIN_COOKIE: &str = "__Host-oxid-login";
+pub(crate) const LOGIN_COOKIE: &str = "__Host-oxid-login";
 
-// The `action` values of the buttons in the templates.
-const ACTION_SIGN_IN: &str = "sign-in";
-const ACTION_APPROVE: &str = "approve";
-const ACTION_DENY: &str = "deny";
-/// Shows the consent page again with every voluntary claim turned on.
-const ACTION_SHARE_ALL: &str = "share-all";
+crate::wire::wire_enum! {
+    /// The `action` values of the buttons in the templates.
+    enum Action ("action") {
+        SignIn = "sign-in",
+        Approve = "approve",
+        Deny = "deny",
+        /// Shows the consent page again with every voluntary claim turned on.
+        ShareAll = "share-all",
+    }
+}
 
 /// The styles of both pages.
 const STYLE: &str = include_str!("../../templates/login/login.css");
 
 #[derive(Debug)]
-pub struct Login {
+pub(crate) struct Login {
     users: Arc<dyn UserStore>,
 }
 
 impl Login {
-    pub fn new(users: Arc<dyn UserStore>) -> Self {
+    pub(crate) fn new(users: Arc<dyn UserStore>) -> Self {
         Self { users }
     }
 }
 
+#[async_trait::async_trait]
 impl Experience for Login {
     fn kind(&self) -> Kind {
         Kind::Login
     }
 
-    fn start<'a>(&'a self, interaction: &'a Interaction<'a>) -> StepFuture<'a> {
+    async fn start(&self, interaction: &Interaction<'_>) -> StepResult {
         // A reload after signing in comes back to the consent page.
-        Box::pin(async move {
-            match self.signed_in(interaction) {
-                Some(user) => consent_page(interaction, &user, false).into(),
-                None => login_page(interaction, None).into(),
-            }
+        Ok(match self.signed_in(interaction) {
+            Some(user) => consent_page(interaction, &user, false)?.into(),
+            None => login_page(interaction, None)?.into(),
         })
     }
 
-    fn submit<'a>(&'a self, interaction: &'a Interaction<'a>, form: &'a Form) -> StepFuture<'a> {
-        Box::pin(async move {
-            match (form.get("action"), self.signed_in(interaction)) {
-                (Some(ACTION_DENY), _) => Step {
+    async fn submit(&self, interaction: &Interaction<'_>, form: &Form) -> StepResult {
+            let action = form.get("action").and_then(|action| action.parse().ok());
+            Ok(match (action, self.signed_in(interaction)) {
+                (Some(Action::Deny), _) => Step {
                     decision: Decision::Deny {
                         code: ErrorCode::AccessDenied,
                         description: "the user denied the request".to_owned(),
                     },
                     set_cookies: vec![forget_browser()],
                 },
-                (Some(ACTION_SIGN_IN), _) => self.sign_in(interaction, form).await,
-                (Some(ACTION_APPROVE), Some(user)) => approve(interaction, form, &user),
-                (Some(ACTION_SHARE_ALL), Some(user)) => {
-                    consent_page(interaction, &user, true).into()
+                (Some(Action::SignIn), _) => self.sign_in(interaction, form).await?,
+                (Some(Action::Approve), Some(user)) => approve(interaction, form, &user),
+                (Some(Action::ShareAll), Some(user)) => {
+                    consent_page(interaction, &user, true)?.into()
                 }
                 // Consent is only ever taken from the browser that signed in.
-                (Some(ACTION_APPROVE), None) => {
-                    login_page(interaction, Some("Log in to continue.")).into()
+                (Some(Action::Approve), None) => {
+                    login_page(interaction, Some("Log in to continue."))?.into()
                 }
-                (_, Some(user)) => consent_page(interaction, &user, false).into(),
-                (_, None) => login_page(interaction, None).into(),
-            }
-        })
-    }
+                (_, Some(user)) => consent_page(interaction, &user, false)?.into(),
+                (_, None) => login_page(interaction, None)?.into(),
+            })
+        }
 }
 
 impl Login {
@@ -111,16 +115,8 @@ impl Login {
         self.users.find_by_subject(&signed_in.user_subject)
     }
 
-    async fn sign_in(&self, interaction: &Interaction<'_>, form: &Form) -> Step {
-        let server_error = |error: &dyn std::fmt::Display, what: &str| -> Step {
-            tracing::error!(%error, "{what}");
-            Decision::Deny {
-                code: ErrorCode::ServerError,
-                description: "internal server error".to_owned(),
-            }
-            .into()
-        };
-        let store = &interaction.state.store;
+    async fn sign_in(&self, interaction: &Interaction<'_>, form: &Form) -> StepResult {
+        let store = interaction.store();
 
         let username = form.get("username").unwrap_or_default().to_owned();
         let password = form.get("password").unwrap_or_default().to_owned();
@@ -132,11 +128,10 @@ impl Login {
             .flatten();
 
         let Some(user) = user else {
-            return match store.record_failed_login(interaction.request_uri).await {
-                Ok(true) => {
-                    login_page(interaction, Some("The username or password is incorrect.")).into()
-                }
-                Ok(false) => {
+            return Ok(if store.record_failed_login().await? {
+                login_page(interaction, Some("The username or password is incorrect."))?.into()
+            } else {
+                {
                     tracing::warn!(
                         client_id = %interaction.client.id,
                         "too many failed sign-in attempts"
@@ -147,29 +142,30 @@ impl Login {
                     }
                     .into()
                 }
-                Err(error) => server_error(&error, "could not record a failed sign-in"),
-            };
+            });
         };
 
         let secret = random_token(32);
         let session = interaction.session;
-        if let Err(error) = store
-            .sign_in(interaction.request_uri, session, &user.subject, &secret)
-            .await
-        {
-            return server_error(&error, "could not record a sign-in");
+        if !store.sign_in(&user.subject, &secret).await? {
+            // Another sign-in on this request got there first.
+            return Ok(login_page(
+                interaction,
+                Some("Your sign-in could not be completed. Please try again."),
+            )?
+            .into());
         }
-        let remaining = (session.expires_at - interaction.state.now()).max(1);
-        Step {
-            decision: Decision::Page(consent_page(interaction, &user, false)),
-            set_cookies: vec![host_cookie(LOGIN_COOKIE, &secret, Some(remaining))],
-        }
+        let remaining = (session.expires_at - interaction.now()).max(Seconds::new(1));
+        Ok(Step {
+            decision: Decision::Page(consent_page(interaction, &user, false)?),
+            set_cookies: vec![SetCookie::host(LOGIN_COOKIE, secret, SameSite::Lax).max_age(remaining)],
+        })
     }
 }
 
-/// A `Set-Cookie` value that removes the sign-in cookie.
-fn forget_browser() -> String {
-    host_cookie(LOGIN_COOKIE, "", Some(0))
+/// Removes the sign-in cookie.
+fn forget_browser() -> SetCookie {
+    SetCookie::delete(LOGIN_COOKIE, SameSite::Lax)
 }
 
 fn approve(interaction: &Interaction<'_>, form: &Form, user: &User) -> Step {
@@ -220,7 +216,7 @@ struct LoginTemplate<'a> {
 
 /// The first page. It names the client and says only that it wants
 /// information shared; what and why is for the signed-in user to see.
-fn login_page(interaction: &Interaction<'_>, error: Option<&str>) -> Page {
+fn login_page(interaction: &Interaction<'_>, error: Option<&str>) -> askama::Result<Page> {
     let name = &interaction.client.name;
     let template = LoginTemplate {
         theme: interaction.theme(),
@@ -233,13 +229,13 @@ fn login_page(interaction: &Interaction<'_>, error: Option<&str>) -> Page {
             .unwrap_or_default(),
         error,
     };
-    Page {
+    Ok(Page {
         title: "Log in".to_owned(),
-        body: render(&template),
+        body: render(&template)?,
         style: STYLE,
         script: None,
         wide: false,
-    }
+    })
 }
 
 /// The consent page: `templates/login/consent.html`.
@@ -346,7 +342,7 @@ impl ClaimValue {
 
 /// The second page: who is asking, why, and exactly what would be shared.
 /// Voluntary claims are off unless the user asked for them all (`all_on`).
-fn consent_page(interaction: &Interaction<'_>, user: &User, all_on: bool) -> Page {
+fn consent_page(interaction: &Interaction<'_>, user: &User, all_on: bool) -> askama::Result<Page> {
     let client = interaction.client;
     let request = interaction.request();
 
@@ -356,7 +352,7 @@ fn consent_page(interaction: &Interaction<'_>, user: &User, all_on: bool) -> Pag
     let values =
         request
             .claims
-            .shareable_values(user, client, &request.scope, interaction.state.now());
+            .shareable_values(user, client, &request.scope, interaction.now());
     let rows = |essential: bool| -> Vec<ClaimRow> {
         requested
             .iter()
@@ -373,15 +369,15 @@ fn consent_page(interaction: &Interaction<'_>, user: &User, all_on: bool) -> Pag
         purpose: request.purpose.as_deref(),
         required: rows(true),
         optional: rows(false),
-        limit: duration_text(interaction.state.security.session_ttl),
+        limit: duration_text(interaction.session_ttl()),
     };
-    Page {
+    Ok(Page {
         title: format!("Share with {}", client.name),
-        body: render(&template),
+        body: render(&template)?,
         style: STYLE,
         script: None,
         wide: false,
-    }
+    })
 }
 
 fn members_text(members: &Map<String, Value>) -> String {
@@ -425,80 +421,4 @@ fn member_label(key: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::*;
-
-    fn text(value: &str) -> ClaimValue {
-        ClaimValue::Text(value.to_owned())
-    }
-
-    #[test]
-    fn values_are_shown_as_text() {
-        assert_eq!(ClaimValue::of("given_name", &json!("A<b>")), text("A<b>"));
-        assert_eq!(ClaimValue::of("over18", &json!(true)), text("Yes"));
-        assert_eq!(ClaimValue::of("over65", &json!(false)), text("No"));
-        assert_eq!(
-            ClaimValue::of(
-                "address",
-                &json!({"street_address": "1 Main St", "locality": "Sydney",
-                        "region": "NSW", "postal_code": "2000"})
-            ),
-            text("1 Main St, Sydney, NSW 2000")
-        );
-        assert_eq!(
-            ClaimValue::of(
-                "beneficiary_account_au",
-                &json!({"account_bsb": "123-456", "some_thing": "<x>"})
-            ),
-            ClaimValue::Members(vec![
-                Member {
-                    label: "BSB".to_owned(),
-                    text: "123-456".to_owned()
-                },
-                Member {
-                    label: "Some thing".to_owned(),
-                    text: "<x>".to_owned()
-                },
-            ])
-        );
-    }
-
-    #[test]
-    fn the_consent_template_escapes_what_it_shows() {
-        let item = |name: &str, essential: bool| ConsentItem {
-            name: name.to_owned(),
-            label: format!("Label of {name}"),
-            essential,
-        };
-        let theme = Theme::default();
-        let template = ConsentTemplate {
-            theme: &theme,
-            form: FormTarget::new("c\"srf", "rp", "urn:x"),
-            client_name: "R&P <b>",
-            user_name: "Al <i>".to_owned(),
-            purpose: Some("see <this>"),
-            required: vec![ClaimRow::new(
-                &item("beneficiary_account_au", true),
-                Some(&json!({"account_bsb": "<1>"})),
-                false,
-            )],
-            optional: vec![
-                ClaimRow::new(&item("given_name", false), Some(&json!("A<b>")), true),
-                ClaimRow::new(&item("email", false), None, true),
-            ],
-            limit: "5 minutes".to_owned(),
-        };
-        let html = render(&template);
-        for raw in ["<b>", "<i>", "<this>", "<1>", "c\"srf"] {
-            assert!(!html.contains(raw), "{raw} in {html}");
-        }
-        assert!(html.contains("<em>BSB:</em> &#60;1&#62;"), "{html}");
-        assert!(html.contains("name=\"share_given_name\" value=\"1\" checked>"));
-        // A claim the user has no value for is listed, without a switch.
-        assert!(html.contains("id=\"value-email\">Not on file"));
-        assert!(!html.contains("share_email"));
-        assert!(html.contains("id=\"share-all\""));
-    }
-}
+mod tests;

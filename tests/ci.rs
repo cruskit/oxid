@@ -1,9 +1,21 @@
 //! The `ci` experience, end to end against a running instance: nobody
 //! clicks anything, and the client chooses the response.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "test code panics on purpose"
+)]
+#![allow(
+    unreachable_pub,
+    reason = "the shared harness is public to each test binary"
+)]
+
 mod common;
 
 use common::{ASSERTION_TYPE, Pkce, TestOp, redirect_params};
+use oxid::Seconds;
 use oxid::experience::Kind;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
@@ -12,7 +24,7 @@ use serde_json::{Value, json};
 async fn start() -> TestOp {
     TestOp::start_with(|config| {
         config.experience = Kind::Ci;
-        config.ci.response_delay = 0;
+        config.ci.response_delay = Seconds::new(0);
     })
     .await
 }
@@ -99,9 +111,7 @@ async fn the_client_chooses_the_user_and_which_voluntary_claims_come_back() {
 
     let params = arrive(&op, &request_uri).await;
     let claims = id_token_claims(&op, &params["code"], &pkce).await;
-    let users = op.state().users.list();
-    let margaret = users.iter().find(|user| user.username == "margaret");
-    let margaret = &margaret.unwrap().claims;
+    let margaret = op.server().user_claims("margaret").unwrap();
     assert_eq!(claims["given_name"], margaret["given_name"]);
     assert_eq!(claims["family_name"], margaret["family_name"]);
     assert!(

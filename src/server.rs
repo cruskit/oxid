@@ -10,14 +10,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use axum::extract::Request;
+use axum::http::StatusCode;
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
 use axum::{Extension, Router};
-use hyper_util::rt::{TokioExecutor, TokioIo};
-use hyper_util::server::conn::auto::Builder;
+use hyper::server::conn::{http1, http2};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
 use rustls::pki_types::CertificateDer;
 use tokio::net::TcpListener;
-use tokio::sync::watch;
+use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 
@@ -33,6 +37,41 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 /// How often expired state is swept.
 const PURGE_INTERVAL: Duration = Duration::from_secs(30);
+/// How often an idle HTTP/2 connection is pinged, and how long the client
+/// has to answer before the connection is closed.
+const H2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(30);
+const H2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Concurrent requests on one HTTP/2 connection.
+const H2_MAX_CONCURRENT_STREAMS: u32 = 64;
+
+/// What bounds a listener's connections, so that a client cannot hold
+/// resources indefinitely.
+#[derive(Debug, Clone, Copy)]
+pub struct ConnectionLimits {
+    /// Time allowed for an HTTP/1 request's headers, and for an idle
+    /// keep-alive connection.
+    pub header_read_timeout: Duration,
+    /// Time allowed for one request, body included.
+    pub request_timeout: Duration,
+    /// Connections held open at once.
+    pub max_connections: usize,
+}
+
+impl ConnectionLimits {
+    pub fn from_config(config: &crate::config::ServerConfig) -> Self {
+        Self {
+            header_read_timeout: Duration::from_secs(config.header_read_timeout),
+            request_timeout: Duration::from_secs(config.request_timeout),
+            max_connections: config.max_connections,
+        }
+    }
+}
+
+impl Default for ConnectionLimits {
+    fn default() -> Self {
+        Self::from_config(&crate::config::ServerConfig::default())
+    }
+}
 
 /// Configures and starts a [`Server`].
 #[derive(Debug)]
@@ -98,15 +137,23 @@ impl ServerBuilder {
         let mtls_addr = mtls.local_addr()?;
 
         let router = http::router(state.clone());
+        let limits = ConnectionLimits::from_config(&config.server);
         let (shutdown, _) = watch::channel(false);
         let tasks = vec![
             tokio::spawn(accept_loop(
                 public,
                 public_tls,
                 router.clone(),
+                limits,
                 shutdown.subscribe(),
             )),
-            tokio::spawn(accept_loop(mtls, mtls_tls, router, shutdown.subscribe())),
+            tokio::spawn(accept_loop(
+                mtls,
+                mtls_tls,
+                router,
+                limits,
+                shutdown.subscribe(),
+            )),
             tokio::spawn(purge_loop(state.clone(), shutdown.subscribe())),
         ];
         tracing::info!(issuer = %state.issuer, %public_addr, %mtls_addr, "oxID is listening");
@@ -114,7 +161,8 @@ impl ServerBuilder {
         Ok(Server {
             public_addr,
             mtls_addr,
-            certificate: identity.certs[0].clone(),
+            certificate: identity.leaf().clone(),
+            #[cfg(feature = "test-util")]
             state,
             shutdown,
             tasks,
@@ -136,7 +184,13 @@ pub fn spawn_tls(
 ) -> Result<(watch::Sender<bool>, JoinHandle<()>)> {
     let listener = from_std(listener)?;
     let (shutdown, receiver) = watch::channel(false);
-    let task = tokio::spawn(accept_loop(listener, tls, router, receiver));
+    let task = tokio::spawn(accept_loop(
+        listener,
+        tls,
+        router,
+        ConnectionLimits::default(),
+        receiver,
+    ));
     Ok((shutdown, task))
 }
 
@@ -151,12 +205,45 @@ async fn bind(addr: SocketAddr) -> Result<TcpListener> {
         .with_context(|| format!("binding {addr}"))
 }
 
+/// Inspection of a running provider, for the integration tests.
+#[cfg(feature = "test-util")]
+impl Server {
+    /// The consent record of the transaction `txn`, as stored.
+    pub async fn consent_record(&self, txn: &str) -> Option<serde_json::Value> {
+        let record = self.state.store.consent(txn).await.ok()??;
+        serde_json::to_value(record).ok()
+    }
+
+    /// The claims of the user who signs in as `username`.
+    pub fn user_claims(
+        &self,
+        username: &str,
+    ) -> Option<serde_json::Map<String, serde_json::Value>> {
+        self.state
+            .users
+            .list()
+            .iter()
+            .find(|user| user.username == username)
+            .map(|user| user.claims.clone())
+    }
+
+    /// The name of the registered client `client_id`, if it is registered.
+    pub fn client_name(&self, client_id: &str) -> Option<String> {
+        self.state
+            .clients
+            .get(client_id)
+            .map(|client| client.name.clone())
+    }
+}
+
 /// A running provider.
 #[derive(Debug)]
 pub struct Server {
     public_addr: SocketAddr,
     mtls_addr: SocketAddr,
     certificate: CertificateDer<'static>,
+    /// For the inspection methods the integration tests use.
+    #[cfg(feature = "test-util")]
     state: AppState,
     shutdown: watch::Sender<bool>,
     tasks: Vec<JoinHandle<()>>,
@@ -176,11 +263,12 @@ impl Server {
         &self.certificate
     }
 
-    pub fn state(&self) -> &AppState {
-        &self.state
-    }
-
     /// Stop accepting connections, let in-flight requests finish, and wait.
+    ///
+    /// A server dropped without this still stops: dropping the sender wakes
+    /// every task's `shutdown.changed()`, so the listeners close and
+    /// in-flight requests get the usual grace period, but nothing waits for
+    /// them.
     pub async fn shutdown(self) {
         let _ = self.shutdown.send(true);
         for task in self.tasks {
@@ -203,15 +291,40 @@ async fn purge_loop(state: AppState, mut shutdown: watch::Receiver<bool>) {
     }
 }
 
+/// Answer with `503` when a request takes longer than `limit`.
+async fn request_timeout(limit: Duration, request: Request, next: Next) -> Response {
+    if let Ok(response) = tokio::time::timeout(limit, next.run(request)).await {
+        response
+    } else {
+        tracing::warn!(?limit, "request timed out");
+        (StatusCode::SERVICE_UNAVAILABLE, "request timed out").into_response()
+    }
+}
+
 async fn accept_loop(
     listener: TcpListener,
     tls: Arc<rustls::ServerConfig>,
     router: Router,
+    limits: ConnectionLimits,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let acceptor = TlsAcceptor::from(tls);
     let graceful = GracefulShutdown::new();
+    let slots = Arc::new(Semaphore::new(limits.max_connections));
+    let request_limit = limits.request_timeout;
+    let router = router.layer(middleware::from_fn(move |request, next| {
+        request_timeout(request_limit, request, next)
+    }));
     loop {
+        // Take a connection slot before accepting, so that at the limit
+        // further clients wait in the kernel's queue rather than in memory.
+        let permit = tokio::select! {
+            permit = Arc::clone(&slots).acquire_owned() => match permit {
+                Ok(permit) => permit,
+                Err(_) => break,
+            },
+            _ = shutdown.changed() => break,
+        };
         let (tcp, peer) = tokio::select! {
             accepted = listener.accept() => match accepted {
                 Ok(conn) => conn,
@@ -229,6 +342,7 @@ async fn accept_loop(
         let router = router.clone();
         let watcher = graceful.watcher();
         tokio::spawn(async move {
+            let _permit = permit;
             let tls = match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await {
                 Ok(Ok(tls)) => tls,
                 Ok(Err(error)) => {
@@ -240,18 +354,36 @@ async fn accept_loop(
                     return;
                 }
             };
-            let client_cert = tls
-                .get_ref()
-                .1
+            let session = tls.get_ref().1;
+            let client_cert = session
                 .peer_certificates()
                 .and_then(<[CertificateDer<'_>]>::first)
                 .map(|cert| ClientCert::from_der(cert.as_ref()));
+            // The protocol is settled by ALPN in the handshake, so each
+            // connection is served by one protocol's builder with its own
+            // timeouts. (Sniffing the protocol from the first bytes would
+            // wait for them with no timeout at all.)
+            let is_h2 = session.alpn_protocol() == Some(b"h2");
 
             let service =
                 TowerToHyperService::new(router.layer(Extension(ConnInfo { client_cert })));
-            let builder = Builder::new(TokioExecutor::new());
-            let connection = builder.serve_connection(TokioIo::new(tls), service);
-            if let Err(error) = watcher.watch(connection.into_owned()).await {
+            let io = TokioIo::new(tls);
+            let result = if is_h2 {
+                let mut builder = http2::Builder::new(TokioExecutor::new());
+                builder
+                    .timer(TokioTimer::new())
+                    .keep_alive_interval(H2_KEEP_ALIVE_INTERVAL)
+                    .keep_alive_timeout(H2_KEEP_ALIVE_TIMEOUT)
+                    .max_concurrent_streams(H2_MAX_CONCURRENT_STREAMS);
+                watcher.watch(builder.serve_connection(io, service)).await
+            } else {
+                let mut builder = http1::Builder::new();
+                builder
+                    .timer(TokioTimer::new())
+                    .header_read_timeout(limits.header_read_timeout);
+                watcher.watch(builder.serve_connection(io, service)).await
+            };
+            if let Err(error) = result {
                 tracing::debug!(%peer, %error, "connection ended with an error");
             }
         });
@@ -265,3 +397,6 @@ async fn accept_loop(
         tracing::warn!("shutdown grace period elapsed with connections still open");
     }
 }
+
+#[cfg(test)]
+mod tests;

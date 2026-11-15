@@ -1,7 +1,19 @@
 //! End-to-end authorization code flow against a running oxID instance.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "test code panics on purpose"
+)]
+#![allow(
+    unreachable_pub,
+    reason = "the shared harness is public to each test binary"
+)]
+
 mod common;
 
+use common::html::text_of;
 use common::{ASSERTION_TYPE, CLIENT_ID, Pkce, TestOp, oauth_error, redirect_params};
 use oxid::user::{DEMO_PASSWORD, DEMO_USERNAME};
 use reqwest::StatusCode;
@@ -87,7 +99,7 @@ async fn full_code_flow_issues_verifiable_bound_tokens() {
     assert_eq!(claims["aud"], CLIENT_ID);
     assert_eq!(claims["nonce"], "nonce-456");
     assert!(claims["txn"].as_str().is_some_and(|txn| !txn.is_empty()));
-    assert!(claims["exp"].as_i64().unwrap() > op.now());
+    assert!(claims["exp"].as_i64().unwrap() > op.now().unix());
 
     // 5. UserInfo over the same mutual TLS identity.
     let response = op
@@ -393,11 +405,11 @@ async fn users_choose_which_voluntary_claims_to_share() {
     // Voluntary claims are checkboxes, off until chosen; essential ones
     // have none. Each claim is shown with the value to be shared.
     assert_eq!(page.ticked(), Vec::<String>::new());
-    assert!(
-        page.html
-            .contains("id=\"value-email\">alex.citizen@example.com<")
+    assert_eq!(
+        text_of(&page.html, "value-email"),
+        "alex.citizen@example.com"
     );
-    assert!(page.html.contains("id=\"value-given_name\">Alex<"));
+    assert_eq!(text_of(&page.html, "value-given_name"), "Alex");
     assert_eq!(
         page.offered(),
         [
@@ -475,16 +487,17 @@ async fn users_choose_which_voluntary_claims_to_share() {
     assert_eq!(claims["family_name"], "Citizen");
 
     let record = op
-        .state()
-        .store
-        .consent(claims["txn"].as_str().unwrap())
+        .server()
+        .consent_record(claims["txn"].as_str().unwrap())
         .await
-        .unwrap()
         .unwrap();
-    assert_eq!(record.declined, ["beneficiary_account_au", "email"]);
     assert_eq!(
-        record.claims,
-        ["family_name", "given_name", "over18", "phone_number"]
+        record["declined"],
+        json!(["beneficiary_account_au", "email"])
+    );
+    assert_eq!(
+        record["claims"],
+        json!(["family_name", "given_name", "over18", "phone_number"])
     );
     op.stop().await;
 }
@@ -529,16 +542,14 @@ async fn purpose_is_shown_escaped_and_recorded_with_the_transaction() {
 
     // The record is keyed by the txn the client received.
     let record = op
-        .state()
-        .store
-        .consent(claims["txn"].as_str().unwrap())
+        .server()
+        .consent_record(claims["txn"].as_str().unwrap())
         .await
-        .unwrap()
         .expect("transaction recorded");
-    assert_eq!(record.purpose.as_deref(), Some(purpose));
-    assert_eq!(record.client_id, CLIENT_ID);
-    assert_eq!(record.claims, ["over18"]);
-    assert_eq!(record.user_subject.as_deref(), Some("demo-user-0001"));
+    assert_eq!(record["purpose"].as_str(), Some(purpose));
+    assert_eq!(record["client_id"], CLIENT_ID);
+    assert_eq!(record["claims"], json!(["over18"]));
+    assert_eq!(record["user_subject"], "demo-user-0001");
     op.stop().await;
 }
 
@@ -746,7 +757,7 @@ async fn configured_users_replace_the_demo_user() {
     let op = TestOp::start_with(|config| {
         config.users.push(oxid::config::UserConfig {
             username: "sam".into(),
-            password_hash: Some(hash),
+            password_hash: Some(hash.into()),
             subject: "user-sam".into(),
             claims: json!({"given_name": "Sam"}).as_object().unwrap().clone(),
             bank_account: None,

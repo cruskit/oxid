@@ -10,9 +10,10 @@
 FROM public.ecr.aws/amazonlinux/amazonlinux:2023 AS build
 RUN dnf install --assumeyes gcc gcc-c++ cmake make perl zip \
     && dnf clean all
+# Keep the Rust version below equal to rust-toolchain.toml.
 ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
 RUN curl --proto '=https' --tlsv1.2 --silent --show-error --fail https://sh.rustup.rs \
-    | sh -s -- -y --profile minimal --default-toolchain stable
+    | sh -s -- -y --profile minimal --default-toolchain 1.99.1
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src

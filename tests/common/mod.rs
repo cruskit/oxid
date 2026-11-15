@@ -5,14 +5,20 @@
 //! listener for the browser leg and a mutual-TLS listener for the back
 //! channel.
 
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "each test binary uses a different part of the harness"
+)]
 
+pub mod html;
+
+use oxid::{Seconds, Timestamp};
 use std::collections::HashMap;
 use std::net::TcpListener;
 use std::sync::Arc;
 
-use oxid::config::{ClientConfig, Config};
-use oxid::jose::{Jws, SigningAlg};
+use oxid::config::{ClientConfig, RawConfig};
+use oxid::jose::{SigningAlg, UnverifiedJws};
 use oxid::keys::SigningKey;
 use oxid::server::{Server, ServerBuilder};
 use oxid::tls::TlsIdentity;
@@ -69,20 +75,20 @@ impl TestOp {
     }
 
     /// Start a provider, letting the test adjust the configuration first.
-    pub async fn start_with(adjust: impl FnOnce(&mut Config)) -> Self {
+    pub async fn start_with(adjust: impl FnOnce(&mut RawConfig)) -> Self {
         Self::try_start_with(adjust).await.expect("server starts")
     }
 
     /// As [`Self::start_with`], for tests of configurations that must not
     /// start.
-    pub async fn try_start_with(adjust: impl FnOnce(&mut Config)) -> anyhow::Result<Self> {
+    pub async fn try_start_with(adjust: impl FnOnce(&mut RawConfig)) -> anyhow::Result<Self> {
         let public = TcpListener::bind("127.0.0.1:0").unwrap();
         let mtls = TcpListener::bind("127.0.0.1:0").unwrap();
         let issuer = format!("https://localhost:{}", public.local_addr().unwrap().port());
         let mtls_base = format!("https://localhost:{}", mtls.local_addr().unwrap().port());
 
         let rp_key = SigningKey::generate().unwrap();
-        let mut config: Config = toml::from_str(&format!(
+        let mut config: RawConfig = toml::from_str(&format!(
             "issuer = \"{issuer}\"\nmtls_base_url = \"{mtls_base}\"\n\
              [keys]\npairwise_salt = \"integration-test-salt\"\n"
         ))
@@ -94,7 +100,10 @@ impl TestOp {
             jwks_file: None,
             jwks: Some(rp_key.jwks()),
             scopes: vec!["openid".to_owned()],
-            grant_types: vec!["authorization_code".to_owned(), "refresh_token".to_owned()],
+            grant_types: vec![
+                oxid::client::GrantType::AuthorizationCode,
+                oxid::client::GrantType::RefreshToken,
+            ],
             sector_identifier: None,
             profile: oxid::client::Profile::Connectid,
             claims: None,
@@ -107,7 +116,7 @@ impl TestOp {
         // A manual clock started at the real time: flows behave normally and
         // expiry tests can jump forward instead of sleeping.
         let clock = Arc::new(ManualClock::new(SystemClock.now()));
-        let server = ServerBuilder::new(config)
+        let server = ServerBuilder::new(config.validate()?)
             .clock(Arc::clone(&clock) as Arc<dyn Clock>)
             .listeners(public, mtls)
             .start()
@@ -142,12 +151,50 @@ impl TestOp {
         }
     }
 
-    /// The running provider's state, for assertions on what it recorded.
-    pub fn state(&self) -> &oxid::state::AppState {
-        self.server.as_ref().expect("server is running").state()
+    /// The running provider, for assertions on what it recorded.
+    pub fn server(&self) -> &Server {
+        self.server.as_ref().expect("server is running")
     }
 
-    pub fn now(&self) -> i64 {
+    /// The provider's TLS certificate.
+    pub fn certificate(&self) -> rustls::pki_types::CertificateDer<'static> {
+        self.server
+            .as_ref()
+            .expect("server is running")
+            .certificate()
+            .clone()
+    }
+
+    /// Open a TLS connection to the public listener, offering `alpn`, and
+    /// send nothing.
+    pub async fn raw_tls(
+        &self,
+        alpn: &[&[u8]],
+    ) -> tokio_rustls::client::TlsStream<tokio::net::TcpStream> {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(self.certificate()).unwrap();
+        let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+        config.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
+        let address = Url::parse(&self.issuer).unwrap();
+        let tcp = tokio::net::TcpStream::connect((
+            "127.0.0.1",
+            address.port().expect("issuer has a port"),
+        ))
+        .await
+        .unwrap();
+        tokio_rustls::TlsConnector::from(Arc::new(config))
+            .connect("localhost".try_into().unwrap(), tcp)
+            .await
+            .unwrap()
+    }
+
+    pub fn now(&self) -> Timestamp {
         self.clock.now()
     }
 
@@ -168,7 +215,7 @@ impl TestOp {
         let now = self.now();
         let mut claims = json!({
             "iss": CLIENT_ID, "sub": CLIENT_ID, "aud": self.issuer,
-            "jti": random_token(16), "iat": now, "nbf": now, "exp": now + 60,
+            "jti": random_token(16), "iat": now, "nbf": now, "exp": now + Seconds::new(60),
         });
         apply(&mut claims, overrides);
         self.rp_key.sign(Some("JWT"), &claims).unwrap()
@@ -180,7 +227,7 @@ impl TestOp {
         let now = self.now();
         let mut claims = json!({
             "iss": CLIENT_ID, "aud": self.issuer,
-            "iat": now, "nbf": now, "exp": now + 300,
+            "iat": now, "nbf": now, "exp": now + Seconds::new(300),
             "client_id": CLIENT_ID,
             "response_type": "code",
             "redirect_uri": REDIRECT_URI,
@@ -410,10 +457,11 @@ impl TestOp {
             .json::<jsonwebtoken::jwk::JwkSet>()
             .await
             .unwrap();
-        let jws = Jws::parse(id_token, &[SigningAlg::PS256]).expect("well-formed PS256 ID token");
-        jws.verify(&jwks)
-            .expect("ID token signature verifies against published JWKS");
-        jws.claims
+        UnverifiedJws::parse(id_token, &[SigningAlg::PS256])
+            .expect("well-formed PS256 ID token")
+            .verify(&jwks)
+            .expect("ID token signature verifies against published JWKS")
+            .into_claims()
     }
 }
 
@@ -427,16 +475,13 @@ pub struct LoginPage {
 }
 
 impl LoginPage {
+    /// The page, parsed.
+    pub fn page(&self) -> html::Page {
+        html::Page::parse(&self.html)
+    }
+
     fn checkboxes(&self, only_ticked: bool) -> Vec<String> {
-        self.html
-            .split("<input type=\"checkbox\"")
-            .skip(1)
-            .filter_map(|rest| {
-                let tag = rest.split('>').next()?;
-                let name = tag.split("name=\"").nth(1)?.split('"').next()?;
-                (!only_ticked || tag.contains(" checked")).then(|| name.to_owned())
-            })
-            .collect()
+        self.page().checkboxes(only_ticked)
     }
 
     /// Field names of the consent checkboxes: the voluntary claims.
@@ -473,12 +518,7 @@ impl LoginPage {
 
     async fn read(response: Response, cookie: String) -> Self {
         let html = response.text().await.unwrap();
-        let csrf = html
-            .split("name=\"csrf\" value=\"")
-            .nth(1)
-            .and_then(|rest| rest.split('"').next())
-            .expect("the page contains the CSRF field")
-            .to_owned();
+        let csrf = html::Page::parse(&html).field("csrf");
         Self { csrf, cookie, html }
     }
 }
@@ -510,7 +550,7 @@ pub fn redirect_params(response: &Response) -> HashMap<String, String> {
 /// A self-signed client certificate, with its `x5t#S256` thumbprint.
 fn client_identity() -> (Identity, String) {
     let identity = TlsIdentity::self_signed(vec!["rp.example.com".to_owned()]).unwrap();
-    let thumbprint = b64url(sha256(identity.certs[0].as_ref()));
+    let thumbprint = b64url(sha256(identity.leaf().as_ref()));
     let pem = format!("{}{}", identity.cert_pem(), identity.key_pem());
     (Identity::from_pem(pem.as_bytes()).unwrap(), thumbprint)
 }

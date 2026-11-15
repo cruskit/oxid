@@ -1,0 +1,40 @@
+# cargo-deny: run with `mise run deny`. CI runs it on every pull request.
+# https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+all-features = true
+
+[advisories]
+# Every RustSec advisory (vulnerability, unmaintained, unsound, yanked)
+# fails the check. To accept one, list its id here with the reason.
+ignore = [
+  # Unmaintained, no fix upstream yet; both are transitive. Drop each entry
+  # once the dependency that pulls it in moves on.
+  { id = "RUSTSEC-2026-0374", reason = "basic-toml, via askama_derive at compile time only" },
+  { id = "RUSTSEC-2026-0441", reason = "pin-utils, via the AWS SDK (aws-smithy-http)" },
+]
+
+[licenses]
+# Permissive licences only: oxID is distributed as MIT OR Apache-2.0.
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-3-Clause",
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  "Unicode-3.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Duplicate versions are reported but allowed: the AWS SDK and the HTTP
+# stack routinely pull in two majors of the same crate.
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

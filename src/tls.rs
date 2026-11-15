@@ -33,71 +33,95 @@ const TLS12_SUITES: &[CipherSuite] = &[
 
 /// A certificate chain and its private key.
 #[derive(Debug)]
+#[cfg_attr(
+    not(feature = "test-util"),
+    expect(unreachable_pub, reason = "the integration tests use it")
+)]
 pub struct TlsIdentity {
-    pub certs: Vec<CertificateDer<'static>>,
-    pub key: PrivateKeyDer<'static>,
+    /// The end-entity certificate. Kept apart from the rest of the chain,
+    /// so that an identity always has one.
+    leaf: CertificateDer<'static>,
+    /// The rest of the chain, in the order the file gives it.
+    intermediates: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
 }
 
 impl TlsIdentity {
-    pub fn from_pem_files(cert: &Path, key: &Path) -> Result<Self> {
-        let certs = CertificateDer::pem_file_iter(cert)
+    pub(crate) fn from_pem_files(cert: &Path, key: &Path) -> Result<Self> {
+        let mut certs = CertificateDer::pem_file_iter(cert)
             .with_context(|| format!("reading certificate {}", cert.display()))?
             .collect::<Result<Vec<_>, _>>()
-            .with_context(|| format!("parsing certificate {}", cert.display()))?;
-        anyhow::ensure!(
-            !certs.is_empty(),
-            "{} contains no certificates",
-            cert.display()
-        );
+            .with_context(|| format!("parsing certificate {}", cert.display()))?
+            .into_iter();
+        let leaf = certs
+            .next()
+            .with_context(|| format!("{} contains no certificates", cert.display()))?;
         let key = PrivateKeyDer::from_pem_file(key)
             .with_context(|| format!("reading private key {}", key.display()))?;
-        Ok(Self { certs, key })
+        Ok(Self {
+            leaf,
+            intermediates: certs.collect(),
+            key,
+        })
     }
 
     /// Generate a self-signed certificate valid for `names` (DNS names or IP
     /// addresses). For development and tests only.
+    #[cfg_attr(
+        not(feature = "test-util"),
+        expect(unreachable_pub, reason = "the integration tests use it")
+    )]
     pub fn self_signed(names: Vec<String>) -> Result<Self> {
         let generated = rcgen::generate_simple_self_signed(names)
             .context("generating self-signed certificate")?;
         let key = PrivatePkcs8KeyDer::from(generated.signing_key.serialize_der());
         Ok(Self {
-            certs: vec![generated.cert.der().clone()],
+            leaf: generated.cert.der().clone(),
+            intermediates: Vec::new(),
             key: key.into(),
         })
     }
 
+    /// The end-entity certificate.
+    #[cfg_attr(
+        not(feature = "test-util"),
+        expect(unreachable_pub, reason = "the integration tests use it")
+    )]
+    pub fn leaf(&self) -> &CertificateDer<'static> {
+        &self.leaf
+    }
+
+    /// The whole chain, leaf first, as a TLS server presents it.
+    pub(crate) fn chain(&self) -> Vec<CertificateDer<'static>> {
+        std::iter::once(self.leaf.clone())
+            .chain(self.intermediates.iter().cloned())
+            .collect()
+    }
+
     /// PEM encoding of the leaf certificate.
+    #[cfg(any(test, feature = "test-util"))]
     pub fn cert_pem(&self) -> String {
-        pem("CERTIFICATE", self.certs[0].as_ref())
+        crate::util::pem("CERTIFICATE", self.leaf.as_ref())
     }
 
     /// PEM encoding of the private key.
+    #[cfg(any(test, feature = "test-util"))]
     pub fn key_pem(&self) -> String {
         let label = match &self.key {
             PrivateKeyDer::Pkcs1(_) => "RSA PRIVATE KEY",
             PrivateKeyDer::Sec1(_) => "EC PRIVATE KEY",
             _ => "PRIVATE KEY",
         };
-        pem(label, self.key.secret_der())
+        crate::util::pem(label, self.key.secret_der())
     }
-}
-
-fn pem(label: &str, der: &[u8]) -> String {
-    use base64::Engine;
-    let body = base64::engine::general_purpose::STANDARD.encode(der);
-    let lines: Vec<&str> = body
-        .as_bytes()
-        .chunks(64)
-        .map(|chunk| std::str::from_utf8(chunk).unwrap_or_default())
-        .collect();
-    format!(
-        "-----BEGIN {label}-----\n{}\n-----END {label}-----\n",
-        lines.join("\n")
-    )
 }
 
 /// Which client certificates a listener asks for and accepts.
 #[derive(Debug)]
+#[cfg_attr(
+    not(feature = "test-util"),
+    expect(unreachable_pub, reason = "the integration tests use it")
+)]
 pub enum ClientCertPolicy {
     /// Do not request a client certificate (the browser-facing listener).
     None,
@@ -111,7 +135,7 @@ pub enum ClientCertPolicy {
 
 impl ClientCertPolicy {
     /// Load trusted roots from a PEM bundle.
-    pub fn from_ca_file(path: &Path) -> Result<Self> {
+    pub(crate) fn from_ca_file(path: &Path) -> Result<Self> {
         let mut roots = RootCertStore::empty();
         for cert in CertificateDer::pem_file_iter(path)
             .with_context(|| format!("reading client CA bundle {}", path.display()))?
@@ -142,6 +166,10 @@ fn provider() -> Arc<CryptoProvider> {
 
 /// Build a server configuration: TLS 1.2 and 1.3 only (FAPI 2.0 §5.2.1),
 /// offering HTTP/2 and HTTP/1.1.
+#[cfg_attr(
+    not(feature = "test-util"),
+    expect(unreachable_pub, reason = "the integration tests use it")
+)]
 pub fn server_config(
     identity: &TlsIdentity,
     policy: ClientCertPolicy,
@@ -170,7 +198,7 @@ pub fn server_config(
     };
 
     let mut config = builder
-        .with_single_cert(identity.certs.clone(), identity.key.clone_key())
+        .with_single_cert(identity.chain(), identity.key.clone_key())
         .context("loading server certificate and key")?;
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     Ok(Arc::new(config))
@@ -231,21 +259,26 @@ impl ClientCertVerifier for ProofOfPossessionOnly {
 
 /// The certificate a client presented on a connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    not(feature = "test-util"),
+    expect(unreachable_pub, reason = "the integration tests use it")
+)]
 pub struct ClientCert {
     /// `x5t#S256`: base64url SHA-256 of the DER certificate (RFC 8705 §3.1).
     pub thumbprint: String,
 }
 
 impl ClientCert {
-    pub fn from_der(der: &[u8]) -> Self {
+    pub(crate) fn from_der(der: &[u8]) -> Self {
         Self {
             thumbprint: b64url(sha256(der)),
         }
     }
 
+    #[cfg(feature = "aws")]
     /// From a PEM certificate, as handed over by a TLS-terminating proxy.
     /// If there are several, the first is the client's own.
-    pub fn from_pem(pem: &str) -> Option<Self> {
+    pub(crate) fn from_pem(pem: &str) -> Option<Self> {
         CertificateDer::from_pem_slice(pem.as_bytes())
             .ok()
             .map(|cert| Self::from_der(cert.as_ref()))
@@ -253,88 +286,4 @@ impl ClientCert {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn identity() -> TlsIdentity {
-        TlsIdentity::self_signed(vec!["localhost".to_owned(), "127.0.0.1".to_owned()]).unwrap()
-    }
-
-    #[test]
-    fn only_bcp195_suites_are_offered_for_tls12() {
-        let provider = provider();
-        let mut tls12 = 0;
-        for suite in &provider.cipher_suites {
-            if let SupportedCipherSuite::Tls12(_) = suite {
-                tls12 += 1;
-                assert!(TLS12_SUITES.contains(&suite.suite()), "{:?}", suite.suite());
-            }
-        }
-        assert_eq!(tls12, TLS12_SUITES.len());
-        assert!(
-            provider
-                .cipher_suites
-                .iter()
-                .any(|s| matches!(s, SupportedCipherSuite::Tls13(_)))
-        );
-    }
-
-    #[test]
-    fn builds_configs_for_each_policy() {
-        let identity = identity();
-        let public = server_config(&identity, ClientCertPolicy::None).unwrap();
-        assert_eq!(
-            public.alpn_protocols,
-            [b"h2".to_vec(), b"http/1.1".to_vec()]
-        );
-        server_config(&identity, ClientCertPolicy::AnyProven).unwrap();
-
-        let mut roots = RootCertStore::empty();
-        roots.add(identity.certs[0].clone()).unwrap();
-        server_config(&identity, ClientCertPolicy::TrustedRoots(roots)).unwrap();
-    }
-
-    #[test]
-    fn proof_of_possession_verifier_requests_but_does_not_require_a_cert() {
-        let verifier = ProofOfPossessionOnly {
-            algorithms: provider().signature_verification_algorithms,
-        };
-        assert!(verifier.offer_client_auth());
-        assert!(!verifier.client_auth_mandatory());
-        assert_ne!(verifier.supported_verify_schemes(), Vec::new());
-    }
-
-    #[test]
-    fn thumbprint_is_base64url_sha256_of_the_der() {
-        let cert = ClientCert::from_der(b"abc");
-        // SHA-256("abc"), base64url.
-        assert_eq!(
-            cert.thumbprint,
-            "ungWv48Bz-pBQUDeXa4iI7ADYaOWF3qctBD_YfIAFa0"
-        );
-    }
-
-    #[test]
-    fn pem_round_trips_through_the_file_loaders() {
-        let identity = identity();
-        let dir =
-            std::env::temp_dir().join(format!("oxid-tls-test-{}", crate::util::random_token(8)));
-        std::fs::create_dir_all(&dir).unwrap();
-        let (cert, key) = (dir.join("cert.pem"), dir.join("key.pem"));
-        std::fs::write(&cert, identity.cert_pem()).unwrap();
-        std::fs::write(&key, identity.key_pem()).unwrap();
-
-        let loaded = TlsIdentity::from_pem_files(&cert, &key).unwrap();
-        assert_eq!(loaded.certs, identity.certs);
-        server_config(&loaded, ClientCertPolicy::None).unwrap();
-        assert!(matches!(
-            ClientCertPolicy::from_ca_file(&cert).unwrap(),
-            ClientCertPolicy::TrustedRoots(_)
-        ));
-        assert!(
-            TlsIdentity::from_pem_files(&key, &key).is_err(),
-            "no certificate in key file"
-        );
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-}
+mod tests;

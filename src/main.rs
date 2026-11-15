@@ -6,8 +6,8 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use oxid::config::Config;
-use oxid::server::ServerBuilder;
+use oxid::RawConfig;
+use oxid::ServerBuilder;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -28,9 +28,9 @@ enum Command {
         #[arg(short, long, env = "OXID_CONFIG", default_value = "oxid.toml")]
         config: PathBuf,
         /// User experience at the authorization endpoint, overriding the
-        /// configuration file: `technical` or `login`.
+        /// configuration file: `technical`, `login` or `ci`.
         #[arg(long, env = "OXID_EXPERIENCE")]
-        experience: Option<oxid::experience::Kind>,
+        experience: Option<oxid::Kind>,
     },
     /// Read a password from standard input and print its Argon2 hash, for
     /// use as a user's `password_hash`.
@@ -61,15 +61,12 @@ fn main() -> ExitCode {
 }
 
 #[tokio::main]
-async fn serve(
-    config_path: &std::path::Path,
-    experience: Option<oxid::experience::Kind>,
-) -> Result<()> {
-    let mut config = Config::load(config_path)?;
+async fn serve(config_path: &std::path::Path, experience: Option<oxid::Kind>) -> Result<()> {
+    let mut config = RawConfig::load(config_path)?;
     if let Some(experience) = experience {
         config.experience = experience;
     }
-    let server = ServerBuilder::new(config).start().await?;
+    let server = ServerBuilder::new(config.validate()?).start().await?;
     shutdown_signal().await;
     tracing::info!("shutting down");
     server.shutdown().await;
@@ -110,10 +107,6 @@ fn hash_password() -> Result<()> {
         !password.is_empty(),
         "no password supplied on standard input"
     );
-    writeln!(
-        std::io::stdout(),
-        "{}",
-        oxid::user::hash_password(password)?
-    )?;
+    writeln!(std::io::stdout(), "{}", oxid::hash_password(password)?)?;
     Ok(())
 }

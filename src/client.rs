@@ -14,25 +14,55 @@ use url::Url;
 
 use crate::config::ClientConfig;
 
-pub const GRANT_AUTHORIZATION_CODE: &str = "authorization_code";
-pub const GRANT_REFRESH_TOKEN: &str = "refresh_token";
 
-/// Which set of identity claims a client works with. The security profile
-/// (FAPI 2.0 with the ConnectID restrictions) is the same for both.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Profile {
-    /// The ConnectID Identity Assurance Profile: its standard claims and
-    /// `verified_claims`, requested with the `claims` parameter only.
-    #[default]
-    Connectid,
-    /// Standard `OpenID` Connect: every claim of Core §5.1, requested with
-    /// the `claims` parameter or the claim scopes.
-    Oidc,
+crate::wire::wire_enum! {
+    /// Which set of identity claims a client works with. The security
+    /// profile (FAPI 2.0 with the ConnectID restrictions) is the same for
+    /// both.
+    #[derive(Default)]
+    pub enum Profile ("client profile") {
+        /// The ConnectID Identity Assurance Profile: its standard claims and
+        /// `verified_claims`, requested with the `claims` parameter only.
+        #[default]
+        Connectid = "connectid",
+        /// Standard `OpenID` Connect: every claim of Core §5.1, requested
+        /// with the `claims` parameter or the claim scopes.
+        Oidc = "oidc",
+    }
+}
+
+crate::wire::wire_enum! {
+    /// The grant types oxID supports at the token endpoint.
+    pub enum GrantType ("grant type") {
+        AuthorizationCode = "authorization_code",
+        RefreshToken = "refresh_token",
+    }
+}
+
+/// What a client is registered with, before its rules are checked.
+#[derive(Debug, Clone)]
+pub(crate) struct Registration {
+    pub id: String,
+    /// The name shown to users; the id when absent.
+    pub name: Option<String>,
+    pub redirect_uris: Vec<String>,
+    pub jwks: JwkSet,
+    pub scopes: Vec<String>,
+    pub grant_types: Vec<GrantType>,
+    /// Derived from the redirect URIs when absent, if they share a host.
+    pub sector_identifier: Option<String>,
+    pub profile: Profile,
+    /// The claims the client is provisioned for; `None` for all of its
+    /// profile's.
+    pub claims: Option<Vec<String>>,
 }
 
 /// A confidential client. FAPI 2.0 §5.3.2.1-3 permits no other kind.
 #[derive(Debug, Clone)]
+#[cfg_attr(
+    not(feature = "test-util"),
+    expect(unreachable_pub, reason = "the integration tests use it")
+)]
 pub struct Client {
     pub id: String,
     pub name: String,
@@ -40,7 +70,7 @@ pub struct Client {
     /// Public keys for `private_key_jwt` and request object verification.
     pub jwks: JwkSet,
     pub scopes: BTreeSet<String>,
-    pub grant_types: BTreeSet<String>,
+    pub grant_types: BTreeSet<GrantType>,
     /// Host that scopes this client's pairwise subject identifiers.
     pub sector_identifier: String,
     pub profile: Profile,
@@ -51,26 +81,10 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn from_config(config: &ClientConfig) -> Result<Self> {
+    /// A client from the configuration file: its key set read from the
+    /// file, if it names one, then [`Client::new`].
+    pub(crate) fn from_config(config: &ClientConfig) -> Result<Self> {
         let id = config.client_id.trim();
-        ensure!(!id.is_empty(), "client_id must not be empty");
-        ensure!(
-            !config.redirect_uris.is_empty(),
-            "client '{id}' has no redirect_uris"
-        );
-
-        let mut hosts = BTreeSet::new();
-        for uri in &config.redirect_uris {
-            hosts.insert(validate_redirect_uri(uri).with_context(|| format!("client '{id}'"))?);
-        }
-        let sector_identifier = match (&config.sector_identifier, hosts.len()) {
-            (Some(explicit), _) => explicit.clone(),
-            (None, 1) => hosts.into_iter().next().unwrap_or_default(),
-            (None, _) => {
-                bail!("client '{id}' has redirect_uris on several hosts; set sector_identifier")
-            }
-        };
-
         let jwks = match (&config.jwks, &config.jwks_file) {
             (Some(jwks), None) => jwks.clone(),
             (None, Some(path)) => {
@@ -81,47 +95,84 @@ impl Client {
             }
             _ => bail!("client '{id}' needs exactly one of jwks or jwks_file"),
         };
+        Self::new(Registration {
+            id: config.client_id.clone(),
+            name: config.client_name.clone(),
+            redirect_uris: config.redirect_uris.clone(),
+            jwks,
+            scopes: config.scopes.clone(),
+            grant_types: config.grant_types.clone(),
+            sector_identifier: config.sector_identifier.clone(),
+            profile: config.profile,
+            claims: config.claims.clone(),
+        })
+    }
+
+    /// A client from its registration, wherever that came from (the
+    /// configuration file or the ConnectID registry), once its rules are
+    /// checked.
+    pub(crate) fn new(registration: Registration) -> Result<Self> {
+        let Registration {
+            id,
+            name,
+            redirect_uris,
+            jwks,
+            scopes,
+            grant_types,
+            sector_identifier,
+            profile,
+            claims,
+        } = registration;
+        let id = id.trim().to_owned();
+        ensure!(!id.is_empty(), "client_id must not be empty");
+        ensure!(!redirect_uris.is_empty(), "client '{id}' has no redirect_uris");
+
+        let mut hosts = BTreeSet::new();
+        for uri in &redirect_uris {
+            hosts.insert(validate_redirect_uri(uri).with_context(|| format!("client '{id}'"))?);
+        }
+        let sector_identifier = match (sector_identifier, hosts.len()) {
+            (Some(explicit), _) => explicit,
+            (None, 1) => hosts.into_iter().next().unwrap_or_default(),
+            (None, _) => {
+                bail!("client '{id}' has redirect_uris on several hosts; set sector_identifier")
+            }
+        };
         ensure!(!jwks.keys.is_empty(), "client '{id}' has an empty JWK Set");
 
-        let grant_types: BTreeSet<String> = config.grant_types.iter().cloned().collect();
-        for grant in &grant_types {
-            ensure!(
-                grant == GRANT_AUTHORIZATION_CODE || grant == GRANT_REFRESH_TOKEN,
-                "client '{id}': unsupported grant type '{grant}'"
-            );
-        }
+        let grant_types: BTreeSet<GrantType> = grant_types.into_iter().collect();
         ensure!(
-            grant_types.contains(GRANT_AUTHORIZATION_CODE),
+            grant_types.contains(&GrantType::AuthorizationCode),
             "client '{id}' must allow the authorization_code grant"
         );
 
-        if let Some(unknown) = config
-            .claims
+        if let Some(unknown) = claims
             .iter()
             .flatten()
-            .find(|name| !crate::claims::profile_allows(config.profile, name))
+            .find(|name| !crate::claims::profile_allows(profile, name))
         {
             bail!("client '{id}': claim '{unknown}' is not available under its profile");
         }
 
         Ok(Self {
-            id: id.to_owned(),
-            name: config.client_name.clone().unwrap_or_else(|| id.to_owned()),
-            redirect_uris: config.redirect_uris.clone(),
+            name: name.unwrap_or_else(|| id.clone()),
+            id,
+            redirect_uris,
             jwks,
-            scopes: config.scopes.iter().cloned().collect(),
+            scopes: scopes.into_iter().collect(),
             grant_types,
             sector_identifier,
-            profile: config.profile,
-            claims: config
-                .claims
-                .as_ref()
-                .map(|claims| claims.iter().cloned().collect()),
+            profile,
+            claims: claims.map(|claims| claims.into_iter().collect()),
         })
     }
 
     /// Whether this client may be given the claim `name`: its profile must
     /// define the claim and the client must be provisioned for it.
+    #[cfg_attr(
+        not(feature = "test-util"),
+        expect(unreachable_pub, reason = "the integration tests use it")
+    )]
     pub fn allows_claim(&self, name: &str) -> bool {
         crate::claims::profile_allows(self.profile, name)
             && self
@@ -131,14 +182,22 @@ impl Client {
     }
 
     /// Exact string comparison, as required by RFC 9700 §2.1.
+    #[cfg_attr(
+        not(feature = "test-util"),
+        expect(unreachable_pub, reason = "the integration tests use it")
+    )]
     pub fn has_redirect_uri(&self, uri: &str) -> bool {
         self.redirect_uris
             .iter()
             .any(|registered| registered == uri)
     }
 
+    #[cfg_attr(
+        not(feature = "test-util"),
+        expect(unreachable_pub, reason = "the integration tests use it")
+    )]
     pub fn allows_refresh_tokens(&self) -> bool {
-        self.grant_types.contains(GRANT_REFRESH_TOKEN)
+        self.grant_types.contains(&GrantType::RefreshToken)
     }
 }
 
@@ -163,7 +222,7 @@ fn validate_redirect_uri(uri: &str) -> Result<String> {
 }
 
 /// Lookup of registered clients.
-pub trait ClientRegistry: Send + Sync + Debug {
+pub(crate) trait ClientRegistry: Send + Sync + Debug {
     fn get(&self, client_id: &str) -> Option<Arc<Client>>;
 
     /// The profiles registered clients use. Discovery advertises the claims
@@ -174,12 +233,12 @@ pub trait ClientRegistry: Send + Sync + Debug {
 
 /// A fixed set of clients held in memory.
 #[derive(Debug, Default)]
-pub struct StaticClientRegistry {
+pub(crate) struct StaticClientRegistry {
     clients: HashMap<String, Arc<Client>>,
 }
 
 impl StaticClientRegistry {
-    pub fn new(clients: impl IntoIterator<Item = Client>) -> Result<Self> {
+    pub(crate) fn new(clients: impl IntoIterator<Item = Client>) -> Result<Self> {
         let mut map = HashMap::new();
         for client in clients {
             let id = client.id.clone();
@@ -191,7 +250,8 @@ impl StaticClientRegistry {
         Ok(Self { clients: map })
     }
 
-    pub fn from_config(configs: &[ClientConfig]) -> Result<Self> {
+    #[cfg(test)]
+    pub(crate) fn from_config(configs: &[ClientConfig]) -> Result<Self> {
         let clients = configs
             .iter()
             .map(Client::from_config)
@@ -199,11 +259,7 @@ impl StaticClientRegistry {
         Self::new(clients)
     }
 
-    pub fn len(&self) -> usize {
-        self.clients.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.clients.is_empty()
     }
 }
@@ -222,180 +278,4 @@ impl ClientRegistry for StaticClientRegistry {
 }
 
 #[cfg(test)]
-pub(crate) mod test_support {
-    use super::*;
-    use crate::keys::SigningKey;
-
-    /// A client whose JWK Set holds `key`'s public half.
-    pub fn client_with_key(id: &str, key: &SigningKey) -> Client {
-        Client::from_config(&ClientConfig {
-            client_id: id.to_owned(),
-            client_name: Some("Test RP".to_owned()),
-            redirect_uris: vec!["https://rp.example.com/cb".to_owned()],
-            jwks_file: None,
-            jwks: Some(key.jwks()),
-            // A second scope, so scope handling can be exercised. Scopes
-            // other than `openid` imply no claims.
-            scopes: vec!["openid".to_owned(), "email".to_owned()],
-            grant_types: vec![
-                GRANT_AUTHORIZATION_CODE.to_owned(),
-                GRANT_REFRESH_TOKEN.to_owned(),
-            ],
-            sector_identifier: None,
-            profile: Profile::Connectid,
-            claims: None,
-        })
-        .unwrap()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::keys::test_support::shared_key;
-
-    fn config() -> ClientConfig {
-        ClientConfig {
-            client_id: "rp".to_owned(),
-            client_name: None,
-            redirect_uris: vec!["https://rp.example.com/cb".to_owned()],
-            jwks_file: None,
-            jwks: Some(shared_key().jwks()),
-            scopes: vec!["openid".to_owned()],
-            grant_types: vec![GRANT_AUTHORIZATION_CODE.to_owned()],
-            sector_identifier: None,
-            profile: Profile::Connectid,
-            claims: None,
-        }
-    }
-
-    #[test]
-    fn claims_default_to_everything_and_can_be_restricted() {
-        let open = Client::from_config(&config()).unwrap();
-        assert!(open.allows_claim("email") && open.allows_claim("beneficiary_account_au"));
-
-        let mut c = config();
-        c.claims = Some(vec!["given_name".to_owned(), "over18".to_owned()]);
-        let limited = Client::from_config(&c).unwrap();
-        assert!(limited.allows_claim("given_name") && limited.allows_claim("over18"));
-        assert!(!limited.allows_claim("email") && !limited.allows_claim("over21"));
-
-        c.claims = Some(vec![]);
-        assert!(!Client::from_config(&c).unwrap().allows_claim("given_name"));
-
-        c.claims = Some(vec!["nickname".to_owned()]);
-        let err = Client::from_config(&c).unwrap_err().to_string();
-        assert!(err.contains("nickname"), "{err}");
-
-        // The same list is fine for a standard OpenID Connect client, which
-        // in turn has no ConnectID verified claims.
-        c.profile = Profile::Oidc;
-        let oidc = Client::from_config(&c).unwrap();
-        assert!(oidc.allows_claim("nickname") && !oidc.allows_claim("email"));
-        c.claims = None;
-        let oidc = Client::from_config(&c).unwrap();
-        assert!(oidc.allows_claim("name") && oidc.allows_claim("email_verified"));
-        assert!(!oidc.allows_claim("over18"));
-        assert!(!open.allows_claim("name"), "not a ConnectID claim");
-        c.claims = Some(vec!["over18".to_owned()]);
-        assert!(Client::from_config(&c).is_err());
-    }
-
-    #[test]
-    fn builds_a_client_with_derived_defaults() {
-        let client = Client::from_config(&config()).unwrap();
-        assert_eq!(client.name, "rp");
-        assert_eq!(client.sector_identifier, "rp.example.com");
-        assert!(!client.allows_refresh_tokens());
-    }
-
-    #[test]
-    fn redirect_uri_matching_is_exact() {
-        let client = Client::from_config(&config()).unwrap();
-        assert!(client.has_redirect_uri("https://rp.example.com/cb"));
-        assert!(!client.has_redirect_uri("https://rp.example.com/cb/"));
-        assert!(!client.has_redirect_uri("https://rp.example.com/cb?x=1"));
-        assert!(!client.has_redirect_uri("https://RP.example.com/cb"));
-    }
-
-    #[test]
-    fn rejects_insecure_or_malformed_redirect_uris() {
-        for bad in [
-            "http://rp.example.com/cb",
-            "https://rp.example.com/cb#frag",
-            "custom-scheme://cb",
-            "http://localhost/cb",
-            "not a url",
-        ] {
-            let mut c = config();
-            c.redirect_uris = vec![bad.to_owned()];
-            assert!(Client::from_config(&c).is_err(), "{bad}");
-        }
-    }
-
-    #[test]
-    fn loopback_http_is_allowed_for_native_clients() {
-        let mut c = config();
-        c.redirect_uris = vec!["http://127.0.0.1:8123/cb".to_owned()];
-        Client::from_config(&c).unwrap();
-    }
-
-    #[test]
-    fn several_redirect_hosts_need_an_explicit_sector() {
-        let mut c = config();
-        c.redirect_uris
-            .push("https://other.example.com/cb".to_owned());
-        assert!(Client::from_config(&c).is_err());
-        c.sector_identifier = Some("rp.example.com".to_owned());
-        assert_eq!(
-            Client::from_config(&c).unwrap().sector_identifier,
-            "rp.example.com"
-        );
-    }
-
-    #[test]
-    fn needs_keys_and_supported_grants() {
-        let mut no_keys = config();
-        no_keys.jwks = None;
-        assert!(Client::from_config(&no_keys).is_err());
-
-        let mut empty_keys = config();
-        empty_keys.jwks = Some(JwkSet { keys: vec![] });
-        assert!(Client::from_config(&empty_keys).is_err());
-
-        let mut password_grant = config();
-        password_grant.grant_types.push("password".to_owned());
-        assert!(Client::from_config(&password_grant).is_err());
-
-        let mut refresh_only = config();
-        refresh_only.grant_types = vec![GRANT_REFRESH_TOKEN.to_owned()];
-        assert!(Client::from_config(&refresh_only).is_err());
-
-        let mut no_redirects = config();
-        no_redirects.redirect_uris.clear();
-        assert!(Client::from_config(&no_redirects).is_err());
-    }
-
-    #[test]
-    fn registry_looks_up_by_id_and_rejects_duplicates() {
-        let registry = StaticClientRegistry::from_config(&[config()]).unwrap();
-        assert_eq!(registry.len(), 1);
-        assert!(registry.get("rp").is_some());
-        assert!(registry.get("unknown").is_none());
-        assert!(StaticClientRegistry::from_config(&[config(), config()]).is_err());
-
-        assert_eq!(registry.profiles(), BTreeSet::from([Profile::Connectid]));
-        let mut oidc = config();
-        oidc.client_id = "rp2".to_owned();
-        oidc.profile = Profile::Oidc;
-        let mixed = StaticClientRegistry::from_config(&[config(), oidc]).unwrap();
-        assert_eq!(
-            mixed.profiles(),
-            BTreeSet::from([Profile::Connectid, Profile::Oidc])
-        );
-        assert_eq!(
-            StaticClientRegistry::default().profiles(),
-            BTreeSet::from([Profile::Connectid])
-        );
-    }
-}
+mod tests;

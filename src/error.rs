@@ -5,102 +5,138 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
-/// Error codes from RFC 6749, RFC 9101, RFC 9126 and OpenID Connect Core.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ErrorCode {
-    InvalidRequest,
-    InvalidClient,
-    InvalidGrant,
-    UnauthorizedClient,
-    UnsupportedGrantType,
-    UnsupportedResponseType,
-    InvalidScope,
-    InvalidRequestObject,
-    AccessDenied,
-    LoginRequired,
-    ConsentRequired,
-    InteractionRequired,
-    AccountSelectionRequired,
-    ServerError,
-    TemporarilyUnavailable,
+crate::wire::wire_enum! {
+    /// Error codes from RFC 6749, RFC 9101, RFC 9126 and OpenID Connect Core.
+    pub(crate) enum ErrorCode ("error code") {
+        InvalidRequest = "invalid_request",
+        InvalidClient = "invalid_client",
+        InvalidGrant = "invalid_grant",
+        UnauthorizedClient = "unauthorized_client",
+        UnsupportedGrantType = "unsupported_grant_type",
+        UnsupportedResponseType = "unsupported_response_type",
+        InvalidScope = "invalid_scope",
+        InvalidRequestObject = "invalid_request_object",
+        AccessDenied = "access_denied",
+        LoginRequired = "login_required",
+        ConsentRequired = "consent_required",
+        InteractionRequired = "interaction_required",
+        AccountSelectionRequired = "account_selection_required",
+        ServerError = "server_error",
+        TemporarilyUnavailable = "temporarily_unavailable",
+    }
 }
 
 impl ErrorCode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::InvalidRequest => "invalid_request",
-            Self::InvalidClient => "invalid_client",
-            Self::InvalidGrant => "invalid_grant",
-            Self::UnauthorizedClient => "unauthorized_client",
-            Self::UnsupportedGrantType => "unsupported_grant_type",
-            Self::UnsupportedResponseType => "unsupported_response_type",
-            Self::InvalidScope => "invalid_scope",
-            Self::InvalidRequestObject => "invalid_request_object",
-            Self::AccessDenied => "access_denied",
-            Self::LoginRequired => "login_required",
-            Self::ConsentRequired => "consent_required",
-            Self::InteractionRequired => "interaction_required",
-            Self::AccountSelectionRequired => "account_selection_required",
-            Self::ServerError => "server_error",
-            Self::TemporarilyUnavailable => "temporarily_unavailable",
-        }
-    }
-
     fn status(self) -> StatusCode {
         match self {
             Self::InvalidClient => StatusCode::UNAUTHORIZED,
             Self::ServerError => StatusCode::INTERNAL_SERVER_ERROR,
             Self::TemporarilyUnavailable => StatusCode::SERVICE_UNAVAILABLE,
-            _ => StatusCode::BAD_REQUEST,
+            // Listed, not matched by a wildcard, so that a new code has to
+            // be given its status deliberately.
+            Self::InvalidRequest
+            | Self::InvalidGrant
+            | Self::UnauthorizedClient
+            | Self::UnsupportedGrantType
+            | Self::UnsupportedResponseType
+            | Self::InvalidScope
+            | Self::InvalidRequestObject
+            | Self::AccessDenied
+            | Self::LoginRequired
+            | Self::ConsentRequired
+            | Self::InteractionRequired
+            | Self::AccountSelectionRequired => StatusCode::BAD_REQUEST,
         }
+    }
+}
+
+/// Any error, boxed, as a cause kept for the log.
+pub(crate) type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+/// An error and every source under it, as one line: `outer: inner: root`.
+pub(crate) struct Report<'a>(pub &'a (dyn std::error::Error + 'static));
+
+impl std::fmt::Display for Report<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)?;
+        let mut source = self.0.source();
+        while let Some(error) = source {
+            write!(f, ": {error}")?;
+            source = error.source();
+        }
+        Ok(())
     }
 }
 
 /// An error returned to the client as `{"error": ..., "error_description": ...}`.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+///
+/// Building one has no side effects. A `server_error` carries its cause,
+/// which is logged once, when the error becomes the HTTP response, and
+/// never sent.
+#[derive(Debug, Clone, thiserror::Error)]
 #[error("{}: {description}", code.as_str())]
-pub struct OAuthError {
+pub(crate) struct OAuthError {
     pub code: ErrorCode,
     pub description: String,
+    #[source]
+    cause: Option<std::sync::Arc<dyn std::error::Error + Send + Sync>>,
 }
 
+/// Equal when the client would see the same error; the cause is not
+/// compared.
+impl PartialEq for OAuthError {
+    fn eq(&self, other: &Self) -> bool {
+        self.code == other.code && self.description == other.description
+    }
+}
+
+impl Eq for OAuthError {}
+
 impl OAuthError {
-    pub fn new(code: ErrorCode, description: impl Into<String>) -> Self {
+    pub(crate) fn new(code: ErrorCode, description: impl Into<String>) -> Self {
         Self {
             code,
             description: description.into(),
+            cause: None,
         }
     }
 
-    pub fn invalid_request(description: impl Into<String>) -> Self {
+    pub(crate) fn invalid_request(description: impl Into<String>) -> Self {
         Self::new(ErrorCode::InvalidRequest, description)
     }
 
-    pub fn invalid_client(description: impl Into<String>) -> Self {
+    pub(crate) fn invalid_client(description: impl Into<String>) -> Self {
         Self::new(ErrorCode::InvalidClient, description)
     }
 
-    pub fn invalid_grant(description: impl Into<String>) -> Self {
+    pub(crate) fn invalid_grant(description: impl Into<String>) -> Self {
         Self::new(ErrorCode::InvalidGrant, description)
     }
 
-    pub fn invalid_request_object(description: impl Into<String>) -> Self {
+    pub(crate) fn invalid_request_object(description: impl Into<String>) -> Self {
         Self::new(ErrorCode::InvalidRequestObject, description)
     }
 
-    pub fn invalid_scope(description: impl Into<String>) -> Self {
+    pub(crate) fn invalid_scope(description: impl Into<String>) -> Self {
         Self::new(ErrorCode::InvalidScope, description)
     }
 
-    /// An internal failure. The detail is logged, never sent to the client.
-    pub fn server_error(detail: impl std::fmt::Display) -> Self {
-        tracing::error!(%detail, "internal error");
-        Self::new(ErrorCode::ServerError, "internal server error")
+    /// An internal failure. The cause is logged when the response is
+    /// built, and never sent to the client.
+    pub(crate) fn server_error(cause: impl Into<BoxError>) -> Self {
+        Self {
+            cause: Some(std::sync::Arc::from(cause.into())),
+            ..Self::new(ErrorCode::ServerError, "internal server error")
+        }
     }
 }
 
 impl IntoResponse for OAuthError {
+    /// The one place a protocol endpoint's internal failure is logged.
     fn into_response(self) -> Response {
+        if let Some(cause) = &self.cause {
+            tracing::error!(error = %Report(cause.as_ref()), "internal error");
+        }
         let body = Json(json!({
             "error": self.code.as_str(),
             "error_description": self.description,
@@ -114,42 +150,4 @@ impl IntoResponse for OAuthError {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn status_codes_follow_rfc_6749() {
-        assert_eq!(ErrorCode::InvalidClient.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(ErrorCode::InvalidGrant.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(
-            ErrorCode::InvalidRequestObject.status(),
-            StatusCode::BAD_REQUEST
-        );
-        assert_eq!(
-            ErrorCode::ServerError.status(),
-            StatusCode::INTERNAL_SERVER_ERROR
-        );
-    }
-
-    #[test]
-    fn response_is_uncacheable_json() {
-        let response = OAuthError::invalid_grant("code expired").into_response();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
-        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
-    }
-
-    #[test]
-    fn server_error_hides_detail() {
-        let err = OAuthError::server_error("database password is hunter2");
-        assert_eq!(err.description, "internal server error");
-    }
-
-    #[test]
-    fn display_includes_code_and_description() {
-        assert_eq!(
-            OAuthError::invalid_scope("nope").to_string(),
-            "invalid_scope: nope"
-        );
-    }
-}
+mod tests;

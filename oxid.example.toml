@@ -21,6 +21,11 @@ mtls_base_url = "https://localhost:9444"
 # Can be overridden with --experience or the OXID_EXPERIENCE variable.
 experience = "technical"
 
+# The IANA time zone in which users' ages are worked out for the
+# verified_claims age attestations (over18 and so on). A user's own zoneinfo
+# claim takes precedence.
+# time_zone = "Australia/Sydney"
+
 # Settings of the "ci" experience.
 # [ci]
 # Seconds the default response is held back after the browser arrives, to
@@ -91,6 +96,17 @@ mtls_listen = "127.0.0.1:9444"
 # are bound to its thumbprint (self-signed certificate mutual TLS, RFC 8705).
 # client_ca = "tls/client-ca.pem"
 
+# Limits that protect an internet-facing listener. They do not apply on AWS
+# Lambda, where API Gateway handles connections.
+# Seconds an HTTP/1 client has to send a request's headers; idle keep-alive
+# connections are closed after the same time.
+# header_read_timeout = 10
+# Seconds a request may take before it is answered with 503. Must exceed
+# ci.response_delay.
+# request_timeout = 30
+# Connections each listener holds open at once.
+# max_connections = 1024
+
 [keys]
 # RSA private key (PEM) used to sign ID tokens with PS256. If unset, a key is
 # generated and kept in the store: with the memory store that means a new key
@@ -120,12 +136,16 @@ backend = "memory"
 # region = "ap-southeast-2"               # defaults to the environment's
 # endpoint_url = "http://localhost:8000"  # DynamoDB Local
 
+# Days a consent record (the decision on each authorization request) is kept,
+# 1 to 3650. Records are dropped after that: by the table's TTL on DynamoDB.
+# consent_retention_days = 365
+
 # Lifetimes and tolerances, in seconds. These are the defaults. Values outside
 # the limits set by FAPI 2.0 and ConnectID are refused at startup.
 [security]
 access_token_ttl = 300              # at most 600
-refresh_token_ttl = 86400
-id_token_ttl = 300
+refresh_token_ttl = 86400            # at most a year
+id_token_ttl = 300                  # at most an hour
 authorization_code_ttl = 60         # at most 60
 request_uri_ttl = 90                # below 600; time to reach the sign-in page
 session_ttl = 300                   # time to sign in and decide once there; at most 3600

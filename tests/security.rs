@@ -1,9 +1,21 @@
 //! Negative and security-focused tests against a running oxID instance:
 //! the FAPI 2.0 and ConnectID rules a compliant provider must enforce.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "test code panics on purpose"
+)]
+#![allow(
+    unreachable_pub,
+    reason = "the shared harness is public to each test binary"
+)]
+
 mod common;
 
 use common::{ASSERTION_TYPE, CLIENT_ID, Pkce, REDIRECT_URI, TestOp, oauth_error, redirect_params};
+use oxid::Seconds;
 use oxid::keys::SigningKey;
 use oxid::util::b64url;
 use reqwest::header::{LOCATION, WWW_AUTHENTICATE};
@@ -91,7 +103,7 @@ async fn access_token_expires_within_ten_minutes() {
     let tokens = op.tokens(&json!({})).await;
     let expires_in = tokens["expires_in"].as_i64().unwrap();
     assert!(expires_in <= 600);
-    op.clock.advance(expires_in);
+    op.clock.advance(Seconds::new(expires_in));
     let response = op
         .rp
         .get(op.mtls_url("/userinfo"))
@@ -140,7 +152,7 @@ async fn authorization_code_expires_after_sixty_seconds() {
     let pkce = Pkce::new();
     let request_uri = op.push(&pkce, &json!({})).await;
     let params = op.approve(&request_uri).await;
-    op.clock.advance(61);
+    op.clock.advance(Seconds::new(61));
     assert_eq!(
         oauth_error(op.exchange(&params["code"], &pkce).await)
             .await
@@ -206,7 +218,7 @@ async fn request_uri_is_single_use_and_expires() {
     assert_eq!(reused.status(), StatusCode::BAD_REQUEST);
 
     let request_uri = op.push(&pkce, &json!({})).await;
-    op.clock.advance(600);
+    op.clock.advance(Seconds::new(600));
     let expired = op
         .browser
         .get(op.authorize_url(&request_uri))
@@ -267,18 +279,21 @@ async fn request_object_lifetime_rules_are_enforced() {
     let cases = [
         ("no exp", json!({"exp": null})),
         ("no nbf", json!({"nbf": null})),
-        ("expired", json!({"nbf": now - 120, "exp": now - 60})),
+        (
+            "expired",
+            json!({"nbf": now - Seconds::new(120), "exp": now - Seconds::new(60)}),
+        ),
         (
             "exp more than 10 minutes after nbf",
-            json!({"exp": now + 601}),
+            json!({"exp": now + Seconds::new(601)}),
         ),
         (
             "nbf more than 10 minutes old",
-            json!({"nbf": now - 900, "exp": now + 60}),
+            json!({"nbf": now - Seconds::new(900), "exp": now + Seconds::new(60)}),
         ),
         (
             "nbf far in the future",
-            json!({"nbf": now + 120, "exp": now + 300}),
+            json!({"nbf": now + Seconds::new(120), "exp": now + Seconds::new(300)}),
         ),
         (
             "wrong audience",
@@ -293,7 +308,8 @@ async fn request_object_lifetime_rules_are_enforced() {
     }
 
     // FAPI 2.0 5.3.2.1-13: 8 seconds of clock skew must be tolerated.
-    op.push(&Pkce::new(), &json!({"nbf": now + 8})).await;
+    op.push(&Pkce::new(), &json!({"nbf": now + Seconds::new(8)}))
+        .await;
     // An array audience that includes the issuer is fine.
     op.push(
         &Pkce::new(),
@@ -430,11 +446,14 @@ async fn client_assertions_are_strictly_validated() {
             json!({"aud": op.mtls_url("/par")}),
         ),
         ("array audience", json!({"aud": [op.issuer]})),
-        ("expired", json!({"exp": now - 300})),
+        ("expired", json!({"exp": now - Seconds::new(300)})),
         ("no exp", json!({"exp": null})),
         ("no sub", json!({"sub": null})),
         ("no jti", json!({"jti": null})),
-        ("iat far in the future", json!({"iat": now + 120})),
+        (
+            "iat far in the future",
+            json!({"iat": now + Seconds::new(120)}),
+        ),
         ("unknown client", json!({"iss": "ghost", "sub": "ghost"})),
     ];
     for (name, overrides) in cases {
@@ -485,7 +504,7 @@ async fn assertion_signed_by_another_key_is_rejected() {
     let assertion = attacker
         .sign(
             None,
-            &json!({"iss": CLIENT_ID, "sub": CLIENT_ID, "aud": op.issuer, "jti": "x", "exp": now + 60}),
+            &json!({"iss": CLIENT_ID, "sub": CLIENT_ID, "aud": op.issuer, "jti": "x", "exp": now + Seconds::new(60)}),
         )
         .unwrap();
     let response = op
@@ -581,4 +600,85 @@ async fn server_shuts_down_cleanly() {
         browser.get(&url).send().await.is_err(),
         "nothing is listening after shutdown"
     );
+}
+
+/// Reads until the server closes the connection, failing after `limit`.
+async fn closed_within(
+    stream: &mut tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
+    limit: std::time::Duration,
+) -> bool {
+    use tokio::io::AsyncReadExt;
+    let mut buffer = [0_u8; 1024];
+    tokio::time::timeout(limit, async {
+        loop {
+            match stream.read(&mut buffer).await {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {}
+            }
+        }
+    })
+    .await
+    .is_ok()
+}
+
+#[tokio::test]
+async fn silent_connections_are_closed() {
+    let op = TestOp::start_with(|config| config.server.header_read_timeout = 1).await;
+    // With and without ALPN, so neither the HTTP/1 path nor the fallback
+    // when no protocol is negotiated can be held open by saying nothing.
+    for alpn in [&[b"http/1.1".as_slice()][..], &[]] {
+        let mut stream = op.raw_tls(alpn).await;
+        assert!(
+            closed_within(&mut stream, std::time::Duration::from_secs(5)).await,
+            "a connection that sends nothing is closed (ALPN {alpn:?})"
+        );
+    }
+    op.stop().await;
+}
+
+#[tokio::test]
+async fn connections_are_capped_per_listener() {
+    let op = TestOp::start_with(|config| {
+        config.server.max_connections = 1;
+        config.server.header_read_timeout = 2;
+    })
+    .await;
+    let url = op.url("/healthz");
+    let idle = op.raw_tls(&[b"http/1.1"]).await;
+
+    // The only slot is held by the idle connection.
+    let blocked = op
+        .browser
+        .get(&url)
+        .timeout(std::time::Duration::from_millis(500))
+        .send()
+        .await;
+    assert!(blocked.is_err(), "no slot is free: {blocked:?}");
+
+    // Once the idle connection is closed, the slot is free again.
+    drop(idle);
+    let response = op
+        .browser
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    op.stop().await;
+}
+
+#[tokio::test]
+async fn a_dropped_server_stops_listening() {
+    let op = TestOp::start().await;
+    let url = op.url("/healthz");
+    let browser = op.browser.clone();
+    drop(op);
+    for _ in 0..50 {
+        if browser.get(&url).send().await.is_err() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("the server is still listening after being dropped");
 }

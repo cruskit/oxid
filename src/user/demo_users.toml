@@ -1,0 +1,122 @@
+# The built-in customers, used when no users are configured: fictional
+# people chosen to exercise different outcomes. Loaded exactly as [[users]]
+# in a configuration file are. They all sign in with the password
+# "demo-password" (user::DEMO_PASSWORD); the hash is precomputed so that a
+# cold start does not pay for Argon2.
+#
+# - demo:     an adult with every claim, a PayID and a BIC.
+# - riley:    under 18, with a bank account but no PayID or BIC.
+# - margaret: over 65, no middle name, PayID by mobile number.
+# - sam:      sparse data: no birthdate, phone, address or bank account.
+
+[[users]]
+username = "demo"
+subject = "demo-user-0001"
+password_hash = "$argon2id$v=19$m=19456,t=2,p=1$1pD2JL/Druui48zrii3E7A$WfVEWbPUbl1H0N8SBiJz7RupMKJgdRJ6UzfUZ9+EkUk"
+
+[users.claims]
+# Every standard OpenID Connect claim, and so every claim the ConnectID
+# profile defines.
+name = "Alex Jordan Citizen"
+nickname = "Al"
+preferred_username = "alex"
+profile = "https://example.com/people/alex"
+picture = "https://example.com/people/alex.jpg"
+website = "https://alex.example.com"
+email_verified = true
+gender = "non-binary"
+zoneinfo = "Australia/Sydney"
+locale = "en-AU"
+phone_number_verified = true
+updated_at = 1767225600 # 2026-01-01T00:00:00Z
+given_name = "Alex"
+middle_name = "Jordan"
+family_name = "Citizen"
+email = "alex.citizen@example.com"
+birthdate = "1985-04-12"
+phone_number = "+61 400 000 000"
+
+[users.claims.address]
+street_address = "1 Example Street"
+locality = "Sydney"
+region = "NSW"
+postal_code = "2000"
+country = "Australia"
+
+[users.bank_account]
+beneficiary_name = "Alex Jordan Citizen"
+bsb = "123456"
+account_number = "12345678"
+payid = "alex.citizen@example.com"
+payid_type = "/EMAL"
+bic_swift_code = "OXIDAU2SXXX"
+
+[[users]]
+username = "riley"
+subject = "demo-user-0002"
+password_hash = "$argon2id$v=19$m=19456,t=2,p=1$1pD2JL/Druui48zrii3E7A$WfVEWbPUbl1H0N8SBiJz7RupMKJgdRJ6UzfUZ9+EkUk"
+
+[users.claims]
+name = "Riley Young"
+given_name = "Riley"
+family_name = "Young"
+email = "riley.young@example.com"
+email_verified = true
+birthdate = "2010-06-15"
+phone_number = "+61 400 000 002"
+phone_number_verified = false
+locale = "en-AU"
+
+[users.claims.address]
+street_address = "2 Sample Avenue"
+locality = "Melbourne"
+region = "VIC"
+postal_code = "3000"
+country = "Australia"
+
+[users.bank_account]
+beneficiary_name = "Riley Young"
+bsb = "234567"
+account_number = "23456789"
+
+[[users]]
+username = "margaret"
+subject = "demo-user-0003"
+password_hash = "$argon2id$v=19$m=19456,t=2,p=1$1pD2JL/Druui48zrii3E7A$WfVEWbPUbl1H0N8SBiJz7RupMKJgdRJ6UzfUZ9+EkUk"
+
+[users.claims]
+name = "Margaret Elder"
+given_name = "Margaret"
+family_name = "Elder"
+email = "margaret.elder@example.com"
+email_verified = true
+birthdate = "1950-02-03"
+phone_number = "+61 400 000 003"
+phone_number_verified = true
+locale = "en-AU"
+
+[users.claims.address]
+street_address = "Unit 3\n30 Placeholder Road"
+locality = "Brisbane"
+region = "QLD"
+postal_code = "4000"
+country = "Australia"
+
+[users.bank_account]
+beneficiary_name = "Margaret Elder"
+bsb = "345678"
+account_number = "345678901"
+payid = "0400000003"
+payid_type = "/TELI"
+bic_swift_code = "OXIDAU2S"
+
+[[users]]
+username = "sam"
+subject = "demo-user-0004"
+password_hash = "$argon2id$v=19$m=19456,t=2,p=1$1pD2JL/Druui48zrii3E7A$WfVEWbPUbl1H0N8SBiJz7RupMKJgdRJ6UzfUZ9+EkUk"
+
+[users.claims]
+given_name = "Sam"
+family_name = "Lee"
+email = "sam.lee@example.com"
+email_verified = false

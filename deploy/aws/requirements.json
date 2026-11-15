@@ -15,13 +15,14 @@
       "dynamodb:PutItem",
       "dynamodb:UpdateItem",
       "dynamodb:DeleteItem",
-      "dynamodb:Query"
+      "dynamodb:Query",
+      "dynamodb:TransactWriteItems"
     ],
     "notes": [
       "One table per oxID instance. Instances that share a table share their signing key, sessions and tokens.",
       "The table holds the provider's signing key and pairwise salt when they are not configured as files. Encrypt it at rest and restrict read access.",
       "Records carry their expiry in the TTL attribute. oxID checks expiry itself, so TTL only reclaims space.",
-      "Consent records have no TTL and are kept until deleted.",
+      "Consent records carry a TTL too: they expire store.consent_retention_days after the decision (default 365). Each record is written as two items in one TransactWriteItems call.",
       "On-demand (PAY_PER_REQUEST) billing suits the access pattern: a handful of small reads and writes per sign-in."
     ]
   },

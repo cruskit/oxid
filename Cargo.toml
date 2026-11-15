@@ -1,8 +1,8 @@
 [package]
 name = "oxid"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.99"
 description = "oxID - an OpenID Provider implementing the FAPI 2.0 and ConnectID security profiles"
 license = "MIT OR Apache-2.0"
 publish = false
@@ -10,12 +10,17 @@ publish = false
 [dependencies]
 anyhow = "1"
 argon2 = "0.6"
+askama = { version = "0.16", features = ["serde_json"] }
+async-trait = "0.1"
 aws-lc-rs = "1"
 axum = { version = "0.8", features = ["http2"] }
 base64 = "0.23"
 clap = { version = "4", features = ["derive", "env"] }
 hyper = { version = "1", features = ["server", "http1", "http2"] }
-hyper-util = { version = "0.1", features = ["server-auto", "server-graceful", "service", "tokio", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["server-graceful", "service", "tokio", "http1", "http2"] }
+# Time zones for age calculations, with the database compiled in (Lambda
+# has no tzdata).
+jiff = { version = "0.2.44", default-features = false, features = ["std", "tzdb-bundle-always"] }
 jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs", "use_pem"] }
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "form", "http2"] }
@@ -37,11 +42,13 @@ uuid = { version = "1", features = ["v4"] }
 aws-config = { version = "1", optional = true, default-features = false, features = ["rt-tokio", "default-https-client", "credentials-process", "sso"] }
 aws-sdk-dynamodb = { version = "1", optional = true, default-features = false, features = ["rt-tokio", "default-https-client"] }
 lambda_http = { version = "1", optional = true, default-features = false, features = ["apigw_http"] }
-askama = "0.16"
 
 [features]
 # Amazon DynamoDB as the store, and the `oxid-lambda` binary for AWS Lambda.
 aws = ["dep:aws-config", "dep:aws-sdk-dynamodb", "dep:lambda_http"]
+# Makes the crate's internal modules public, for the integration tests in
+# tests/. Not for use otherwise: nothing behind it is a stable API.
+test-util = []
 
 [[bin]]
 name = "oxid"
@@ -53,13 +60,16 @@ path = "src/bin/oxid-lambda.rs"
 required-features = ["aws"]
 
 [dev-dependencies]
+# The integration tests drive the internals (see the `test-util` feature).
+oxid = { path = ".", features = ["test-util"] }
+scraper = "0.29"
 # Paused time, for testing the `ci` experience's wait without waiting.
 tokio = { version = "1", features = ["test-util"] }
-toml = "1"
 
 [lints.rust]
 unsafe_code = "forbid"
 missing_debug_implementations = "warn"
+unreachable_pub = "warn"
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }
@@ -70,6 +80,11 @@ missing_panics_doc = "allow"
 must_use_candidate = "allow"
 similar_names = "allow"
 too_many_lines = "allow"
+# Panics and stray debugging belong in tests only (see clippy.toml).
+dbg_macro = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
+indexing_slicing = "warn"
 
 # Password hashing and big-number maths are painfully slow unoptimised; keep
 # `cargo test` fast without giving up debug info for our own code.

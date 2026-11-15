@@ -68,5 +68,10 @@
     {%- for script in scripts %}
     <script nonce="{{ nonce }}">{{ script|safe }}</script>
     {%- endfor %}
+    {%- if let Some(reload) = reload %}
+    {#- `json` writes a JavaScript string with <, > and & escaped, so the URL
+        cannot end the script element. #}
+    <script nonce="{{ nonce }}">setTimeout(function(){location.replace({{ reload.url|json|safe }})},{{ reload.after_ms }});</script>
+    {%- endif %}
   </body>
 </html>

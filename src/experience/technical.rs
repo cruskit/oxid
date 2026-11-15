@@ -30,10 +30,12 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
+use crate::epoch::Seconds;
+use crate::cookie::{SameSite, SetCookie};
 use super::{
-    Approval, Decision, ERROR_CONDITIONS, ErrorCondition, Experience, Form, FormTarget,
-    Interaction, Kind, MAX_ERROR_DESCRIPTION, Page, Step, StepFuture, error_condition,
-    everything_requested, host_cookie, is_error_description, render,
+    Approval, Decision, DEFAULT_ERROR_CONDITION, ERROR_CONDITIONS, ErrorCondition, Experience, Form, FormTarget,
+    Interaction, Kind, MAX_ERROR_DESCRIPTION, Page, Step, StepResult, error_condition,
+    everything_requested, is_error_description, render,
 };
 use crate::id_token::{self, ClaimEdits};
 use crate::store::Grant;
@@ -41,12 +43,24 @@ use crate::user::{User, UserStore};
 use crate::util::b64url;
 
 /// Remembers the customer used on the last completed flow.
-pub const CUSTOMER_COOKIE: &str = "__Host-oxid-customer";
-const CUSTOMER_COOKIE_MAX_AGE: i64 = 365 * 24 * 60 * 60;
+pub(crate) const CUSTOMER_COOKIE: &str = "__Host-oxid-customer";
+const CUSTOMER_COOKIE_MAX_AGE: Seconds = Seconds::days(365);
 
-/// The `outcome` form value for an error response. Anything else, such as
-/// the template's `success`, is a successful one.
-const OUTCOME_ERROR: &str = "error";
+crate::wire::wire_enum! {
+    /// The response the form asks for. Anything unrecognised counts as a
+    /// success, as the template's default does.
+    enum Outcome ("outcome") {
+        Success = "success",
+        Error = "error",
+    }
+}
+
+crate::wire::wire_enum! {
+    /// The `action` of the page's submit button.
+    enum Action ("action") {
+        Send = "send",
+    }
+}
 
 /// The styles of the page.
 const STYLE: &str = include_str!("../../templates/technical/technical.css");
@@ -119,7 +133,7 @@ struct Condition {
 }
 
 #[derive(Debug)]
-pub struct Technical {
+pub(crate) struct Technical {
     users: Arc<dyn UserStore>,
 }
 
@@ -128,12 +142,9 @@ fn cookie_value(user: &User) -> String {
     b64url(user.subject.as_bytes())
 }
 
-fn remember(user: &User) -> String {
-    host_cookie(
-        CUSTOMER_COOKIE,
-        &cookie_value(user),
-        Some(CUSTOMER_COOKIE_MAX_AGE),
-    )
+fn remember(user: &User) -> SetCookie {
+    SetCookie::host(CUSTOMER_COOKIE, cookie_value(user), SameSite::Lax)
+        .max_age(CUSTOMER_COOKIE_MAX_AGE)
 }
 
 /// What the page should show: the selections so far and any message.
@@ -155,30 +166,24 @@ struct View<'a> {
     notice: Option<String>,
 }
 
+#[async_trait::async_trait]
 impl Experience for Technical {
     fn kind(&self) -> Kind {
         Kind::Technical
     }
 
-    fn start<'a>(&'a self, interaction: &'a Interaction<'a>) -> StepFuture<'a> {
-        Box::pin(async move { self.page(interaction, &View::default()).into() })
-    }
+    async fn start(&self, interaction: &Interaction<'_>) -> StepResult { Ok(self.page(interaction, &View::default())?.into()) }
 
-    fn submit<'a>(&'a self, interaction: &'a Interaction<'a>, form: &'a Form) -> StepFuture<'a> {
-        Box::pin(async move { self.handle(interaction, form) })
-    }
+    async fn submit(&self, interaction: &Interaction<'_>, form: &Form) -> StepResult { self.handle(interaction, form) }
 }
 
 impl Technical {
-    pub fn new(users: Arc<dyn UserStore>) -> Self {
+    pub(crate) fn new(users: Arc<dyn UserStore>) -> Self {
         Self { users }
     }
 
     fn customer(&self, subject: &str) -> Option<Arc<User>> {
-        self.users
-            .list()
-            .into_iter()
-            .find(|user| user.subject == subject)
+        self.users.find_by_subject(subject)
     }
 
     /// The customer used on the last flow, if the browser's cookie names one
@@ -187,13 +192,15 @@ impl Technical {
         let remembered = interaction.cookie(CUSTOMER_COOKIE)?;
         self.users
             .list()
-            .into_iter()
+            .iter()
             .find(|user| cookie_value(user) == remembered)
+            .cloned()
     }
 
-    fn handle(&self, interaction: &Interaction<'_>, form: &Form) -> Step {
+    fn handle(&self, interaction: &Interaction<'_>, form: &Form) -> StepResult {
         let subject = form.get("customer").unwrap_or_default();
-        let error_outcome = form.get("outcome") == Some(OUTCOME_ERROR);
+        let error_outcome = form.get("outcome").and_then(|text| text.parse().ok())
+            == Some(Outcome::Error);
         let view = View {
             customer: self.customer(subject).map(|user| user.subject.clone()),
             error_outcome,
@@ -201,24 +208,25 @@ impl Technical {
             error_description: form.get("error_description"),
             ..View::default()
         };
-        let again = |view: View<'_>, error: &str| -> Step {
-            self.page(
-                interaction,
-                &View {
-                    error: Some(error.to_owned()),
-                    ..view
-                },
-            )
-            .into()
+        let again = |view: View<'_>, error: &str| -> StepResult {
+            Ok(self
+                .page(
+                    interaction,
+                    &View {
+                        error: Some(error.to_owned()),
+                        ..view
+                    },
+                )?
+                .into())
         };
 
-        if form.get("action") != Some("send") {
+        if form.get("action").and_then(|text| text.parse().ok()) != Some(Action::Send) {
             return again(view, "Choose a response and send it.");
         }
 
         if error_outcome {
             return match form.get("error").and_then(error_condition) {
-                Some(condition) => deny(condition, form.get("error_description")),
+                Some(condition) => Ok(deny(condition, form.get("error_description"))),
                 None => again(view, "Choose one of the listed error conditions."),
             };
         }
@@ -235,15 +243,15 @@ impl Technical {
                 "The claims have been regenerated for {}. Review them and send again.",
                 user.display_name()
             );
-            return self
+            return Ok(self
                 .page(
                     interaction,
                     &View {
                         notice: Some(notice),
                         ..view
                     },
-                )
-                .into();
+                )?
+                .into());
         }
 
         let txn = form.get("txn").unwrap_or_default();
@@ -257,19 +265,20 @@ impl Technical {
         };
 
         let text = form.get("id_token").unwrap_or_default();
-        let keep_text = |error: String| -> Step {
-            self.page(
-                interaction,
-                &View {
-                    customer: Some(user.subject.clone()),
-                    txn: Some(txn),
-                    base: Some(base_text),
-                    claims_text: Some(text),
-                    error: Some(error),
-                    ..View::default()
-                },
-            )
-            .into()
+        let keep_text = |error: String| -> StepResult {
+            Ok(self
+                .page(
+                    interaction,
+                    &View {
+                        customer: Some(user.subject.clone()),
+                        txn: Some(txn),
+                        base: Some(base_text),
+                        claims_text: Some(text),
+                        error: Some(error),
+                        ..View::default()
+                    },
+                )?
+                .into())
         };
         let edited = match serde_json::from_str::<Value>(text) {
             Ok(Value::Object(edited)) => edited,
@@ -288,7 +297,7 @@ impl Technical {
                 "ID token claims were edited by hand"
             );
         }
-        Step {
+        Ok(Step {
             decision: Decision::Approve(Approval {
                 user_subject: user.subject.clone(),
                 shared_claims: everything_requested(interaction),
@@ -297,19 +306,21 @@ impl Technical {
                 txn: Some(txn.to_owned()),
             }),
             set_cookies: vec![remember(&user)],
-        }
+        })
     }
 
     /// The whole experience: request on one side, response on the other.
-    fn page(&self, interaction: &Interaction<'_>, view: &View<'_>) -> Page {
+    fn page(&self, interaction: &Interaction<'_>, view: &View<'_>) -> askama::Result<Page> {
         let client = interaction.client;
         let request = interaction.request();
         let users = self.users.list();
         let remembered = self.remembered(interaction);
-        let selected = view
+        let chosen = view
             .customer
             .as_deref()
-            .and_then(|subject| users.iter().find(|user| user.subject == subject))
+            .and_then(|subject| self.users.find_by_subject(subject));
+        let selected = chosen
+            .as_ref()
             .or(remembered.as_ref())
             .or_else(|| users.first());
         let selected_subject = selected.map(|user| user.subject.as_str());
@@ -341,7 +352,7 @@ impl Technical {
         let error_code = view
             .error_code
             .and_then(error_condition)
-            .unwrap_or(&ERROR_CONDITIONS[0]);
+            .unwrap_or(&DEFAULT_ERROR_CONDITION);
         let error_description = view
             .error_description
             .map(str::trim)
@@ -357,7 +368,7 @@ impl Technical {
             RequestRow {
                 label: "Profile",
                 id: "client-profile",
-                value: format!("{:?}", client.profile).to_lowercase().into(),
+                value: client.profile.as_str().into(),
             },
             RequestRow {
                 label: "Redirect URI",
@@ -390,7 +401,7 @@ impl Technical {
             "remembered": remembered.as_ref().map(|user| user.subject.clone()),
             "redirect_uri": request.redirect_uri,
             "state": request.state,
-            "issuer": interaction.state.issuer,
+            "issuer": interaction.issuer(),
         });
 
         let template = PageTemplate {
@@ -430,17 +441,17 @@ impl Technical {
                 .collect(),
             error_description,
             redirect_uri: &request.redirect_uri,
-            issuer: &interaction.state.issuer,
+            issuer: interaction.issuer(),
             data: data.to_string().replace('<', "\\u003c"),
         };
 
-        Page {
+        Ok(Page {
             title: "Authorization request".to_owned(),
-            body: render(&template),
+            body: render(&template)?,
             style: STYLE,
             script: Some(SCRIPT),
             wide: true,
-        }
+        })
     }
 }
 
@@ -454,13 +465,13 @@ fn preview(interaction: &Interaction<'_>, user: &User, txn: &str) -> Map<String,
         scope: request.scope.clone(),
         claims: request.claims.clone(),
         shared_claims: everything_requested(interaction),
-        auth_time: interaction.state.now(),
+        auth_time: interaction.now(),
         txn: txn.to_owned(),
         purpose: request.purpose.clone(),
         id_token_edits: None,
     };
     id_token::preview(
-        interaction.state,
+        &interaction.issuer_context(),
         interaction.client,
         user,
         &grant,
@@ -506,74 +517,26 @@ fn decode_jwt(token: &str) -> (String, String) {
 
 /// Everything known about a customer, for display.
 fn attributes(user: &User) -> Value {
-    let mut out = json!({
-        "username": user.username,
-        "subject": user.subject,
-        "claims": user.claims,
-    });
-    if let Some(account) = &user.bank_account {
-        out["bank_account"] = json!({
+    let bank_account = user.bank_account.as_ref().map(|account| {
+        json!({
             "beneficiary_name": account.beneficiary_name,
             "bsb": account.bsb,
             "account_number": account.account_number,
             "payid": account.payid,
             "payid_type": account.payid_type.map(crate::user::PayIdType::as_str),
             "bic_swift_code": account.bic_swift_code,
-        });
+        })
+    });
+    let mut out = json!({
+        "username": user.username,
+        "subject": user.subject,
+        "claims": user.claims,
+    });
+    if let (Some(account), Value::Object(out)) = (bank_account, &mut out) {
+        out.insert("bank_account".to_owned(), account);
     }
     out
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn decodes_a_jwt_for_display() {
-        let header = b64url(br#"{"alg":"PS256","kid":"k1"}"#);
-        let payload = b64url(br#"{"iss":"rp","scope":"openid"}"#);
-        let (h, p) = decode_jwt(&format!("{header}.{payload}.sig"));
-        assert!(h.contains("\"alg\": \"PS256\""), "{h}");
-        assert!(p.contains("\"scope\": \"openid\""), "{p}");
-
-        let (h, p) = decode_jwt("not-a-jwt");
-        assert_eq!(h, "(not valid base64url JSON)");
-        assert_eq!(p, "(missing)");
-    }
-
-    #[test]
-    fn error_conditions_are_distinct_and_well_formed() {
-        let mut codes: Vec<&str> = ERROR_CONDITIONS.iter().map(|c| c.code.as_str()).collect();
-        assert_eq!(
-            codes[0], "access_denied",
-            "the deny shortcut uses the first"
-        );
-        for condition in ERROR_CONDITIONS {
-            assert!(is_error_description(condition.description));
-            assert!(error_condition(condition.code.as_str()).is_some());
-        }
-        codes.sort_unstable();
-        let total = codes.len();
-        codes.dedup();
-        assert_eq!(codes.len(), total);
-        assert!(error_condition("success").is_none());
-        assert!(error_condition("made_up").is_none());
-    }
-
-    #[test]
-    fn custom_error_descriptions_must_be_safe() {
-        let condition = &ERROR_CONDITIONS[0];
-        let description = |input: Option<&str>| match deny(condition, input).decision {
-            Decision::Deny { description, .. } => description,
-            other => panic!("{other:?}"),
-        };
-        assert_eq!(description(Some("custom reason")), "custom reason");
-        assert_eq!(description(Some("  padded  ")), "padded");
-        assert_eq!(description(None), condition.description);
-        assert_eq!(description(Some("   ")), condition.description);
-        assert_eq!(description(Some("quote \" here")), condition.description);
-        assert_eq!(description(Some("line\nbreak")), condition.description);
-        assert_eq!(description(Some("caf\u{e9}")), condition.description);
-        assert_eq!(description(Some(&"x".repeat(501))), condition.description);
-    }
-}
+mod tests;

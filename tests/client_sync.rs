@@ -5,6 +5,17 @@
 //! certificate, the `private_key_jwt` assertion, and that the access token
 //! is used with the certificate it was issued to.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "test code panics on purpose"
+)]
+#![allow(
+    unreachable_pub,
+    reason = "the shared harness is public to each test binary"
+)]
+
 mod common;
 
 use std::collections::HashMap;
@@ -18,11 +29,12 @@ use axum::routing::{get, post};
 use axum::{Extension, Form, Json, Router};
 use common::TestOp;
 use oxid::client::Profile;
-use oxid::client_sync::{ClientSyncConfig, fetch};
+use oxid::client_sync::{ClientSync, ClientSyncConfig};
 use oxid::http::ConnInfo;
-use oxid::jose::{Jws, SigningAlg};
+use oxid::jose::{SigningAlg, UnverifiedJws};
 use oxid::keys::SigningKey;
 use oxid::tls::{self, ClientCertPolicy, TlsIdentity};
+use oxid::util::SystemClock;
 use serde_json::{Value, json};
 
 const IDP_CLIENT_ID: &str = "oxid-idp";
@@ -76,15 +88,19 @@ async fn token(
     {
         return oauth_error(StatusCode::BAD_REQUEST, "invalid_request");
     }
-    let Ok(jws) = Jws::parse(
+    let Ok(unverified) = UnverifiedJws::parse(
         field("client_assertion").unwrap_or_default(),
         &[SigningAlg::PS256],
     ) else {
         return oauth_error(StatusCode::UNAUTHORIZED, "invalid_client");
     };
-    let valid = jws.kid.as_deref() == Some(KEY_ID)
-        && jws.verify(&registry.idp_jwks).is_ok()
-        && jws.str_claim("iss") == Some(IDP_CLIENT_ID)
+    if unverified.header().kid.as_deref() != Some(KEY_ID) {
+        return oauth_error(StatusCode::UNAUTHORIZED, "invalid_client");
+    }
+    let Ok(jws) = unverified.verify(&registry.idp_jwks) else {
+        return oauth_error(StatusCode::UNAUTHORIZED, "invalid_client");
+    };
+    let valid = jws.str_claim("iss") == Some(IDP_CLIENT_ID)
         && jws.str_claim("sub") == Some(IDP_CLIENT_ID)
         && jws.str_claim("aud") == Some(registry.base.as_str())
         && jws.str_claim("jti").is_some()
@@ -271,6 +287,14 @@ impl TestRegistry {
     }
 }
 
+/// Validate the settings, then load the clients.
+async fn fetch(
+    config: &ClientSyncConfig,
+    clock: &dyn oxid::Clock,
+) -> anyhow::Result<Vec<oxid::client::Client>> {
+    oxid::client_sync::fetch(&ClientSync::try_from(config.clone())?, clock).await
+}
+
 fn ids(clients: &[oxid::client::Client]) -> Vec<&str> {
     clients.iter().map(|client| client.id.as_str()).collect()
 }
@@ -281,7 +305,7 @@ const REGISTRABLE: [&str; 5] = ["rp-one", "rp-two", "rp-three", "rp-four", "test
 #[tokio::test]
 async fn every_page_is_loaded_and_usable_clients_are_registered() {
     let registry = TestRegistry::start(3);
-    let clients = fetch(&registry.config).await.unwrap();
+    let clients = fetch(&registry.config, &SystemClock).await.unwrap();
 
     // Eight entries at three per page: all three pages were read.
     assert_eq!(registry.pages(), ["0", "1", "2"]);
@@ -312,7 +336,7 @@ async fn all_pages_are_loaded_whatever_the_page_size() {
         (1, vec!["0", "1", "2", "3", "4", "5", "6", "7"]),
     ] {
         let registry = TestRegistry::start(page_size);
-        let clients = fetch(&registry.config).await.unwrap();
+        let clients = fetch(&registry.config, &SystemClock).await.unwrap();
         assert_eq!(registry.pages(), expected_pages, "page size {page_size}");
         assert_eq!(ids(&clients), REGISTRABLE, "page size {page_size}");
         registry.stop();
@@ -323,7 +347,7 @@ async fn all_pages_are_loaded_whatever_the_page_size() {
 async fn an_empty_registry_yields_no_clients() {
     let registry = TestRegistry::start(50);
     registry.registry.entries.lock().unwrap().clear();
-    let clients = fetch(&registry.config).await.unwrap();
+    let clients = fetch(&registry.config, &SystemClock).await.unwrap();
     assert_eq!(clients.len(), 0);
     assert_eq!(registry.pages(), ["0"], "one request, then stop");
     registry.stop();
@@ -338,7 +362,10 @@ async fn authentication_failures_stop_the_synchronisation() {
         SigningKey::generate_pem().unwrap(),
     )
     .unwrap();
-    let error = format!("{:#}", fetch(&registry.config).await.unwrap_err());
+    let error = format!(
+        "{:#}",
+        fetch(&registry.config, &SystemClock).await.unwrap_err()
+    );
     assert!(
         error.contains("token endpoint") && error.contains("401"),
         "{error}"
@@ -354,23 +381,23 @@ async fn authentication_failures_stop_the_synchronisation() {
     let registry = TestRegistry::start(3);
     let mut config = registry.config.clone();
     config.signing_key_id = "some-other-kid".to_owned();
-    assert!(fetch(&config).await.is_err());
+    assert!(fetch(&config, &SystemClock).await.is_err());
 
     // The wrong scope.
     let mut config = registry.config.clone();
     config.scope = "something:else".to_owned();
-    let error = format!("{:#}", fetch(&config).await.unwrap_err());
+    let error = format!("{:#}", fetch(&config, &SystemClock).await.unwrap_err());
     assert!(error.contains("400"), "{error}");
 
     // A registry whose certificate is not trusted.
     let mut config = registry.config.clone();
     config.ca = None;
-    assert!(fetch(&config).await.is_err());
+    assert!(fetch(&config, &SystemClock).await.is_err());
 
     // Missing key material.
     let mut config = registry.config.clone();
     config.transport_key = registry.dir.join("nowhere.key");
-    let error = format!("{:#}", fetch(&config).await.unwrap_err());
+    let error = format!("{:#}", fetch(&config, &SystemClock).await.unwrap_err());
     assert!(error.contains("nowhere.key"), "{error}");
     registry.stop();
 }
@@ -381,15 +408,18 @@ async fn provider_starts_with_configured_and_synchronised_clients() {
     let sync = registry.config.clone();
     let op = TestOp::start_with(move |config| config.client_sync = Some(sync)).await;
 
-    let clients = &op.state().clients;
+    let server = op.server();
     for id in ["rp-one", "rp-two", "rp-three", "rp-four"] {
-        assert!(clients.get(id).is_some(), "{id}");
+        assert!(server.client_name(id).is_some(), "{id}");
     }
     for id in ["rp-inactive", "rp-no-keys", "rp-bad"] {
-        assert!(clients.get(id).is_none(), "{id}");
+        assert!(server.client_name(id).is_none(), "{id}");
     }
     // The registry also lists `test-rp`; the configured definition wins.
-    assert_eq!(clients.get("test-rp").unwrap().name, "Integration Test RP");
+    assert_eq!(
+        server.client_name("test-rp").unwrap(),
+        "Integration Test RP"
+    );
 
     // The configured client still works end to end.
     let tokens = op.tokens(&json!({})).await;
@@ -406,7 +436,7 @@ async fn synchronisation_is_off_unless_enabled_and_failure_prevents_startup() {
     let mut disabled = registry.config.clone();
     disabled.enabled = false;
     let op = TestOp::start_with(move |config| config.client_sync = Some(disabled)).await;
-    assert!(op.state().clients.get("rp-one").is_none());
+    assert!(op.server().client_name("rp-one").is_none());
     assert_eq!(*registry.registry.token_requests.lock().unwrap(), 0);
     op.stop().await;
 

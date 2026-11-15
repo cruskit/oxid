@@ -24,7 +24,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use jsonwebtoken::jwk::JwkSet;
@@ -33,11 +33,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use url::Url;
 
-use crate::client::{Client, GRANT_AUTHORIZATION_CODE, GRANT_REFRESH_TOKEN, Profile};
+use crate::epoch::{Seconds, Timestamp};
+use crate::client::{Client, GrantType, Profile, Registration};
 use crate::client_auth::ASSERTION_TYPE;
-use crate::config::ClientConfig;
 use crate::keys::SigningKey;
-use crate::util::random_token;
+use crate::util::{Clock, random_token};
 
 /// Time allowed for each request to the registry.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -130,9 +130,38 @@ impl ClientSyncConfig {
     }
 }
 
+/// A [`ClientSyncConfig`] that passed [`ClientSyncConfig::validate`]. Only
+/// this is accepted by [`fetch`], so the checks happen once.
+#[derive(Debug, Clone)]
+#[cfg_attr(
+    not(feature = "test-util"),
+    expect(unreachable_pub, reason = "the integration tests use it")
+)]
+pub struct ClientSync(ClientSyncConfig);
+
+impl TryFrom<ClientSyncConfig> for ClientSync {
+    type Error = anyhow::Error;
+
+    fn try_from(config: ClientSyncConfig) -> Result<Self> {
+        config.validate()?;
+        Ok(Self(config))
+    }
+}
+
+impl std::ops::Deref for ClientSync {
+    type Target = ClientSyncConfig;
+
+    fn deref(&self) -> &ClientSyncConfig {
+        &self.0
+    }
+}
+
 /// Fetch every client from the registry.
-pub async fn fetch(config: &ClientSyncConfig) -> Result<Vec<Client>> {
-    config.validate()?;
+#[cfg_attr(
+    not(feature = "test-util"),
+    expect(unreachable_pub, reason = "the integration tests use it")
+)]
+pub async fn fetch(config: &ClientSync, clock: &dyn Clock) -> Result<Vec<Client>> {
     let signing_key = SigningKey::from_pem_file(&config.signing_key)?;
     let mtls = http_client(config, true)?;
     let plain = http_client(config, false)?;
@@ -140,7 +169,7 @@ pub async fn fetch(config: &ClientSyncConfig) -> Result<Vec<Client>> {
     let (token_endpoint, audience) = token_endpoint(config, &mtls).await?;
     tracing::info!(%token_endpoint, clients_url = %config.clients_url, "synchronising clients from the registry");
     let access_token =
-        access_token(config, &mtls, &signing_key, &token_endpoint, &audience).await?;
+        access_token(config, &mtls, &signing_key, &token_endpoint, &audience, clock.now()).await?;
     let entries = all_pages(config, &mtls, &access_token).await?;
     let found = entries.len();
 
@@ -197,10 +226,12 @@ async fn token_endpoint(
     let mut issuer = None;
     if let Some(url) = &config.discovery_url {
         let metadata: Value = get_json(http.get(url), "registry metadata").await?;
-        issuer = metadata["issuer"].as_str().map(str::to_owned);
+        let metadata: RegistryMetadata =
+            serde_json::from_value(metadata).context("the registry metadata is malformed")?;
         if endpoint.is_none() {
-            endpoint = discovered_token_endpoint(&metadata);
+            endpoint = metadata.token_endpoint();
         }
+        issuer = metadata.issuer;
     }
     let endpoint =
         endpoint.ok_or_else(|| anyhow!("the registry metadata has no token endpoint"))?;
@@ -216,20 +247,42 @@ async fn token_endpoint(
     Ok((endpoint, audience))
 }
 
-/// RFC 8705 §5: prefer the mutual TLS alias of the token endpoint.
-fn discovered_token_endpoint(metadata: &Value) -> Option<String> {
-    metadata["mtls_endpoint_aliases"]["token_endpoint"]
-        .as_str()
-        .or_else(|| metadata["token_endpoint"].as_str())
-        .map(str::to_owned)
+/// What oxID reads from the registry's metadata (RFC 8414).
+#[derive(Debug, Deserialize)]
+struct RegistryMetadata {
+    issuer: Option<String>,
+    token_endpoint: Option<String>,
+    mtls_endpoint_aliases: Option<MtlsAliases>,
 }
 
-fn now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
-        .unwrap_or_default()
+#[derive(Debug, Deserialize)]
+struct MtlsAliases {
+    token_endpoint: Option<String>,
+}
+
+impl RegistryMetadata {
+    /// RFC 8705 §5: prefer the mutual TLS alias of the token endpoint.
+    fn token_endpoint(&self) -> Option<String> {
+        self.mtls_endpoint_aliases
+            .as_ref()
+            .and_then(|aliases| aliases.token_endpoint.clone())
+            .or_else(|| self.token_endpoint.clone())
+    }
+}
+
+/// The token endpoint the registry's metadata names, preferring the mTLS
+/// alias.
+#[cfg(test)]
+fn discovered_token_endpoint(metadata: &Value) -> Option<String> {
+    serde_json::from_value::<RegistryMetadata>(metadata.clone())
+        .ok()?
+        .token_endpoint()
+}
+
+/// The part of the registry's token response oxID uses.
+#[derive(Deserialize)]
+struct TokenBody {
+    access_token: String,
 }
 
 /// The `private_key_jwt` assertion that authenticates this provider.
@@ -237,7 +290,7 @@ fn client_assertion(
     config: &ClientSyncConfig,
     signing_key: &SigningKey,
     audience: &str,
-    now: i64,
+    now: Timestamp,
 ) -> Result<String> {
     signing_key
         .sign_with_kid(
@@ -250,7 +303,7 @@ fn client_assertion(
                 "jti": random_token(16),
                 "iat": now,
                 "nbf": now,
-                "exp": now + 60,
+                "exp": now + Seconds::minutes(1),
             }),
         )
         .map_err(|error| anyhow!("signing the client assertion: {error}"))
@@ -262,8 +315,9 @@ async fn access_token(
     signing_key: &SigningKey,
     token_endpoint: &str,
     audience: &str,
+    now: Timestamp,
 ) -> Result<String> {
-    let assertion = client_assertion(config, signing_key, audience, now())?;
+    let assertion = client_assertion(config, signing_key, audience, now)?;
     let request = http.post(token_endpoint).form(&[
         ("grant_type", "client_credentials"),
         ("scope", config.scope.as_str()),
@@ -271,12 +325,14 @@ async fn access_token(
         ("client_assertion_type", ASSERTION_TYPE),
         ("client_assertion", assertion.as_str()),
     ]);
-    let body: Value = get_json(request, "registry token endpoint").await?;
-    body["access_token"]
-        .as_str()
-        .filter(|token| !token.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| anyhow!("the registry token response has no access_token"))
+    let body = get_json(request, "registry token endpoint").await?;
+    let body: TokenBody = serde_json::from_value(body)
+        .context("the registry token response has no access_token")?;
+    ensure!(
+        !body.access_token.is_empty(),
+        "the registry token response has an empty access_token"
+    );
+    Ok(body.access_token)
 }
 
 /// Send a request and parse a JSON body, turning a failure status into an
@@ -316,31 +372,37 @@ struct ClientsPage {
 impl ClientsPage {
     /// Read a response to a request for page `requested` (zero-indexed).
     fn parse(body: &Value, requested: u32) -> Result<Self> {
-        let entries = body["content"]
-            .as_array()
-            .ok_or_else(|| anyhow!("the clients response has no content list"))?
-            .clone();
-        let total_pages = body["totalPages"]
-            .as_u64()
-            .ok_or_else(|| anyhow!("the clients response has no totalPages"))?;
+        /// The page as the registry sends it. Entries stay JSON here and are
+        /// read one by one, so that one bad entry costs only itself.
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Body {
+            content: Vec<Value>,
+            total_pages: u64,
+            page_number: Option<u64>,
+            empty: Option<bool>,
+            total_size: Option<u64>,
+        }
+        let body: Body = serde_json::from_value(body.clone())
+            .context("the clients response is not a page of clients")?;
         // If the registry says which page this is, it must be the one asked
         // for; otherwise pages could be skipped or read twice unnoticed.
-        if let Some(number) = body["pageNumber"].as_u64() {
+        if let Some(number) = body.page_number {
             ensure!(
                 number == u64::from(requested),
                 "asked the registry for page {requested} of clients but received page {number}"
             );
         }
-        if body["empty"].as_bool() == Some(true) {
+        if body.empty == Some(true) {
             ensure!(
-                entries.is_empty(),
+                body.content.is_empty(),
                 "the clients response says it is empty but has content"
             );
         }
         Ok(Self {
-            entries,
-            total_pages,
-            total_size: body["totalSize"].as_u64(),
+            entries: body.content,
+            total_pages: body.total_pages,
+            total_size: body.total_size,
         })
     }
 
@@ -404,59 +466,98 @@ struct RegistryClient {
     redirect_uris: Vec<String>,
     jwks_uri: Option<String>,
     jwks: Option<JwkSet>,
-    grant_types: Vec<String>,
+    grant_types: Vec<GrantType>,
     scopes: Vec<String>,
     claims: Vec<String>,
     sector_identifier: Option<String>,
 }
 
-fn strings(value: &Value) -> Vec<String> {
-    value
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(str::to_owned)
-        .collect()
+/// A registry entry (`ClientRegistration`, ConnectID Client Registration
+/// §7.1) as received: only the members oxID uses, every one optional so
+/// that what is missing is decided below rather than by the parser.
+#[derive(Debug, Deserialize)]
+struct RegistryEntry {
+    client_id: Option<String>,
+    software_id: Option<String>,
+    client_name: Option<String>,
+    status: Option<String>,
+    org_status: Option<String>,
+    #[serde(default, deserialize_with = "lenient_strings")]
+    redirect_uris: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "lenient_strings")]
+    grant_types: Option<Vec<String>>,
+    scope: Option<String>,
+    #[serde(default, deserialize_with = "lenient_strings")]
+    claims: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "lenient_strings")]
+    claims_in_verified_claims: Option<Vec<String>>,
+    sector_identifier_uri: Option<String>,
+    jwks_uri: Option<String>,
+    jwks: Option<JwkSet>,
+}
+
+/// A list of strings in which members that are not strings are left out,
+/// so that one stray member does not cost a client its registration.
+fn lenient_strings<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let values = Option::<Vec<Value>>::deserialize(deserializer)?;
+    Ok(values.map(|values| {
+        values
+            .into_iter()
+            .filter_map(|value| value.as_str().map(str::to_owned))
+            .collect()
+    }))
 }
 
 /// Whether a status member says the client or its organisation is active.
 /// The registry's values are `Active`, `Suspended` and `Inactive`; only the
 /// first is registered. A missing status is taken as active.
-fn is_active(value: &Value) -> bool {
-    value
-        .as_str()
-        .is_none_or(|status| status.eq_ignore_ascii_case("active"))
+fn is_active(status: Option<&str>) -> bool {
+    status.is_none_or(|status| status.eq_ignore_ascii_case("active"))
 }
 
 impl RegistryClient {
+    /// The id of an entry, for log lines about one that could not be read.
+    fn id_of(entry: &Value) -> &str {
+        entry
+            .get("client_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+    }
+
     /// Read a registry entry. `Ok(None)` means the entry is valid but not
     /// to be registered (it is inactive).
     fn parse(entry: &Value, profile: Profile) -> Result<Option<Self>> {
-        let client_id = entry["client_id"]
-            .as_str()
-            .or_else(|| entry["software_id"].as_str())
+        let entry: RegistryEntry =
+            serde_json::from_value(entry.clone()).context("the entry is malformed")?;
+        let client_id = entry
+            .client_id
+            .or(entry.software_id)
             .filter(|id| !id.trim().is_empty())
-            .ok_or_else(|| anyhow!("entry has no client_id"))?
-            .to_owned();
-        if !is_active(&entry["status"]) || !is_active(&entry["org_status"]) {
+            .ok_or_else(|| anyhow!("entry has no client_id"))?;
+        if !is_active(entry.status.as_deref()) || !is_active(entry.org_status.as_deref()) {
             return Ok(None);
         }
 
-        let redirect_uris = strings(&entry["redirect_uris"]);
+        let redirect_uris = entry.redirect_uris.unwrap_or_default();
         ensure!(!redirect_uris.is_empty(), "no redirect_uris");
 
         // Only the grants this provider implements are kept.
-        let mut grant_types: Vec<String> = strings(&entry["grant_types"])
-            .into_iter()
-            .filter(|grant| grant == GRANT_AUTHORIZATION_CODE || grant == GRANT_REFRESH_TOKEN)
+        let mut grant_types: Vec<GrantType> = entry
+            .grant_types
+            .iter()
+            .flatten()
+            .filter_map(|grant| grant.parse().ok())
             .collect();
-        if !grant_types.iter().any(|g| g == GRANT_AUTHORIZATION_CODE) {
-            grant_types.insert(0, GRANT_AUTHORIZATION_CODE.to_owned());
+        if !grant_types.contains(&GrantType::AuthorizationCode) {
+            grant_types.insert(0, GrantType::AuthorizationCode);
         }
 
-        let mut scopes: Vec<String> = entry["scope"]
-            .as_str()
+        let mut scopes: Vec<String> = entry
+            .scope
+            .as_deref()
             .unwrap_or("openid")
             .split_whitespace()
             .map(str::to_owned)
@@ -468,38 +569,34 @@ impl RegistryClient {
         // `claims` and `claims_in_verified_claims` together are what the
         // client is accredited for. Names this provider does not know are
         // dropped: they could never be released anyway.
-        let mut claims: Vec<String> = strings(&entry["claims"])
+        let mut claims: Vec<String> = entry
+            .claims
             .into_iter()
-            .chain(strings(&entry["claims_in_verified_claims"]))
+            .flatten()
+            .chain(entry.claims_in_verified_claims.into_iter().flatten())
             .filter(|name| crate::claims::profile_allows(profile, name))
             .collect();
         claims.sort();
         claims.dedup();
 
         // The sector identifier is the host of sector_identifier_uri.
-        let sector_identifier = entry["sector_identifier_uri"]
-            .as_str()
+        let sector_identifier = entry
+            .sector_identifier_uri
+            .as_deref()
             .and_then(|uri| Url::parse(uri).ok())
             .and_then(|url| url.host_str().map(str::to_owned));
 
-        let jwks = match entry.get("jwks") {
-            Some(value) if !value.is_null() => {
-                Some(serde_json::from_value::<JwkSet>(value.clone()).context("jwks is malformed")?)
-            }
-            _ => None,
-        };
-        let jwks_uri = entry["jwks_uri"].as_str().map(str::to_owned);
         ensure!(
-            jwks.is_some() || jwks_uri.is_some(),
+            entry.jwks.is_some() || entry.jwks_uri.is_some(),
             "neither jwks_uri nor jwks"
         );
 
         Ok(Some(Self {
             client_id,
-            client_name: entry["client_name"].as_str().map(str::to_owned),
+            client_name: entry.client_name,
             redirect_uris,
-            jwks_uri,
-            jwks,
+            jwks_uri: entry.jwks_uri,
+            jwks: entry.jwks,
             grant_types,
             scopes,
             claims,
@@ -508,12 +605,11 @@ impl RegistryClient {
     }
 
     fn into_client(self, jwks: JwkSet, profile: Profile) -> Result<Client> {
-        Client::from_config(&ClientConfig {
-            client_id: self.client_id,
-            client_name: self.client_name,
+        Client::new(Registration {
+            id: self.client_id,
+            name: self.client_name,
             redirect_uris: self.redirect_uris,
-            jwks_file: None,
-            jwks: Some(jwks),
+            jwks,
             scopes: self.scopes,
             grant_types: self.grant_types,
             sector_identifier: self.sector_identifier,
@@ -546,14 +642,14 @@ async fn build_clients(
             Ok(Some(parsed)) => parsed,
             Ok(None) => {
                 tracing::debug!(
-                    client_id = entry["client_id"].as_str().unwrap_or_default(),
+                    client_id = RegistryClient::id_of(&entry),
                     "skipping an inactive client"
                 );
                 continue;
             }
             Err(error) => {
                 tracing::warn!(
-                    client_id = entry["client_id"].as_str().unwrap_or_default(),
+                    client_id = RegistryClient::id_of(&entry),
                     %error,
                     "skipping a client from the registry"
                 );
@@ -600,371 +696,4 @@ async fn build_clients(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::jose::{Jws, SigningAlg};
-    use crate::keys::test_support::shared_key;
-
-    fn config() -> ClientSyncConfig {
-        toml::from_str(
-            r#"
-            enabled = true
-            discovery_url = "https://auth.registry.example/.well-known/openid-configuration"
-            clients_url = "https://matls-api.registry.example/clients"
-            client_id = "oxid-idp"
-            transport_cert = "transport.pem"
-            transport_key = "transport.key"
-            signing_key = "signing.key"
-            signing_key_id = "registry-kid-1"
-            "#,
-        )
-        .unwrap()
-    }
-
-    fn entry() -> Value {
-        json!({
-            "client_id": "26c2183c-5e9c-4a63-bc65-164d8e316719",
-            "software_id": "26c2183c-5e9c-4a63-bc65-164d8e316719",
-            "client_name": "Great Accounting App",
-            "redirect_uris": ["https://my.accountingapp.com/cb"],
-            "token_endpoint_auth_method": "private_key_jwt",
-            "grant_types": ["authorization_code"],
-            "response_types": ["code"],
-            "scope": "openid",
-            "jwks_uri": "https://keystore.registry.example/org/app/application.jwks",
-            "sector_identifier_uri": "https://sector.accountingapp.com/redirect_uris.json",
-            "subject_type": "pairwise",
-            "claims": ["given_name", "family_name", "address"],
-            "claims_in_verified_claims": ["over18", "over21"],
-            "status": "Active",
-            "org_status": "Active",
-            "org_name": "Test Org",
-        })
-    }
-
-    #[test]
-    fn config_has_defaults_and_is_validated() {
-        type Edit = fn(&mut ClientSyncConfig);
-        let defaults = config();
-        defaults.validate().unwrap();
-        assert_eq!(defaults.scope, "directory:software");
-        assert_eq!(defaults.page_size, 50);
-        assert_eq!(defaults.profile, Profile::Connectid);
-        assert!(defaults.ca.is_none());
-
-        let bad: [(&str, Edit); 7] = [
-            ("no way to find the token endpoint", |c| {
-                c.discovery_url = None;
-            }),
-            ("plain http discovery", |c| {
-                c.discovery_url = Some("http://registry.example/meta".into());
-            }),
-            ("plain http clients", |c| {
-                c.clients_url = "http://registry.example/clients".into();
-            }),
-            ("plain http token endpoint", |c| {
-                c.token_endpoint = Some("http://registry.example/token".into());
-            }),
-            ("empty client id", |c| c.client_id = " ".into()),
-            ("empty key id", |c| c.signing_key_id = String::new()),
-            ("zero page size", |c| c.page_size = 0),
-        ];
-        for (name, edit) in bad {
-            let mut config = config();
-            edit(&mut config);
-            assert!(config.validate().is_err(), "{name}");
-        }
-
-        let mut explicit = config();
-        explicit.discovery_url = None;
-        explicit.token_endpoint = Some("https://matls-auth.registry.example/token".into());
-        explicit.validate().unwrap();
-
-        assert!(
-            toml::from_str::<ClientSyncConfig>("enabled = true\nclient_secret = \"x\"").is_err(),
-            "unknown fields are refused"
-        );
-    }
-
-    #[test]
-    fn token_endpoint_prefers_the_mtls_alias() {
-        let metadata = json!({
-            "issuer": "https://auth.registry.example",
-            "token_endpoint": "https://auth.registry.example/token",
-            "mtls_endpoint_aliases": {"token_endpoint": "https://matls-auth.registry.example/token"},
-        });
-        assert_eq!(
-            discovered_token_endpoint(&metadata).unwrap(),
-            "https://matls-auth.registry.example/token"
-        );
-        let plain = json!({"token_endpoint": "https://auth.registry.example/token"});
-        assert_eq!(
-            discovered_token_endpoint(&plain).unwrap(),
-            "https://auth.registry.example/token"
-        );
-        assert!(discovered_token_endpoint(&json!({})).is_none());
-    }
-
-    #[test]
-    fn client_assertion_is_a_private_key_jwt_with_the_registry_kid() {
-        let config = config();
-        let assertion =
-            client_assertion(&config, shared_key(), "https://auth.registry.example", 1000).unwrap();
-        let jws = Jws::parse(&assertion, &[SigningAlg::PS256]).unwrap();
-        assert_eq!(jws.kid.as_deref(), Some("registry-kid-1"));
-        assert_eq!(jws.str_claim("iss"), Some("oxid-idp"));
-        assert_eq!(jws.str_claim("sub"), Some("oxid-idp"));
-        assert_eq!(jws.str_claim("aud"), Some("https://auth.registry.example"));
-        assert_eq!(jws.time_claim("iat"), Some(1000));
-        assert_eq!(jws.time_claim("exp"), Some(1060));
-        assert!(jws.str_claim("jti").is_some_and(|jti| jti.len() >= 16));
-
-        // The signature is by the configured key, whatever kid is claimed.
-        let mut jwks = shared_key().jwks();
-        jwks.keys[0].common.key_id = Some("registry-kid-1".to_owned());
-        jws.verify(&jwks).unwrap();
-
-        let again =
-            client_assertion(&config, shared_key(), "https://auth.registry.example", 1000).unwrap();
-        let other = Jws::parse(&again, &[SigningAlg::PS256]).unwrap();
-        assert_ne!(
-            jws.str_claim("jti"),
-            other.str_claim("jti"),
-            "jti is unique"
-        );
-    }
-
-    /// A response shaped like the registry's `RegisteredClientsResponse`.
-    fn response(clients: usize, page: u64, size: u64, total: u64) -> Value {
-        json!({
-            "content": vec![json!({}); clients],
-            "totalPages": total.div_ceil(size),
-            "totalSize": total,
-            "pageable": {"number": page, "size": size, "offset": page * size},
-            "size": size,
-            "offset": page * size,
-            "empty": clients == 0,
-            "pageNumber": page,
-        })
-    }
-
-    #[test]
-    fn pages_follow_the_registry_pagination_properties() {
-        // 120 clients at 50 a page: pages 0 and 1 are full, page 2 has 20.
-        let first = ClientsPage::parse(&response(50, 0, 50, 120), 0).unwrap();
-        assert_eq!(first.entries.len(), 50);
-        assert_eq!(first.total_pages, 3);
-        assert_eq!(first.total_size, Some(120));
-        assert!(first.has_next(0));
-        let second = ClientsPage::parse(&response(50, 1, 50, 120), 1).unwrap();
-        assert!(second.has_next(1));
-        let last = ClientsPage::parse(&response(20, 2, 50, 120), 2).unwrap();
-        assert_eq!(last.entries.len(), 20);
-        assert!(!last.has_next(2));
-
-        // A full last page is still the last page: totalPages decides, not
-        // how many results came back.
-        let exact = ClientsPage::parse(&response(50, 1, 50, 100), 1).unwrap();
-        assert!(!exact.has_next(1));
-
-        // No clients at all.
-        let none = ClientsPage::parse(&response(0, 0, 50, 0), 0).unwrap();
-        assert_eq!(none.entries.len(), 0);
-        assert_eq!(none.total_pages, 0);
-        assert!(!none.has_next(0));
-    }
-
-    #[test]
-    fn optional_pagination_properties_may_be_absent() {
-        let minimal = json!({"content": [{}, {}], "totalPages": 2});
-        let page = ClientsPage::parse(&minimal, 0).unwrap();
-        assert_eq!(page.entries.len(), 2);
-        assert_eq!(page.total_size, None);
-        assert!(page.has_next(0));
-        assert!(!ClientsPage::parse(&minimal, 1).unwrap().has_next(1));
-    }
-
-    #[test]
-    fn malformed_or_inconsistent_pages_are_errors() {
-        for (name, body) in [
-            (
-                "an error body",
-                json!({"errors": ["endDate format is invalid"]}),
-            ),
-            ("a bare list", json!([{}, {}])),
-            (
-                "content that is not a list",
-                json!({"content": "x", "totalPages": 1}),
-            ),
-            ("no totalPages", json!({"content": [{}]})),
-            ("a text body", json!("clients")),
-            (
-                "content on a page marked empty",
-                json!({"content": [{}], "totalPages": 1, "empty": true}),
-            ),
-        ] {
-            assert!(ClientsPage::parse(&body, 0).is_err(), "{name}");
-        }
-        // The registry answering with a different page than was asked for.
-        let error = ClientsPage::parse(&response(50, 0, 50, 120), 1).unwrap_err();
-        assert!(error.to_string().contains("page 1"), "{error}");
-    }
-
-    #[test]
-    fn registry_entry_becomes_a_client() {
-        let parsed = RegistryClient::parse(&entry(), Profile::Connectid)
-            .unwrap()
-            .unwrap();
-        assert_eq!(parsed.client_id, "26c2183c-5e9c-4a63-bc65-164d8e316719");
-        assert_eq!(
-            parsed.sector_identifier.as_deref(),
-            Some("sector.accountingapp.com")
-        );
-        assert_eq!(
-            parsed.claims,
-            ["address", "family_name", "given_name", "over18", "over21"]
-        );
-
-        let client = parsed
-            .into_client(shared_key().jwks(), Profile::Connectid)
-            .unwrap();
-        assert_eq!(client.name, "Great Accounting App");
-        assert!(client.has_redirect_uri("https://my.accountingapp.com/cb"));
-        assert_eq!(client.sector_identifier, "sector.accountingapp.com");
-        assert!(client.allows_claim("given_name") && client.allows_claim("over18"));
-        assert!(!client.allows_claim("email"), "not accredited for email");
-        assert!(!client.allows_claim("over65"));
-        assert!(!client.allows_refresh_tokens());
-        assert_eq!(client.profile, Profile::Connectid);
-    }
-
-    #[test]
-    fn registry_entries_are_normalised() {
-        let mut odd = entry();
-        odd["grant_types"] = json!(["refresh_token", "client_credentials", "implicit"]);
-        odd["scope"] = json!("profile  payments");
-        odd["claims"] = json!(["given_name", "nickname", "made_up", 7]);
-        odd["claims_in_verified_claims"] = json!(["over18", "place_of_birth"]);
-        odd.as_object_mut().unwrap().remove("sector_identifier_uri");
-        odd.as_object_mut().unwrap().remove("client_id");
-        let parsed = RegistryClient::parse(&odd, Profile::Connectid)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            parsed.client_id, "26c2183c-5e9c-4a63-bc65-164d8e316719",
-            "software_id"
-        );
-        assert_eq!(parsed.grant_types, ["authorization_code", "refresh_token"]);
-        assert_eq!(parsed.scopes, ["openid", "profile", "payments"]);
-        assert_eq!(
-            parsed.claims,
-            ["given_name", "over18"],
-            "unknown names are dropped"
-        );
-        assert!(parsed.sector_identifier.is_none());
-        // Without a sector identifier URI it is derived from the redirect host.
-        let client = parsed
-            .into_client(shared_key().jwks(), Profile::Connectid)
-            .unwrap();
-        assert_eq!(client.sector_identifier, "my.accountingapp.com");
-        assert!(client.allows_refresh_tokens());
-
-        // No claims at all means nothing is released, not everything.
-        let mut none = entry();
-        none.as_object_mut().unwrap().remove("claims");
-        none.as_object_mut()
-            .unwrap()
-            .remove("claims_in_verified_claims");
-        let client = RegistryClient::parse(&none, Profile::Connectid)
-            .unwrap()
-            .unwrap()
-            .into_client(shared_key().jwks(), Profile::Connectid)
-            .unwrap();
-        assert!(!client.allows_claim("given_name"));
-    }
-
-    #[test]
-    fn inactive_clients_are_not_registered() {
-        for (member, status) in [
-            ("status", "Inactive"),
-            ("status", "Suspended"),
-            ("org_status", "Withdrawn"),
-        ] {
-            let mut inactive = entry();
-            inactive[member] = json!(status);
-            assert!(
-                RegistryClient::parse(&inactive, Profile::Connectid)
-                    .unwrap()
-                    .is_none(),
-                "{member}={status}"
-            );
-        }
-        let mut lower = entry();
-        lower["status"] = json!("active");
-        assert!(
-            RegistryClient::parse(&lower, Profile::Connectid)
-                .unwrap()
-                .is_some()
-        );
-        let mut missing = entry();
-        missing.as_object_mut().unwrap().remove("status");
-        assert!(
-            RegistryClient::parse(&missing, Profile::Connectid)
-                .unwrap()
-                .is_some()
-        );
-    }
-
-    #[test]
-    fn unusable_entries_are_errors() {
-        type Edit = fn(&mut Value);
-        let cases: [(&str, Edit); 5] = [
-            ("no id", |e| {
-                e.as_object_mut().unwrap().remove("client_id");
-                e.as_object_mut().unwrap().remove("software_id");
-            }),
-            ("no redirect uris", |e| e["redirect_uris"] = json!([])),
-            ("no keys", |e| {
-                e.as_object_mut().unwrap().remove("jwks_uri");
-            }),
-            ("malformed inline keys", |e| {
-                e["jwks"] = json!({"keys": "x"});
-            }),
-            ("blank id", |e| e["client_id"] = json!("  ")),
-        ];
-        for (name, edit) in cases {
-            let mut bad = entry();
-            edit(&mut bad);
-            if name == "blank id" {
-                bad.as_object_mut().unwrap().remove("software_id");
-            }
-            assert!(
-                RegistryClient::parse(&bad, Profile::Connectid).is_err(),
-                "{name}"
-            );
-        }
-
-        // A client that parses but cannot be registered (insecure redirect).
-        let mut insecure = entry();
-        insecure["redirect_uris"] = json!(["http://my.accountingapp.com/cb"]);
-        let parsed = RegistryClient::parse(&insecure, Profile::Connectid)
-            .unwrap()
-            .unwrap();
-        assert!(
-            parsed
-                .into_client(shared_key().jwks(), Profile::Connectid)
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn inline_keys_are_accepted_in_place_of_a_jwks_uri() {
-        let mut inline = entry();
-        inline.as_object_mut().unwrap().remove("jwks_uri");
-        inline["jwks"] = serde_json::to_value(shared_key().jwks()).unwrap();
-        let parsed = RegistryClient::parse(&inline, Profile::Connectid)
-            .unwrap()
-            .unwrap();
-        assert!(parsed.jwks.is_some() && parsed.jwks_uri.is_none());
-    }
-}
+mod tests;

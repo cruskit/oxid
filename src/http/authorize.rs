@@ -25,185 +25,79 @@ use askama::Template;
 use axum::body::Bytes;
 use axum::extract::{RawQuery, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use url::Url;
 use uuid::Uuid;
 
+use super::page::{CSRF_COOKIE, Shell, csrf_cookie, error_page, is_csrf_token};
+use crate::epoch::{Seconds, Timestamp};
+use crate::cookie::{self, SetCookie};
 use super::{Params, no_store};
 use crate::client::Client;
-use crate::error::ErrorCode;
+use crate::error::{ErrorCode, Report};
 use crate::experience::{
-    Approval, Decision, FormTarget, Interaction, Page, Step, cookie, duration_text, render,
+    Approval, Decision, FormTarget, Interaction, Page, StepResult, duration_text, render,
 };
 use crate::state::AppState;
 use crate::store::{
-    AuthorizationCode, ConsentOutcome, ConsentRecord, Grant, PushedRequest, StoreError,
-    StoreResult, Visit,
+    AuthorizationCode, ConsentOutcome, ConsentRecord, Grant, PushedRequest, StoreError, Visit,
 };
-use crate::theme::Theme;
 use crate::util::{ct_eq, random_token};
 
-/// Double-submit CSRF cookie. The `__Host-` prefix pins it to this origin,
-/// `Secure` and path `/` (RFC 6265bis §4.1.3.2).
-const CSRF_COOKIE: &str = "__Host-oxid-csrf";
-
-/// Content security policy for every page, before `form-action`, `img-src`
-/// and `script-src` are added by [`content_security_policy`].
-const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; style-src 'unsafe-inline'; \
-     frame-ancestors 'none'; base-uri 'none'";
-
-/// The policy for one page.
-///
-/// Forms post to this origin only. But the final post of an interaction is
-/// answered with a redirect to the client's redirect URI, and browsers apply
-/// `form-action` to that redirect as well (CSP3 §6.3.1; Chromium enforces
-/// it). A page of an interaction therefore also names the origin of the
-/// redirect URI of the request being decided, `redirect_to`, or the browser
-/// blocks the authorization response. That URI is an exact match for one
-/// the client registered, checked when the request was pushed.
-///
-/// A page loads nothing but the theme's logo, if the theme has one
-/// (`logo`), and that comes from this origin.
-fn content_security_policy(
-    redirect_to: Option<&str>,
-    nonce: Option<&str>,
-    logo: bool,
-) -> HeaderValue {
-    let mut policy = format!("{CONTENT_SECURITY_POLICY}; form-action 'self'");
-    let origin = redirect_to
-        .and_then(|uri| Url::parse(uri).ok())
-        .map(|uri| uri.origin())
-        .filter(url::Origin::is_tuple)
-        .map(|origin| origin.ascii_serialization());
-    if let Some(origin) = origin {
-        policy.push(' ');
-        policy.push_str(&origin);
-    }
-    if logo {
-        policy.push_str("; img-src 'self'");
-    }
-    if let Some(nonce) = nonce {
-        policy.push_str("; script-src 'nonce-");
-        policy.push_str(nonce);
-        policy.push('\'');
-    }
-    HeaderValue::from_str(&policy).unwrap_or_else(|_| {
-        HeaderValue::from_static(
-            "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
-        )
-    })
+/// Why the endpoint answers with its own error page rather than going on.
+#[derive(Debug, thiserror::Error)]
+enum AuthorizeError {
+    /// The request cannot be used, and cannot safely be tied to a redirect
+    /// URI, so the user is told why instead (FAPI 2.0 §5.3.2.1-7).
+    #[error("{message}")]
+    Rejected {
+        status: StatusCode,
+        message: &'static str,
+    },
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error("a page could not be rendered")]
+    Render(#[from] askama::Error),
+    /// Something the provider itself holds is unusable.
+    #[error("{0}")]
+    Internal(&'static str),
 }
 
-/// Styles shared by every page: the base, and the card that pages for end
-/// users sit in. They are written in terms of the theme's colours.
-const STYLE: &str = include_str!("../../templates/shell.css");
-
-/// The page shell, `templates/shell.html`: the document around a page's
-/// content, carrying the theme.
-#[derive(Template)]
-#[template(path = "shell.html")]
-struct ShellTemplate<'a> {
-    theme: &'a Theme,
-    title: &'a str,
-    /// The page's content, already rendered from its own template.
-    body: &'a str,
-    base_style: &'static str,
-    /// Extra CSS, after the shared styles.
-    style: &'a str,
-    wide: bool,
-    /// The nonce the scripts run under.
-    nonce: &'a str,
-    scripts: Vec<&'a str>,
-}
-
-/// One HTML page.
-struct Shell<'a> {
-    status: StatusCode,
-    title: &'a str,
-    body: &'a str,
-    /// Extra CSS, after the shared styles.
-    style: &'a str,
-    script: Option<&'a str>,
-    /// Where a form on the page may end up redirecting to; see
-    /// [`content_security_policy`].
-    redirect_to: Option<&'a str>,
-    /// Replace the page with `url` after this many seconds.
-    refresh: Option<(i64, String)>,
-    wide: bool,
-}
-
-impl Shell<'_> {
-    fn render(&self, theme: &Theme) -> Response {
-        // A page's own script runs under a nonce; nothing else can. The nonce
-        // is unguessable, so markup injected into the page could not carry it.
-        let nonce = random_token(16);
-        // The reload is a script timer, not a `<meta>` refresh: scripted
-        // browsers, such as the conformance suite's, follow those at once.
-        let reload = self.refresh.as_ref().map(|(after, url)| {
-            let url = serde_json::Value::from(url.as_str())
-                .to_string()
-                .replace('<', "\\u003c");
-            format!("setTimeout(function(){{location.replace({url})}},{after}000);")
-        });
-        let scripts: Vec<&str> = [self.script, reload.as_deref()]
-            .into_iter()
-            .flatten()
-            .collect();
-        let policy = content_security_policy(
-            self.redirect_to,
-            (!scripts.is_empty()).then_some(nonce.as_str()),
-            theme.has_logo(),
-        );
-        let html = render(&ShellTemplate {
-            theme,
-            title: self.title,
-            body: self.body,
-            base_style: STYLE,
-            style: self.style,
-            wide: self.wide,
-            nonce: &nonce,
-            scripts,
-        });
-        let mut response = no_store((self.status, Html(html)).into_response());
-        response
-            .headers_mut()
-            .insert(header::CONTENT_SECURITY_POLICY, policy);
-        response
-    }
-}
-
-/// The page shown when the store cannot be reached. The detail is logged,
+/// What the user is told about an internal failure. The detail is logged,
 /// never shown.
-fn store_unavailable(state: &AppState, error: &StoreError) -> Response {
-    tracing::error!(%error, "authorization endpoint could not use the store");
-    error_page(
-        state,
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "The server could not complete the request. Please try again from the application.",
-    )
-}
+const INTERNAL_FAILURE: &str =
+    "The server could not complete the request. Please try again from the application.";
 
-/// The error page: `templates/error.html`.
-#[derive(Template)]
-#[template(path = "error.html")]
-struct ErrorTemplate<'a> {
-    message: &'a str,
-}
+/// The message for a `request_uri` that is not, or no longer, usable.
+const UNUSABLE_REQUEST_URI: &str =
+    "The request_uri is invalid, has expired, or has already been used.";
 
-/// An error shown to the user because it is not safe to redirect.
-fn error_page(state: &AppState, status: StatusCode, message: &str) -> Response {
-    tracing::info!(message, "authorization request rejected with an error page");
-    Shell {
-        status,
-        title: "Request error",
-        body: &render(&ErrorTemplate { message }),
-        style: "",
-        script: None,
-        redirect_to: None,
-        refresh: None,
-        wide: false,
+impl AuthorizeError {
+    fn bad_request(message: &'static str) -> Self {
+        Self::Rejected {
+            status: StatusCode::BAD_REQUEST,
+            message,
+        }
     }
-    .render(&state.theme)
+
+    /// The one place the endpoint logs a failure and shows it.
+    fn into_page(self, state: &AppState) -> Response {
+        match self {
+            Self::Rejected { status, message } => {
+                tracing::info!(message, "authorization request rejected with an error page");
+                error_page(state, status, message)
+            }
+            Self::Store(_) | Self::Render(_) | Self::Internal(_) => {
+                tracing::error!(error = %Report(&self), "authorization endpoint failed");
+                error_page(state, StatusCode::INTERNAL_SERVER_ERROR, INTERNAL_FAILURE)
+            }
+        }
+    }
+}
+
+/// The endpoint's response, whichever way it went.
+fn respond(state: &AppState, result: Result<Response, AuthorizeError>) -> Response {
+    result.unwrap_or_else(|error| error.into_page(state))
 }
 
 /// The `action` of the button on the session expiry page.
@@ -233,12 +127,12 @@ fn session_expired_page(
     request_uri: &str,
     pushed: &PushedRequest,
     csrf: &str,
-) -> Response {
+) -> Result<Response, AuthorizeError> {
     let body = render(&SessionExpiredTemplate {
         form: FormTarget::new(csrf, &client.id, request_uri),
         client_name: &client.name,
         limit: duration_text(state.security.session_ttl),
-    });
+    })?;
     let mut response = Shell {
         status: StatusCode::BAD_REQUEST,
         title: "Session expired",
@@ -249,9 +143,9 @@ fn session_expired_page(
         refresh: None,
         wide: false,
     }
-    .render(&state.theme);
-    add_cookies(&mut response, &[csrf_cookie(csrf)]);
-    response
+    .render(&state.theme)?;
+    cookie::set(&mut response, &[csrf_cookie(csrf)]);
+    Ok(response)
 }
 
 /// Send a user whose session expired back to the client: `access_denied`,
@@ -260,15 +154,13 @@ async fn return_expired(
     state: &AppState,
     client: &Client,
     request_uri: &str,
-) -> StoreResult<Response> {
+) -> Result<Response, AuthorizeError> {
     let now = state.now();
-    let Some(pushed) = state.store.take_request(request_uri, now).await? else {
-        return Ok(error_page(
-            state,
-            StatusCode::BAD_REQUEST,
-            "The request_uri is invalid, has expired, or has already been used.",
-        ));
-    };
+    let pushed = state
+        .store
+        .take_request(request_uri, now)
+        .await?
+        .ok_or(AuthorizeError::bad_request(UNUSABLE_REQUEST_URI))?;
     let request = pushed.request;
     tracing::info!(client_id = %client.id, "session expired; returning the user to the client");
     record_decision(
@@ -280,39 +172,34 @@ async fn return_expired(
         ConsentOutcome::Denied,
     )
     .await?;
-    Ok(redirect_error(
+    redirect_error(
         state,
         &request.redirect_uri,
         request.state.as_deref(),
         ErrorCode::AccessDenied,
         SESSION_TIMEOUT_DESCRIPTION,
-    ))
+    )
 }
 
 /// Redirect the browser back to the client with `params` plus the `iss`
 /// parameter (RFC 9207). 303 is used so the POST is never replayed
 /// (FAPI 2.0 §5.3.2.2-10/11).
-fn redirect_to_client(state: &AppState, redirect_uri: &str, params: &[(&str, &str)]) -> Response {
-    let Ok(mut url) = Url::parse(redirect_uri) else {
-        return error_page(
-            state,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "The redirect URI is invalid.",
-        );
-    };
+fn redirect_to_client(
+    state: &AppState,
+    redirect_uri: &str,
+    params: &[(&str, &str)],
+) -> Result<Response, AuthorizeError> {
+    // Registered redirect URIs are checked when clients load, so this is
+    // not expected to fail.
+    let invalid = || AuthorizeError::Internal("a registered redirect URI is invalid");
+    let mut url = Url::parse(redirect_uri).map_err(|_| invalid())?;
     url.query_pairs_mut()
         .extend_pairs(params)
         .append_pair("iss", &state.issuer);
-    let Ok(location) = HeaderValue::from_str(url.as_str()) else {
-        return error_page(
-            state,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "The redirect URI is invalid.",
-        );
-    };
+    let location = HeaderValue::from_str(url.as_str()).map_err(|_| invalid())?;
     let mut response = no_store(StatusCode::SEE_OTHER.into_response());
     response.headers_mut().insert(header::LOCATION, location);
-    response
+    Ok(response)
 }
 
 fn redirect_error(
@@ -321,31 +208,12 @@ fn redirect_error(
     client_state: Option<&str>,
     code: ErrorCode,
     description: &str,
-) -> Response {
+) -> Result<Response, AuthorizeError> {
     let mut params = vec![("error", code.as_str()), ("error_description", description)];
     if let Some(client_state) = client_state {
         params.push(("state", client_state));
     }
     redirect_to_client(state, redirect_uri, &params)
-}
-
-fn is_csrf_token(value: &str) -> bool {
-    value.len() == 43
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
-}
-
-fn csrf_cookie(csrf: &str) -> String {
-    format!("{CSRF_COOKIE}={csrf}; Path=/; Secure; HttpOnly; SameSite=Strict")
-}
-
-fn add_cookies(response: &mut Response, cookies: &[String]) {
-    for cookie in cookies {
-        if let Ok(value) = HeaderValue::from_str(cookie) {
-            response.headers_mut().append(header::SET_COOKIE, value);
-        }
-    }
 }
 
 /// The authorization endpoint URL for a request, as the client sent the
@@ -363,8 +231,13 @@ fn authorize_path(client_id: &str, request_uri: &str) -> String {
 /// The page reloads itself when the session ends, which replaces it with the
 /// session expiry page: the user is told, rather than finding out when they
 /// submit the form.
-fn experience_page(page: &Page, interaction: &Interaction<'_>, cookies: &[String]) -> Response {
-    let remaining = interaction.session.expires_at - interaction.state.now();
+fn experience_page(
+    state: &AppState,
+    page: &Page,
+    interaction: &Interaction<'_>,
+    cookies: &[SetCookie],
+) -> Result<Response, AuthorizeError> {
+    let remaining = interaction.session.expires_at - state.now();
     let mut response = Shell {
         status: StatusCode::OK,
         title: &page.title,
@@ -373,45 +246,44 @@ fn experience_page(page: &Page, interaction: &Interaction<'_>, cookies: &[String
         script: page.script,
         redirect_to: Some(&interaction.request().redirect_uri),
         refresh: Some((
-            remaining.max(1),
+            remaining.max(Seconds::new(1)),
             authorize_path(&interaction.client.id, interaction.request_uri),
         )),
         wide: page.wide,
     }
-    .render(&interaction.state.theme);
-    add_cookies(&mut response, &[csrf_cookie(interaction.csrf)]);
-    add_cookies(&mut response, cookies);
-    response
+    .render(&state.theme)?;
+    cookie::set(&mut response, &[csrf_cookie(interaction.csrf)]);
+    cookie::set(&mut response, cookies);
+    Ok(response)
 }
 
-/// The pushed request named by the browser's parameters, or the error page
-/// explaining why there is none. `arriving` is whether the browser is
-/// loading the authorization endpoint, which may start the user's session,
-/// as opposed to submitting a form from within one.
+/// The pushed request named by the browser's parameters, or why there is
+/// none. `arriving` is whether the browser is loading the authorization
+/// endpoint, which may start the user's session, as opposed to submitting a
+/// form from within one.
 async fn load_request(
     state: &AppState,
     client_id: Option<&str>,
     request_uri: Option<&str>,
     arriving: bool,
-) -> Result<(std::sync::Arc<Client>, String, Visit), Box<Response>> {
-    let bad = |message: &str| Box::new(error_page(state, StatusCode::BAD_REQUEST, message));
+) -> Result<(std::sync::Arc<Client>, String, Visit), AuthorizeError> {
+    let bad = AuthorizeError::bad_request;
 
-    let client_id = client_id.ok_or_else(|| bad("The client_id parameter is missing."))?;
+    let client_id = client_id.ok_or(bad("The client_id parameter is missing."))?;
     let client = state
         .clients
         .get(client_id)
-        .ok_or_else(|| bad("The client is not registered."))?;
-    let request_uri = request_uri.ok_or_else(|| {
-        bad("A pushed authorization request is required: the request_uri parameter is missing.")
-    })?;
+        .ok_or(bad("The client is not registered."))?;
+    let request_uri = request_uri.ok_or(bad(
+        "A pushed authorization request is required: the request_uri parameter is missing.",
+    ))?;
     let now = state.now();
     let visit = if arriving {
-        state.store.arrive(request_uri, now).await
+        state.store.arrive(request_uri, now).await?
     } else {
-        state.store.resume(request_uri, now).await
+        state.store.resume(request_uri, now).await?
     }
-    .map_err(|error| Box::new(store_unavailable(state, &error)))?
-    .ok_or_else(|| bad("The request_uri is invalid, has expired, or has already been used."))?;
+    .ok_or(bad(UNUSABLE_REQUEST_URI))?;
     let (Visit::Active(pushed, _) | Visit::Expired(pushed)) = &visit;
     // RFC 9126 §4: a request_uri is only usable by the client that pushed it.
     if pushed.request.client_id != client.id {
@@ -421,18 +293,23 @@ async fn load_request(
 }
 
 /// `GET /authorize`
-pub async fn authorize(
+pub(super) async fn authorize(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
 ) -> Response {
-    let Ok(params) = Params::parse(query.unwrap_or_default().as_bytes()) else {
-        return error_page(
-            &state,
-            StatusCode::BAD_REQUEST,
-            "A request parameter was sent more than once.",
-        );
-    };
+    let result = arrive(&state, query.as_deref(), &headers).await;
+    respond(&state, result)
+}
+
+async fn arrive(
+    state: &AppState,
+    query: Option<&str>,
+    headers: &HeaderMap,
+) -> Result<Response, AuthorizeError> {
+    let params = Params::parse(query.unwrap_or_default().as_bytes()).map_err(|_| {
+        AuthorizeError::bad_request("A request parameter was sent more than once.")
+    })?;
 
     // A request without PAR. If it names a redirect URI registered to the
     // client we can safely say so via redirect; otherwise show a page.
@@ -442,7 +319,7 @@ pub async fn authorize(
         && client.has_redirect_uri(redirect_uri)
     {
         return redirect_error(
-            &state,
+            state,
             redirect_uri,
             params.get("state"),
             ErrorCode::InvalidRequest,
@@ -450,158 +327,166 @@ pub async fn authorize(
         );
     }
 
-    let (client, request_uri, visit) = match load_request(
-        &state,
+    let (client, request_uri, visit) = load_request(
+        state,
         params.get("client_id"),
         params.get("request_uri"),
         true,
     )
-    .await
-    {
-        Ok(found) => found,
-        Err(response) => return *response,
-    };
+    .await?;
 
-    let csrf = cookie(&headers, CSRF_COOKIE)
+    let csrf = cookie::get(headers, CSRF_COOKIE)
         .filter(|v| is_csrf_token(v))
         .map_or_else(|| random_token(32), str::to_owned);
     let (pushed, session) = match visit {
         Visit::Active(pushed, session) => (pushed, session),
         Visit::Expired(pushed) => {
-            return session_expired_page(&state, &client, &request_uri, &pushed, &csrf);
+            return session_expired_page(state, &client, &request_uri, &pushed, &csrf);
         }
     };
-    let interaction = Interaction {
-        state: &state,
-        client: &client,
-        request_uri: &request_uri,
-        pushed: &pushed,
-        session: &session,
-        csrf: &csrf,
-        headers: &headers,
-    };
+    let interaction = Interaction::new(
+        state,
+        &client,
+        &request_uri,
+        &pushed,
+        &session,
+        &csrf,
+        headers,
+    );
     let step = state.experience.start(&interaction).await;
-    conclude(&interaction, step).await
+    conclude(state, &interaction, step).await
 }
 
 /// `POST /authorize/decision`: a form submitted from an experience's page,
 /// or from the session expiry page.
-pub async fn decision(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
-    let Ok(params) = Params::parse(&body) else {
-        return error_page(
-            &state,
-            StatusCode::BAD_REQUEST,
-            "A form field was sent more than once.",
-        );
-    };
+pub(super) async fn decision(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    let result = decide(&state, &headers, &body).await;
+    respond(&state, result)
+}
+
+async fn decide(
+    state: &AppState,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<Response, AuthorizeError> {
+    let params = Params::parse(body)
+        .map_err(|_| AuthorizeError::bad_request("A form field was sent more than once."))?;
 
     // Double-submit check: the form value must match the cookie this origin
     // set, which a cross-site attacker can neither read nor set.
-    let csrf_ok = match (cookie(&headers, CSRF_COOKIE), params.get("csrf")) {
+    let csrf_ok = match (cookie::get(headers, CSRF_COOKIE), params.get("csrf")) {
         (Some(cookie), Some(form)) => is_csrf_token(cookie) && ct_eq(cookie, form),
         _ => false,
     };
     if !csrf_ok {
-        return error_page(
-            &state,
-            StatusCode::FORBIDDEN,
-            "This form could not be verified. Please start again from the application.",
-        );
+        return Err(AuthorizeError::Rejected {
+            status: StatusCode::FORBIDDEN,
+            message: "This form could not be verified. Please start again from the application.",
+        });
     }
     let csrf = params.get("csrf").unwrap_or_default();
 
-    let (client, request_uri, visit) = match load_request(
-        &state,
+    let (client, request_uri, visit) = load_request(
+        state,
         params.get("client_id"),
         params.get("request_uri"),
         false,
     )
-    .await
-    {
-        Ok(found) => found,
-        Err(response) => return *response,
-    };
+    .await?;
     let (pushed, session) = match visit {
         Visit::Active(pushed, session) => (pushed, session),
         // Too late to decide anything: whatever was submitted, the only way
         // on is back to the client with an error.
         Visit::Expired(_) if params.get("action") == Some(ACTION_RETURN_EXPIRED) => {
-            return match return_expired(&state, &client, &request_uri).await {
-                Ok(response) => response,
-                Err(error) => store_unavailable(&state, &error),
-            };
+            return return_expired(state, &client, &request_uri).await;
         }
         Visit::Expired(pushed) => {
-            return session_expired_page(&state, &client, &request_uri, &pushed, csrf);
+            return session_expired_page(state, &client, &request_uri, &pushed, csrf);
         }
     };
-    let interaction = Interaction {
-        state: &state,
-        client: &client,
-        request_uri: &request_uri,
-        pushed: &pushed,
-        session: &session,
+    let interaction = Interaction::new(
+        state,
+        &client,
+        &request_uri,
+        &pushed,
+        &session,
         csrf,
-        headers: &headers,
-    };
+        headers,
+    );
     let step = state.experience.submit(&interaction, &params).await;
-    conclude(&interaction, step).await
+    conclude(state, &interaction, step).await
 }
 
 /// Turn an experience's step into the HTTP response, completing the
 /// protocol side of a final decision.
-async fn conclude(interaction: &Interaction<'_>, step: Step) -> Response {
-    match try_conclude(interaction, step).await {
-        Ok(response) => response,
-        Err(error) => store_unavailable(interaction.state, &error),
-    }
-}
-
-async fn try_conclude(interaction: &Interaction<'_>, step: Step) -> StoreResult<Response> {
-    let state = interaction.state;
+///
+/// An experience that fails is the one case where the endpoint does not
+/// show its error page: the request is real and its redirect URI is known,
+/// so the browser goes back to the client with `server_error`, as RFC 6749
+/// §4.1.2.1 provides. The failure is logged here, once.
+async fn conclude(
+    state: &AppState,
+    interaction: &Interaction<'_>,
+    step: StepResult,
+) -> Result<Response, AuthorizeError> {
     let request = interaction.request();
     let now = state.now();
+    let step = step.unwrap_or_else(|error| {
+        tracing::error!(
+            error = %Report(&error),
+            client_id = %interaction.client.id,
+            experience = %state.experience.kind(),
+            "the experience failed"
+        );
+        Decision::Deny {
+            code: ErrorCode::ServerError,
+            description: "internal server error".to_owned(),
+        }
+        .into()
+    });
     let mut response = match step.decision {
         Decision::Page(page) => {
-            return Ok(experience_page(&page, interaction, &step.set_cookies));
+            return experience_page(state, &page, interaction, &step.set_cookies);
         }
         Decision::Deny { code, description } => {
-            // The experience may already have discarded the request (after
-            // too many failed sign-ins), so its absence is not an error.
-            state
+            // Only the caller that consumes the request records the
+            // decision. If a concurrent request got there first, it has
+            // been recorded once already; this browser is still sent back
+            // with the error.
+            if state
                 .store
                 .take_request(interaction.request_uri, now)
+                .await?
+                .is_some()
+            {
+                record_decision(
+                    state,
+                    interaction.client,
+                    request.purpose.as_deref(),
+                    None,
+                    now,
+                    ConsentOutcome::Denied,
+                )
                 .await?;
-            record_decision(
-                state,
-                interaction.client,
-                request.purpose.as_deref(),
-                None,
-                now,
-                ConsentOutcome::Denied,
-            )
-            .await?;
+            }
             redirect_error(
                 state,
                 &request.redirect_uri,
                 request.state.as_deref(),
                 code,
                 &description,
-            )
+            )?
         }
         Decision::Approve(approval) => {
             // One-time use is enforced here, at the point of authorization.
-            let Some(pushed) = state
+            // A request whose sign-in attempts ran out cannot be approved,
+            // even by a sign-in that raced the last failure.
+            let pushed = state
                 .store
                 .take_request(interaction.request_uri, now)
                 .await?
-            else {
-                return Ok(error_page(
-                    state,
-                    StatusCode::BAD_REQUEST,
-                    "The request_uri is invalid, has expired, or has already been used.",
-                ));
-            };
+                .filter(|pushed| !pushed.is_exhausted())
+                .ok_or(AuthorizeError::bad_request(UNUSABLE_REQUEST_URI))?;
             let request = pushed.request;
             let txn = record_decision(
                 state,
@@ -635,10 +520,10 @@ async fn try_conclude(interaction: &Interaction<'_>, step: Step) -> StoreResult<
             if let Some(client_state) = &request.state {
                 out.push(("state", client_state));
             }
-            redirect_to_client(state, &request.redirect_uri, &out)
+            redirect_to_client(state, &request.redirect_uri, &out)?
         }
     };
-    add_cookies(&mut response, &step.set_cookies);
+    cookie::set(&mut response, &step.set_cookies);
     Ok(response)
 }
 
@@ -649,9 +534,9 @@ async fn record_decision(
     client: &Client,
     purpose: Option<&str>,
     approval: Option<&Approval>,
-    now: i64,
+    now: Timestamp,
     outcome: ConsentOutcome,
-) -> StoreResult<String> {
+) -> Result<String, AuthorizeError> {
     let txn = approval
         .and_then(|a| a.txn.clone())
         .unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -669,7 +554,7 @@ async fn record_decision(
         ?outcome,
         "authorization request decided"
     );
-    state
+    let recorded = state
         .store
         .record_consent(ConsentRecord {
             txn: txn.clone(),
@@ -682,930 +567,16 @@ async fn record_decision(
             outcome,
         })
         .await?;
+    // Transaction identifiers are fresh UUIDs, except under the technical
+    // experience, which takes one from its form: a record already there is
+    // never replaced.
+    if !recorded {
+        return Err(AuthorizeError::bad_request(
+            "This transaction has already been decided. Please start again from the application.",
+        ));
+    }
     Ok(txn)
 }
 
 #[cfg(test)]
-pub(crate) mod test_support {
-    use std::collections::HashMap;
-
-    use axum::body::Body;
-    use axum::http::{Request, Response, header};
-    use url::Url;
-
-    use super::CSRF_COOKIE;
-    use crate::experience::login::LOGIN_COOKIE;
-    use crate::http::test_support::{Harness, body_text};
-    use crate::http::{PATH_AUTHORIZE, PATH_DECISION};
-
-    pub fn authorize_path(request_uri: &str) -> String {
-        let query: String = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("client_id", "rp")
-            .append_pair("request_uri", request_uri)
-            .finish();
-        format!("{PATH_AUTHORIZE}?{query}")
-    }
-
-    /// The value of the cookie `name` among a response's `Set-Cookie`s.
-    pub fn set_cookie(response: &Response<Body>, name: &str) -> Option<String> {
-        response
-            .headers()
-            .get_all(header::SET_COOKIE)
-            .iter()
-            .filter_map(|value| value.to_str().ok())
-            .find_map(|value| value.strip_prefix(&format!("{name}=")))
-            .and_then(|rest| rest.split(';').next())
-            .map(str::to_owned)
-    }
-
-    /// Load the login page and return the CSRF token it issued.
-    pub async fn open_login(harness: &Harness, request_uri: &str) -> String {
-        let response = harness.get(None, &authorize_path(request_uri)).await;
-        let csrf = set_cookie(&response, CSRF_COOKIE);
-        assert_eq!(response.status(), 200, "{}", body_text(response).await);
-        csrf.unwrap()
-    }
-
-    /// Post a form with the given `Cookie` header.
-    pub async fn submit_with(
-        harness: &Harness,
-        cookies: Option<&str>,
-        fields: &[(&str, &str)],
-    ) -> Response<Body> {
-        let body: String = url::form_urlencoded::Serializer::new(String::new())
-            .extend_pairs(fields)
-            .finish();
-        let mut request = Request::post(PATH_DECISION)
-            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
-        if let Some(cookies) = cookies {
-            request = request.header(header::COOKIE, cookies);
-        }
-        harness
-            .send(None, request.body(Body::from(body)).unwrap())
-            .await
-    }
-
-    /// Post a form from a browser holding only the CSRF cookie.
-    pub async fn submit(
-        harness: &Harness,
-        csrf_cookie: Option<&str>,
-        fields: &[(&str, &str)],
-    ) -> Response<Body> {
-        let cookies = csrf_cookie.map(|csrf| format!("other=1; {CSRF_COOKIE}={csrf}"));
-        submit_with(harness, cookies.as_deref(), fields).await
-    }
-
-    /// Query parameters of a redirect response's `Location`.
-    pub fn redirect_params(response: &Response<Body>) -> (String, HashMap<String, String>) {
-        assert_eq!(response.status(), 303);
-        let location = Url::parse(response.headers()[header::LOCATION].to_str().unwrap()).unwrap();
-        let params = location.query_pairs().into_owned().collect();
-        let mut base = location;
-        base.set_query(None);
-        (base.to_string(), params)
-    }
-
-    fn checkboxes(html: &str, only_ticked: bool) -> Vec<String> {
-        html.split("<input type=\"checkbox\"")
-            .skip(1)
-            .filter_map(|rest| {
-                let tag = rest.split('>').next()?;
-                let name = tag.split("name=\"").nth(1)?.split('"').next()?;
-                (!only_ticked || tag.contains(" checked")).then(|| name.to_owned())
-            })
-            .collect()
-    }
-
-    /// Names of the checkboxes on a consent page: the voluntary claims.
-    pub fn offered(html: &str) -> Vec<String> {
-        checkboxes(html, false)
-    }
-
-    /// Names of the checkboxes that are ticked when the page loads.
-    pub fn ticked(html: &str) -> Vec<String> {
-        checkboxes(html, true)
-    }
-
-    /// A browser that has signed in and is looking at the consent page.
-    pub struct SignedIn {
-        pub csrf: String,
-        /// The `Cookie` header the browser sends.
-        pub cookies: String,
-        /// The consent page.
-        pub html: String,
-    }
-
-    /// Load the login page and sign in as the demo user.
-    pub async fn sign_in(harness: &Harness, request_uri: &str) -> SignedIn {
-        let csrf = open_login(harness, request_uri).await;
-        let fields = [
-            ("csrf", csrf.as_str()),
-            ("client_id", "rp"),
-            ("request_uri", request_uri),
-            ("username", crate::user::DEMO_USERNAME),
-            ("password", crate::user::DEMO_PASSWORD),
-            ("action", "sign-in"),
-        ];
-        let response = submit(harness, Some(&csrf), &fields).await;
-        assert_eq!(response.status(), 200);
-        let login = set_cookie(&response, LOGIN_COOKIE).expect("signing in sets a cookie");
-        SignedIn {
-            cookies: format!("{CSRF_COOKIE}={csrf}; {LOGIN_COOKIE}={login}"),
-            csrf,
-            html: body_text(response).await,
-        }
-    }
-
-    /// Submit the consent page with the `share` checkboxes turned on.
-    pub async fn consent(
-        harness: &Harness,
-        request_uri: &str,
-        browser: &SignedIn,
-        share: &[String],
-        action: &str,
-    ) -> Response<Body> {
-        let mut fields = vec![
-            ("csrf", browser.csrf.as_str()),
-            ("client_id", "rp"),
-            ("request_uri", request_uri),
-            ("action", action),
-        ];
-        fields.extend(share.iter().map(|field| (field.as_str(), "1")));
-        submit_with(harness, Some(&browser.cookies), &fields).await
-    }
-
-    /// Run the browser leg for a pushed request, sharing everything offered,
-    /// and return the code.
-    pub async fn approve(harness: &Harness, request_uri: &str) -> String {
-        approve_declining(harness, request_uri, &[]).await
-    }
-
-    /// As [`approve`], but leaving the `declined` claims turned off.
-    pub async fn approve_declining(
-        harness: &Harness,
-        request_uri: &str,
-        declined: &[&str],
-    ) -> String {
-        let browser = sign_in(harness, request_uri).await;
-        let share: Vec<String> = offered(&browser.html)
-            .into_iter()
-            .filter(|field| !declined.iter().any(|d| *field == format!("share_{d}")))
-            .collect();
-        let response = consent(harness, request_uri, &browser, &share, "approve").await;
-        redirect_params(&response)
-            .1
-            .remove("code")
-            .expect("code in redirect")
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use axum::http::{StatusCode, header};
-    use serde_json::json;
-
-    use super::test_support::{
-        approve, approve_declining, authorize_path, consent, offered, open_login, redirect_params,
-        set_cookie, sign_in, submit, submit_with, ticked,
-    };
-    use super::*;
-    use crate::experience::login::LOGIN_COOKIE;
-    use crate::http::PATH_AUTHORIZE;
-    use crate::http::test_support::{Harness, body_text};
-    use crate::state::test_support::ISSUER;
-    use crate::store::MAX_FAILED_LOGINS;
-    use crate::user::{DEMO_PASSWORD, DEMO_USERNAME};
-
-    fn login_fields<'a>(csrf: &'a str, uri: &'a str, password: &'a str) -> [(&'a str, &'a str); 6] {
-        [
-            ("csrf", csrf),
-            ("client_id", "rp"),
-            ("request_uri", uri),
-            ("username", DEMO_USERNAME),
-            ("password", password),
-            ("action", "sign-in"),
-        ]
-    }
-
-    fn base_fields<'a>(csrf: &'a str, uri: &'a str, action: &'a str) -> [(&'a str, &'a str); 4] {
-        [
-            ("csrf", csrf),
-            ("client_id", "rp"),
-            ("request_uri", uri),
-            ("action", action),
-        ]
-    }
-
-    fn everything_requested() -> serde_json::Value {
-        json!({
-            "purpose": "Verify your <age> for checkout",
-            "claims": {"id_token": {
-                "given_name": null,
-                "nickname": null,
-                "verified_claims": {
-                    "verification": {"trust_framework": {"value": "au_connectid"}},
-                    "claims": {"over18": null, "beneficiary_account_au": {"essential": true}},
-                },
-            }},
-        })
-    }
-
-    #[tokio::test]
-    async fn login_page_names_the_client_but_not_what_is_requested() {
-        let harness = Harness::new();
-        let uri = harness.push(&everything_requested()).await;
-        let response = harness.get(None, &authorize_path(&uri)).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
-        assert!(
-            response
-                .headers()
-                .contains_key(header::CONTENT_SECURITY_POLICY)
-        );
-        assert!(
-            !response
-                .headers()
-                .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN),
-            "no CORS on the authorization endpoint (FAPI 2.0 5.2.3)"
-        );
-        let cookie = response.headers()[header::SET_COOKIE]
-            .to_str()
-            .unwrap()
-            .to_owned();
-        assert!(
-            cookie.contains("Secure")
-                && cookie.contains("HttpOnly")
-                && cookie.contains("SameSite=Strict")
-        );
-
-        let html = body_text(response).await;
-        assert!(html.contains("Log in to oxID"));
-        // They are logging in to see the request, not to reach the client.
-        assert!(html.contains("Log in to review this request:"));
-        assert!(html.contains("is asking you to share some of your information."));
-        assert!(html.contains("<strong id=\"client-name\">Test RP</strong>"));
-        assert!(html.contains("id=\"username\"") && html.contains("id=\"password\""));
-        assert!(html.contains("id=\"sign-in\"") && html.contains("id=\"deny\""));
-        // Nothing about the request is shown before the user signs in.
-        for hidden in ["checkout", "Given name", "data-claim", "Alex", "share_"] {
-            assert!(!html.contains(hidden), "{hidden}");
-        }
-    }
-
-    #[tokio::test]
-    async fn pages_carry_the_oxid_theme_in_light_and_dark_by_default() {
-        let harness = Harness::new();
-        let uri = harness.push(&json!({})).await;
-        let response = harness.get(None, &authorize_path(&uri)).await;
-        let policy = response.headers()[header::CONTENT_SECURITY_POLICY]
-            .to_str()
-            .unwrap()
-            .to_owned();
-        assert!(!policy.contains("img-src"), "nothing is loaded: {policy}");
-        let html = body_text(response).await;
-        assert!(html.contains("<title>Log in - oxID</title>"));
-        assert!(html.contains("<i class=\"mark\"></i>") && html.contains("ox<b>ID</b>"));
-        assert!(!html.contains("<img"));
-        assert!(html.contains("Protected by oxID."));
-        // Both palettes are on the page, and the browser picks one from the
-        // user's system setting.
-        assert!(html.contains("<meta name=\"color-scheme\" content=\"light dark\">"));
-        let (light, dark) = html
-            .split_once("@media (prefers-color-scheme: dark)")
-            .expect("a dark palette");
-        assert!(light.contains("--accent: #ff5630;") && light.contains("--surface: #ffffff;"));
-        assert!(dark.contains("--accent: #ff6b4a;") && dark.contains("--surface: #161b27;"));
-        // The styles use the palette, never a colour of their own.
-        assert!(html.contains("background: var(--background);"));
-    }
-
-    fn acme() -> Theme {
-        use crate::theme::{Logo, Palette};
-        let logo = |bytes: &'static [u8]| Logo {
-            content_type: "image/png",
-            bytes: Bytes::from_static(bytes),
-        };
-        Theme {
-            name: "Acme <Bank>".to_owned(),
-            logo: Some(logo(b"light")),
-            logo_dark: Some(logo(b"dark")),
-            show_name: false,
-            light: Palette {
-                accent: "#0055ff".parse().unwrap(),
-                ..Palette::light()
-            },
-            dark: Palette {
-                accent: "#88aaff".parse().unwrap(),
-                background: "#000".parse().unwrap(),
-                ..Palette::dark()
-            },
-        }
-    }
-
-    #[tokio::test]
-    async fn a_theme_sets_the_name_logo_and_colours_of_every_page() {
-        let harness = Harness::with_theme(acme());
-        let uri = harness.push(&json!({})).await;
-        let response = harness.get(None, &authorize_path(&uri)).await;
-        assert!(
-            response.headers()[header::CONTENT_SECURITY_POLICY]
-                .to_str()
-                .unwrap()
-                .contains("; img-src 'self'"),
-            "the logo may be loaded"
-        );
-        let html = body_text(response).await;
-        assert!(html.contains("<title>Log in - Acme &#60;Bank&#62;</title>"));
-        assert!(html.contains("<h1>Log in to Acme &#60;Bank&#62;</h1>"));
-        assert!(html.contains("Protected by Acme &#60;Bank&#62;."));
-        assert!(html.contains(
-            "<source srcset=\"/theme/logo-dark\" media=\"(prefers-color-scheme: dark)\">"
-        ));
-        // The logo stands in for the name, so it carries it as its text.
-        assert!(
-            html.contains("<img class=\"logo\" src=\"/theme/logo\" alt=\"Acme &#60;Bank&#62;\">")
-        );
-        assert!(!html.contains("class=\"name\"") && !html.contains("class=\"mark\""));
-        let (light, dark) = html
-            .split_once("@media (prefers-color-scheme: dark)")
-            .unwrap();
-        assert!(light.contains("--accent: #0055ff;") && light.contains("--text: #0e1320;"));
-        assert!(dark.contains("--accent: #88aaff;") && dark.contains("--background: #000;"));
-
-        // The consent page, and the pages the endpoint shows itself.
-        let browser = sign_in(&harness, &uri).await;
-        assert!(browser.html.contains("logged in with Acme &#60;Bank&#62;."));
-        harness.clock.advance(harness.state.security.session_ttl);
-        let expired = body_text(harness.get(None, &authorize_path(&uri)).await).await;
-        let error = body_text(harness.get(None, PATH_AUTHORIZE).await).await;
-        for html in [&browser.html, &expired, &error] {
-            assert!(html.contains("--accent: #0055ff;"));
-            assert!(html.contains("src=\"/theme/logo\""));
-            assert!(!html.contains("oxID") && !html.contains("<Bank>"), "{html}");
-        }
-    }
-
-    #[tokio::test]
-    async fn the_technical_experience_is_themed_too() {
-        let theme = Theme {
-            show_name: true,
-            logo_dark: None,
-            ..acme()
-        };
-        let harness = Harness::themed(crate::experience::Kind::Technical, theme);
-        let uri = harness.push(&json!({})).await;
-        let html = body_text(harness.get(None, &authorize_path(&uri)).await).await;
-        assert!(html.contains("id=\"technical-banner\""));
-        assert!(html.contains("--accent: #0055ff;") && html.contains("--accent: #88aaff;"));
-        assert!(html.contains("<span class=\"name\">Acme &#60;Bank&#62;</span>"));
-        // A logo beside the name is decoration, and has no dark variant here.
-        assert!(html.contains("<img class=\"logo\" src=\"/theme/logo\" alt=\"\">"));
-        assert!(!html.contains("<source") && !html.contains("oxID"));
-    }
-
-    #[tokio::test]
-    async fn consent_page_shows_client_purpose_and_each_claim_with_its_value() {
-        let harness = Harness::new();
-        let uri = harness.push(&everything_requested()).await;
-        let browser = sign_in(&harness, &uri).await;
-        let html = &browser.html;
-        assert!(html.contains("Logged in as <strong>Alex Jordan Citizen</strong>"));
-        // The purpose completes the sentence it was written for.
-        assert!(
-            html.contains(
-                "<p><strong id=\"client-name\">Test RP</strong> is asking you to share your \
-                 information for the purpose of</p>\n  \
-                 <p id=\"purpose\" class=\"purpose\">Verify your &#60;age&#62; for checkout</p>"
-            ),
-            "purpose is shown, escaped"
-        );
-        // Each claim is listed with the value that would be shared.
-        assert!(html.contains("<span class=\"value\" id=\"value-given_name\">Alex</span>"));
-        assert!(html.contains("<span class=\"value\" id=\"value-over18\">Yes</span>"));
-        assert!(html.contains("Bank account (BSB and account number)"));
-        assert!(html.contains("<em>BSB:</em> 123456") && html.contains("12345678"));
-        assert!(
-            html.contains("<li data-claim=\"beneficiary_account_au\" data-essential=\"true\">")
-        );
-        // Voluntary claims are offered, and off until the user chooses.
-        assert_eq!(offered(html), ["share_given_name", "share_over18"]);
-        assert_eq!(ticked(html), Vec::<String>::new());
-        assert!(
-            !html.contains("nickname"),
-            "unsupported claims are not offered"
-        );
-        assert!(!html.contains("id=\"password\""));
-    }
-
-    #[tokio::test]
-    async fn claims_the_user_does_not_have_are_shown_as_not_shared() {
-        let harness = Harness::new();
-        let uri = harness
-            .push(&json!({"claims": {"id_token": {"given_name": null}}}))
-            .await;
-        let browser = sign_in(&harness, &uri).await;
-        assert!(!browser.html.contains("Not on file"));
-        // Every demo customer has a given name, so check the rendering of a
-        // missing value through the list of values instead.
-        let user = harness
-            .state
-            .users
-            .find_by_subject("demo-user-0001")
-            .unwrap();
-        let mut without = (*user).clone();
-        without.claims.remove("given_name");
-        let client = harness.state.clients.get("rp").unwrap();
-        let request =
-            crate::claims::ClaimsRequest::parse(&json!({"id_token": {"given_name": null}}))
-                .unwrap();
-        let values = request.shareable_values(&without, &client, &[], harness.state.now());
-        assert_eq!(values, serde_json::Map::new());
-        let values = request.shareable_values(&user, &client, &[], harness.state.now());
-        assert_eq!(values["given_name"], "Alex");
-    }
-
-    #[tokio::test]
-    async fn approval_redirects_with_code_state_and_iss() {
-        let harness = Harness::new();
-        let uri = harness.push(&json!({})).await;
-        let browser = sign_in(&harness, &uri).await;
-        let response = consent(&harness, &uri, &browser, &[], "approve").await;
-        let (base, params) = redirect_params(&response);
-        assert_eq!(base, "https://rp.example.com/cb");
-        assert_eq!(params["state"], "st-1");
-        assert_eq!(params["iss"], ISSUER);
-        assert!(params["code"].len() >= 43);
-        assert!(!params.contains_key("error"));
-        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
-        assert_eq!(
-            set_cookie(&response, LOGIN_COOKIE).as_deref(),
-            Some(""),
-            "the sign-in cookie is cleared"
-        );
-    }
-
-    #[tokio::test]
-    async fn consent_is_only_taken_from_the_browser_that_signed_in() {
-        let harness = Harness::new();
-        let uri = harness.push(&json!({})).await;
-        let browser = sign_in(&harness, &uri).await;
-
-        // Someone else who knows the request_uri, with their own CSRF cookie.
-        let other = open_login(&harness, &uri).await;
-        let fields = base_fields(&other, &uri, "approve");
-        let response = submit(&harness, Some(&other), &fields).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let html = body_text(response).await;
-        assert!(html.contains("id=\"password\"") && html.contains("Log in to continue."));
-
-        let forged = format!("{CSRF_COOKIE}={other}; {LOGIN_COOKIE}={}", random_token(32));
-        let response = submit_with(&harness, Some(&forged), &fields).await;
-        assert!(body_text(response).await.contains("id=\"password\""));
-        // They are shown the login page, not the user's details.
-        let request = axum::http::Request::get(authorize_path(&uri))
-            .header(header::COOKIE, &forged)
-            .body(axum::body::Body::empty())
-            .unwrap();
-        let html = body_text(harness.send(None, request).await).await;
-        assert!(html.contains("id=\"password\"") && !html.contains("Alex"));
-
-        // The browser that signed in comes back to the consent page on a
-        // reload, and can still complete.
-        let request = axum::http::Request::get(authorize_path(&uri))
-            .header(header::COOKIE, &browser.cookies)
-            .body(axum::body::Body::empty())
-            .unwrap();
-        let html = body_text(harness.send(None, request).await).await;
-        assert!(html.contains("id=\"approve\"") && !html.contains("id=\"password\""));
-        let response = consent(&harness, &uri, &browser, &[], "approve").await;
-        assert!(redirect_params(&response).1.contains_key("code"));
-    }
-
-    #[tokio::test]
-    async fn decisions_are_recorded_with_their_purpose() {
-        let harness = Harness::new();
-        let pushed = json!({
-            "purpose": "Opening your savings account",
-            "claims": {"id_token": {"family_name": null, "nickname": null}},
-        });
-        let uri = harness.push(&pushed).await;
-        approve(&harness, &uri).await;
-
-        let history = harness
-            .state
-            .store
-            .consent_history("demo-user-0001")
-            .await
-            .unwrap();
-        assert_eq!(history.len(), 1);
-        let record = &history[0];
-        assert_eq!(
-            record.purpose.as_deref(),
-            Some("Opening your savings account")
-        );
-        assert_eq!(record.client_id, "rp");
-        assert_eq!(record.claims, ["family_name"]);
-        assert_eq!(record.outcome, ConsentOutcome::Approved);
-        assert_eq!(record.decided_at, harness.state.now());
-        assert_eq!(record.txn.len(), 36);
-
-        // A cancelled request is recorded too, against no user.
-        let uri = harness.push(&pushed).await;
-        let csrf = open_login(&harness, &uri).await;
-        submit(&harness, Some(&csrf), &base_fields(&csrf, &uri, "deny")).await;
-        assert_eq!(
-            harness
-                .state
-                .store
-                .consent_history("demo-user-0001")
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
-    }
-
-    #[tokio::test]
-    async fn voluntary_claims_are_shared_only_if_chosen_and_essential_ones_always() {
-        let harness = Harness::new();
-        let pushed = json!({"claims": {"id_token": {
-            "given_name": {"essential": true},
-            "email": null,
-            "phone_number": {"essential": false},
-            "verified_claims": {
-                "verification": {"trust_framework": {"value": "au_connectid"}},
-                "claims": {"over18": {"essential": true}, "over21": null},
-            },
-        }}});
-        let uri = harness.push(&pushed).await;
-        let browser = sign_in(&harness, &uri).await;
-        // Essential claims have no checkbox at all; the rest start off.
-        assert_eq!(
-            offered(&browser.html),
-            ["share_email", "share_over21", "share_phone_number"]
-        );
-        assert_eq!(ticked(&browser.html), Vec::<String>::new());
-        assert!(!browser.html.contains("share_given_name"));
-        assert!(!browser.html.contains("share_over18"));
-        assert!(browser.html.contains("id=\"optional-hint\""));
-        assert!(browser.html.contains("id=\"required-hint\""));
-
-        // Fields for claims that were never offered are ignored.
-        let share = ["share_phone_number", "share_birthdate", "share_name"].map(str::to_owned);
-        consent(&harness, &uri, &browser, &share, "approve").await;
-        let record = &harness
-            .state
-            .store
-            .consent_history("demo-user-0001")
-            .await
-            .unwrap()[0];
-        assert_eq!(record.claims, ["given_name", "over18", "phone_number"]);
-        assert_eq!(record.declined, ["email", "over21"]);
-
-        // "Turn all on" shows the page again with every switch on.
-        let uri = harness.push(&pushed).await;
-        let browser = sign_in(&harness, &uri).await;
-        assert!(browser.html.contains("id=\"share-all\""));
-        let response = consent(&harness, &uri, &browser, &[], "share-all").await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let html = body_text(response).await;
-        assert_eq!(ticked(&html), offered(&html));
-        assert_eq!(offered(&html).len(), 3);
-
-        // Choosing nothing still shares the essential claims.
-        let uri = harness.push(&pushed).await;
-        let browser = sign_in(&harness, &uri).await;
-        consent(&harness, &uri, &browser, &[], "approve").await;
-        let record = &harness
-            .state
-            .store
-            .consent_history("demo-user-0001")
-            .await
-            .unwrap()[0];
-        assert_eq!(record.claims, ["given_name", "over18"]);
-        assert_eq!(record.declined, ["email", "over21", "phone_number"]);
-
-        let uri = harness.push(&pushed).await;
-        approve_declining(&harness, &uri, &["email"]).await;
-        let record = &harness
-            .state
-            .store
-            .consent_history("demo-user-0001")
-            .await
-            .unwrap()[0];
-        assert_eq!(record.declined, ["email"]);
-    }
-
-    #[tokio::test]
-    async fn consent_page_says_when_nothing_personal_is_shared() {
-        let harness = Harness::new();
-        let uri = harness.push(&json!({})).await;
-        let browser = sign_in(&harness, &uri).await;
-        assert!(browser.html.contains("id=\"requested-none\""));
-        assert!(!browser.html.contains("id=\"purpose\""));
-    }
-
-    #[tokio::test]
-    async fn state_is_omitted_from_the_response_when_not_requested() {
-        let harness = Harness::new();
-        let uri = harness.push(&json!({"state": null})).await;
-        let browser = sign_in(&harness, &uri).await;
-        let response = consent(&harness, &uri, &browser, &[], "approve").await;
-        let (_, params) = redirect_params(&response);
-        assert!(!params.contains_key("state"));
-        assert!(params.contains_key("code"));
-    }
-
-    #[tokio::test]
-    async fn request_uri_survives_page_reloads_but_is_single_use_once_decided() {
-        let harness = Harness::new();
-        let uri = harness.push(&json!({})).await;
-        open_login(&harness, &uri).await;
-        open_login(&harness, &uri).await;
-        approve(&harness, &uri).await;
-
-        let reused = harness.get(None, &authorize_path(&uri)).await;
-        assert_eq!(reused.status(), StatusCode::BAD_REQUEST);
-        assert!(body_text(reused).await.contains("already been used"));
-    }
-
-    #[tokio::test]
-    async fn denial_redirects_with_access_denied_and_consumes_the_request() {
-        let harness = Harness::new();
-        let uri = harness.push(&json!({})).await;
-        let csrf = open_login(&harness, &uri).await;
-        let fields = base_fields(&csrf, &uri, "deny");
-        let response = submit(&harness, Some(&csrf), &fields).await;
-        let (_, params) = redirect_params(&response);
-        assert_eq!(params["error"], "access_denied");
-        assert_eq!(params["state"], "st-1");
-        assert_eq!(params["iss"], ISSUER);
-        assert!(!params.contains_key("code"));
-
-        let again = submit(&harness, Some(&csrf), &fields).await;
-        assert_eq!(again.status(), StatusCode::BAD_REQUEST);
-
-        // The consent page can be cancelled too.
-        let uri = harness.push(&json!({})).await;
-        let browser = sign_in(&harness, &uri).await;
-        let response = consent(&harness, &uri, &browser, &[], "deny").await;
-        assert_eq!(redirect_params(&response).1["error"], "access_denied");
-    }
-
-    #[tokio::test]
-    async fn wrong_password_re_prompts_then_gives_up() {
-        let harness = Harness::new();
-        let uri = harness.push(&json!({})).await;
-        let csrf = open_login(&harness, &uri).await;
-        for _ in 1..MAX_FAILED_LOGINS {
-            let response = submit(&harness, Some(&csrf), &login_fields(&csrf, &uri, "wrong")).await;
-            assert_eq!(response.status(), StatusCode::OK);
-            assert!(set_cookie(&response, LOGIN_COOKIE).is_none());
-            let html = body_text(response).await;
-            assert!(html.contains("username or password is incorrect"));
-            assert!(html.contains("id=\"password\""));
-        }
-        let last = submit(&harness, Some(&csrf), &login_fields(&csrf, &uri, "wrong")).await;
-        assert_eq!(redirect_params(&last).1["error"], "access_denied");
-        // The request is gone, so even the right password no longer works.
-        let after = submit(
-            &harness,
-            Some(&csrf),
-            &login_fields(&csrf, &uri, DEMO_PASSWORD),
-        )
-        .await;
-        assert_eq!(after.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn decision_requires_matching_csrf_cookie_and_field() {
-        let harness = Harness::new();
-        let uri = harness.push(&json!({})).await;
-        let csrf = open_login(&harness, &uri).await;
-        let forged = random_token(32);
-
-        let no_cookie = submit(&harness, None, &login_fields(&csrf, &uri, DEMO_PASSWORD)).await;
-        assert_eq!(no_cookie.status(), StatusCode::FORBIDDEN);
-        let mismatch = submit(
-            &harness,
-            Some(&csrf),
-            &login_fields(&forged, &uri, DEMO_PASSWORD),
-        )
-        .await;
-        assert_eq!(mismatch.status(), StatusCode::FORBIDDEN);
-        // Nothing was consumed by the rejected attempts.
-        approve(&harness, &uri).await;
-    }
-
-    #[tokio::test]
-    async fn expired_request_uri_shows_an_error_page() {
-        let harness = Harness::new();
-        let uri = harness.push(&json!({})).await;
-        harness
-            .clock
-            .advance(harness.state.security.request_uri_ttl);
-        let response = harness.get(None, &authorize_path(&uri)).await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert!(!response.headers().contains_key(header::LOCATION));
-        let html = body_text(response).await;
-        assert!(html.contains("id=\"error-message\""));
-        assert!(!html.contains("id=\"return\""), "no way back is offered");
-    }
-
-    #[tokio::test]
-    async fn a_form_cannot_be_submitted_for_a_request_no_browser_arrived_for() {
-        let harness = Harness::new();
-        let arrived = harness.push(&json!({})).await;
-        let csrf = open_login(&harness, &arrived).await;
-        let uri = harness.push(&json!({})).await;
-        let response = submit(
-            &harness,
-            Some(&csrf),
-            &login_fields(&csrf, &uri, DEMO_PASSWORD),
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn arriving_in_time_gives_the_user_a_session_longer_than_the_request_uri() {
-        let harness = Harness::new();
-        let security = &harness.state.security;
-        assert_eq!(security.session_ttl, 300);
-        assert!(security.request_uri_ttl < security.session_ttl);
-
-        let uri = harness.push(&json!({})).await;
-        harness.clock.advance(security.request_uri_ttl - 1);
-        let response = harness.get(None, &authorize_path(&uri)).await;
-        let html = body_text(response).await;
-        // The page takes itself to the expiry page when the session ends.
-        assert!(html.contains(&format!(
-            "setTimeout(function(){{location.replace(\"/authorize?client_id=rp&request_uri={}\")}},300000);",
-            uri.replace(':', "%3A")
-        )));
-
-        // Long after the request_uri expired, the user can still sign in,
-        // read the consent page and decide.
-        harness.clock.advance(200);
-        let browser = sign_in(&harness, &uri).await;
-        assert!(browser.html.contains(")},100000);"));
-        assert!(browser.html.contains("expires 5 minutes after you arrived"));
-        harness.clock.advance(99);
-        let response = consent(&harness, &uri, &browser, &[], "approve").await;
-        assert!(redirect_params(&response).1.contains_key("code"));
-    }
-
-    #[tokio::test]
-    async fn an_expired_session_is_explained_and_returns_access_denied_to_the_client() {
-        let harness = Harness::new();
-        let uri = harness
-            .push(&json!({"purpose": "Opening your savings account"}))
-            .await;
-        let browser = sign_in(&harness, &uri).await;
-        harness.clock.advance(harness.state.security.session_ttl);
-
-        // Too late to approve: the user is told why instead.
-        let late = consent(&harness, &uri, &browser, &[], "approve").await;
-        assert_eq!(late.status(), StatusCode::BAD_REQUEST);
-        assert!(!late.headers().contains_key(header::LOCATION));
-        assert!(body_text(late).await.contains("id=\"session-expired\""));
-
-        // Reloading, as the page does by itself, shows the same.
-        let response = harness.get(None, &authorize_path(&uri)).await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert!(
-            response.headers()[header::CONTENT_SECURITY_POLICY]
-                .to_str()
-                .unwrap()
-                .contains("form-action 'self' https://rp.example.com"),
-            "the way back must not be blocked"
-        );
-        let html = body_text(response).await;
-        assert!(html.contains("Your session has expired"));
-        assert!(html.contains("within 5 minutes"));
-        assert!(html.contains("value=\"session-expired-return\">Return to Test RP</button>"));
-        assert!(!html.contains("Alex") && !html.contains("savings"));
-
-        // The way back is the standard error redirect.
-        let fields = base_fields(&browser.csrf, &uri, "session-expired-return");
-        let no_csrf = submit(&harness, None, &fields).await;
-        assert_eq!(no_csrf.status(), StatusCode::FORBIDDEN);
-        let response = submit(&harness, Some(&browser.csrf), &fields).await;
-        let (base, params) = redirect_params(&response);
-        assert_eq!(base, "https://rp.example.com/cb");
-        assert_eq!(params["error"], "access_denied");
-        assert_eq!(
-            params["error_description"],
-            "session timeout: the user did not complete the request in time"
-        );
-        assert_eq!(params["state"], "st-1");
-        assert_eq!(params["iss"], ISSUER);
-        assert!(!params.contains_key("code"));
-
-        // It is recorded as a refusal, and the request is used up.
-        let again = submit(&harness, Some(&browser.csrf), &fields).await;
-        assert_eq!(again.status(), StatusCode::BAD_REQUEST);
-        assert!(!body_text(again).await.contains("id=\"return\""));
-        let history = harness
-            .state
-            .store
-            .consent_history("demo-user-0001")
-            .await
-            .unwrap();
-        assert_eq!(history, Vec::new(), "recorded against no user");
-    }
-
-    #[tokio::test]
-    async fn the_way_back_is_only_for_expired_sessions() {
-        let harness = Harness::new();
-        let uri = harness.push(&json!({})).await;
-        let csrf = open_login(&harness, &uri).await;
-        let fields = base_fields(&csrf, &uri, "session-expired-return");
-        let response = submit(&harness, Some(&csrf), &fields).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        assert!(body_text(response).await.contains("id=\"password\""));
-    }
-
-    #[tokio::test]
-    async fn the_technical_experience_has_the_same_session() {
-        let harness = Harness::with_experience(crate::experience::Kind::Technical);
-        let uri = harness.push(&json!({})).await;
-        let csrf = open_login(&harness, &uri).await;
-        harness.clock.advance(299);
-        let response = harness.get(None, &authorize_path(&uri)).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        assert!(body_text(response).await.contains(")},1000);"));
-
-        harness.clock.advance(1);
-        let fields = base_fields(&csrf, &uri, "send");
-        let late = submit(&harness, Some(&csrf), &fields).await;
-        assert_eq!(late.status(), StatusCode::BAD_REQUEST);
-        assert!(body_text(late).await.contains("id=\"session-expired\""));
-        let fields = base_fields(&csrf, &uri, "session-expired-return");
-        let response = submit(&harness, Some(&csrf), &fields).await;
-        assert_eq!(redirect_params(&response).1["error"], "access_denied");
-    }
-
-    #[tokio::test]
-    async fn request_uri_is_bound_to_the_client_that_pushed_it() {
-        let harness = Harness::new();
-        let uri = harness.push(&json!({})).await;
-        let query: String = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("client_id", "someone-else")
-            .append_pair("request_uri", &uri)
-            .finish();
-        let response = harness
-            .get(None, &format!("{PATH_AUTHORIZE}?{query}"))
-            .await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert!(!response.headers().contains_key(header::LOCATION));
-    }
-
-    #[tokio::test]
-    async fn requests_without_par_are_rejected() {
-        let harness = Harness::new();
-        // Registered redirect URI: the error can be returned to the client.
-        let registered = "/authorize?client_id=rp&response_type=code&scope=openid&state=abc\
-                          &redirect_uri=https%3A%2F%2Frp.example.com%2Fcb";
-        let response = harness.get(None, registered).await;
-        let (base, params) = redirect_params(&response);
-        assert_eq!(base, "https://rp.example.com/cb");
-        assert_eq!(params["error"], "invalid_request");
-        assert_eq!(params["state"], "abc");
-        assert_eq!(params["iss"], ISSUER);
-
-        // Unregistered redirect URI: never redirect (no open redirector).
-        let unregistered = "/authorize?client_id=rp&response_type=code\
-                            &redirect_uri=https%3A%2F%2Fevil.example.com%2Fcb";
-        let response = harness.get(None, unregistered).await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert!(!response.headers().contains_key(header::LOCATION));
-
-        for path in [
-            "/authorize",
-            "/authorize?client_id=rp",
-            "/authorize?client_id=unknown&request_uri=x",
-        ] {
-            let response = harness.get(None, path).await;
-            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
-        }
-    }
-
-    #[tokio::test]
-    async fn existing_csrf_cookie_is_reused_across_tabs() {
-        let harness = Harness::new();
-        let uri = harness.push(&json!({})).await;
-        let first = open_login(&harness, &uri).await;
-        let request = axum::http::Request::get(authorize_path(&uri))
-            .header(header::COOKIE, format!("{CSRF_COOKIE}={first}"))
-            .body(axum::body::Body::empty())
-            .unwrap();
-        let response = harness.send(None, request).await;
-        assert!(
-            response.headers()[header::SET_COOKIE]
-                .to_str()
-                .unwrap()
-                .contains(&first)
-        );
-    }
-}
+mod tests;

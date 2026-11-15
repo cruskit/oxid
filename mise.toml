@@ -1,5 +1,11 @@
 [tools]
-rust = "stable"
+# Keep equal to rust-toolchain.toml and `rust-version` in Cargo.toml. Bump
+# all three together, deliberately, and fix any new lints in the same change.
+# The components are named here too: mise selects the toolchain through
+# RUSTUP_TOOLCHAIN, which overrides rust-toolchain.toml, so its component
+# list would not be installed.
+rust = { version = "1.99.1", components = "clippy,rustfmt", profile = "minimal" }
+cargo-deny = "0.20.2"
 
 [tasks.fmt]
 description = "Check formatting"
@@ -7,10 +13,19 @@ run = "cargo fmt --all -- --check"
 
 [tasks.lint]
 description = "Run clippy with warnings as errors"
+# Tests turn on the `test-util` feature, which makes the internals public,
+# so the library and binaries are also linted on their own: that is where
+# dead code and unreachable `pub` items show.
 run = [
   "cargo clippy --all-targets --locked -- -D warnings",
   "cargo clippy --all-targets --locked --features aws -- -D warnings",
+  "cargo clippy --lib --bins --locked -- -D warnings",
+  "cargo clippy --lib --bins --locked --features aws -- -D warnings",
 ]
+
+[tasks.deny]
+description = "Check dependencies for advisories, licences and sources"
+run = "cargo deny --locked check"
 
 [tasks.test]
 description = "Run unit and integration tests (set OXID_TEST_DYNAMODB_ENDPOINT to include the DynamoDB store)"
@@ -26,7 +41,7 @@ run = "scripts/conformance.sh"
 
 [tasks.check]
 description = "Fast local checks: format, lint, test"
-depends = ["fmt", "lint", "test"]
+depends = ["fmt", "lint", "deny", "test"]
 
 [tasks.build]
 description = "Full local build: format, lint, test, release binary, then the conformance suite"
