@@ -345,9 +345,11 @@ the client receives that error from the PAR endpoint.
 
 The purpose is shown, HTML-escaped, on the consent page. Each
 decided transaction is recorded with its `txn`, client, user, purpose, the
-claims shared, the claims declined and the outcome, and is written to the log. The records are
-held in memory (the most recent 10,000) and there is no consent history page
-for users yet.
+claims shared, the claims declined and the outcome, and is written to the log. A
+record is never replaced. Records are kept for `store.consent_retention_days`
+(default 365), and the in-memory store keeps at most the most recent 10,000.
+The store can read a user's history a page at a time, but there is no consent
+history page for users yet.
 
 ### Endpoints
 
@@ -496,6 +498,13 @@ See [`oxid.example.toml`](oxid.example.toml) for every option. Lifetimes are
 validated at startup against the limits the profiles set, so a configuration
 that would break compliance (for example a 20 minute access token) is refused.
 
+The standalone server may face the internet directly. Its listeners close a
+connection that does not send a request's headers within
+`server.header_read_timeout` (10 seconds), answer a request that takes longer
+than `server.request_timeout` (30 seconds) with `503`, and hold at most
+`server.max_connections` (1024) connections each. On Lambda, API Gateway
+handles connections instead.
+
 ## Testing
 
 | Command | What it runs |
@@ -591,7 +600,7 @@ src/
   lambda.rs          serving API Gateway events (feature `aws`)
   server.rs          TLS listeners, connection handling, shutdown
   tls.rs             TLS versions, cipher suites, client certificate policy
-  config.rs          configuration file and its validation
+  config.rs          configuration file (RawConfig) and the validated Config
   state.rs           shared application state
   http/              routing, endpoints, shared extractors and headers
   experience/        pluggable user experiences: technical, login, ci
@@ -603,13 +612,18 @@ src/
   jose.rs            compact JWS framing and key selection
   keys.rs            the provider's signing key and JWK Set
   pkce.rs            PKCE (S256)
-  claims.rs          claims parameter, claim release, verified_claims
+  claims/            the claim catalogue, claims parameter and consent,
+                     claim release, verified_claims
   id_token.rs        ID token and UserInfo claim assembly
   subject.rs         pairwise subject identifiers
+  epoch.rs           Timestamp and Seconds, with saturating arithmetic
+  cookie.rs          reading cookies and writing Set-Cookie
+  wire.rs            enums with names in config, forms and stored records
   client.rs          clients and the ClientRegistry trait
   user.rs            users and the UserStore trait
   store/             requests, codes, tokens, replay cache, consent records;
-                     memory and DynamoDB backends
+                     memory and DynamoDB backends, and their contract tests
+  testing/           fixtures for the unit tests
 templates/           the pages: HTML templates, their styles and script
 tests/               integration tests against a running instance
 conformance/         conformance suite configuration

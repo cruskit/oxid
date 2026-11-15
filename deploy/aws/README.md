@@ -84,3 +84,11 @@ client back end ─────────────────────�
 docker run --rm -p 127.0.0.1:8000:8000 amazon/dynamodb-local
 OXID_TEST_DYNAMODB_ENDPOINT=http://127.0.0.1:8000 cargo test --features aws store
 ```
+
+## Upgrading
+
+- **To 0.6.0.** The function also needs `dynamodb:TransactWriteItems`: each
+  consent record is now written as one transaction. Consent records now carry
+  the TTL attribute and expire `store.consent_retention_days` (default 365)
+  after the decision; records written by earlier versions have no TTL and are
+  kept until deleted. Grant the new action before deploying the new package.
