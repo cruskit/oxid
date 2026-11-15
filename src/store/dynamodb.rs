@@ -20,9 +20,10 @@ use aws_sdk_dynamodb::Client;
 use aws_sdk_dynamodb::error::SdkError;
 use aws_sdk_dynamodb::operation::put_item::PutItemError;
 use aws_sdk_dynamodb::operation::update_item::UpdateItemError;
-use aws_sdk_dynamodb::types::{AttributeValue, ReturnValue};
+use aws_sdk_dynamodb::operation::transact_write_items::TransactWriteItemsError;
+use aws_sdk_dynamodb::types::{AttributeValue, Put, ReturnValue, TransactWriteItem};
 
-use super::{Backend, Record, StoreError, StoreResult};
+use super::{Backend, LogPage, Record, StoreError, StoreResult};
 use crate::config::StoreConfig;
 use crate::epoch::Timestamp;
 
@@ -125,6 +126,24 @@ fn number_of<T: std::str::FromStr>(item: &Item, name: &str) -> StoreResult<Optio
             format!("item attribute '{name}' is not a number").into(),
         )),
     }
+}
+
+/// The sort key of a log entry: the time, zero padded so that keys order by
+/// it, then the id.
+fn log_sort_key(at: Timestamp, id: &str) -> String {
+    format!("{:020}#{id}", at.unix())
+}
+
+/// Whether a transaction was cancelled because a condition did not hold.
+fn is_condition_failure<R>(error: &SdkError<TransactWriteItemsError, R>) -> bool {
+    matches!(
+        error.as_service_error(),
+        Some(TransactWriteItemsError::TransactionCanceledException(cancelled))
+            if cancelled
+                .cancellation_reasons()
+                .iter()
+                .any(|reason| reason.code() == Some("ConditionalCheckFailed"))
+    )
 }
 
 fn record(item: &Item) -> StoreResult<Record> {
@@ -276,63 +295,73 @@ impl Backend for DynamoBackend {
         id: &str,
         at: Timestamp,
         value: String,
-    ) -> StoreResult<()> {
-            // The by-id item first: if the second write fails, the entry is
-            // findable but unlisted, rather than listed but unfindable.
-            self.client
-                .put_item()
+        expires_at: Timestamp,
+    ) -> StoreResult<bool> {
+        // Two items, one to find the entry by id and one to list it in its
+        // partition, written in one transaction: both or neither, and only
+        // if the id is new.
+        let put = |pk: String, sk: &str, value: String| -> StoreResult<TransactWriteItem> {
+            let put = Put::builder()
                 .table_name(&self.table)
-                .set_item(Some(item(
-                    &format!("logid#{id}"),
-                    SOLE,
-                    value.clone(),
-                    None,
-                )))
-                .send()
-                .await
-                .map_err(failure)?;
-            self.client
-                .put_item()
-                .table_name(&self.table)
-                .set_item(Some(item(
-                    &format!("log#{partition}"),
-                    // Zero padded so that the sort key orders by time.
-                    &format!("{at:020}#{id}"),
-                    value,
-                    None,
-                )))
-                .send()
-                .await
-                .map_err(failure)?;
-            Ok(())
+                .set_item(Some(item(&pk, sk, value, Some(expires_at))))
+                .condition_expression("attribute_not_exists(#pk)")
+                .expression_attribute_names("#pk", HASH_KEY)
+                .build()
+                .map_err(|error| StoreError::Unavailable(error.into()))?;
+            Ok(TransactWriteItem::builder().put(put).build())
+        };
+        let result = self
+            .client
+            .transact_write_items()
+            .transact_items(put(format!("logid#{id}"), SOLE, value.clone())?)
+            .transact_items(put(
+                format!("log#{partition}"),
+                // Zero padded so that the sort key orders by time.
+                &log_sort_key(at, id),
+                value,
+            )?)
+            .send()
+            .await;
+        match result {
+            Ok(_) => Ok(true),
+            Err(error) if is_condition_failure(&error) => Ok(false),
+            Err(error) => Err(failure(error)),
         }
+    }
 
-    async fn log_list(&self, partition: &str) -> StoreResult<Vec<String>> {
-            let mut values = Vec::new();
-            let mut start = None;
-            loop {
-                let output = self
-                    .client
-                    .query()
-                    .table_name(&self.table)
-                    .key_condition_expression("#pk = :pk")
-                    .expression_attribute_names("#pk", HASH_KEY)
-                    .expression_attribute_values(":pk", string(format!("log#{partition}")))
-                    .scan_index_forward(false)
-                    .consistent_read(true)
-                    .set_exclusive_start_key(start)
-                    .send()
-                    .await
-                    .map_err(failure)?;
-                for item in output.items() {
-                    values.push(value_of(item)?);
-                }
-                start = output.last_evaluated_key;
-                if start.is_none() {
-                    return Ok(values);
-                }
-            }
-        }
+    async fn log_list(
+        &self,
+        partition: &str,
+        limit: usize,
+        cursor: Option<&str>,
+    ) -> StoreResult<LogPage> {
+        let pk = format!("log#{partition}");
+        let start = cursor.map(|sk| key(&pk, sk));
+        let output = self
+            .client
+            .query()
+            .table_name(&self.table)
+            .key_condition_expression("#pk = :pk")
+            .expression_attribute_names("#pk", HASH_KEY)
+            .expression_attribute_values(":pk", string(&pk))
+            .scan_index_forward(false)
+            .consistent_read(true)
+            .limit(i32::try_from(limit).unwrap_or(i32::MAX))
+            .set_exclusive_start_key(start)
+            .send()
+            .await
+            .map_err(failure)?;
+        let values = output.items().iter().map(value_of).collect::<StoreResult<_>>()?;
+        // The sort key of the last item read is where the next page starts.
+        let next = output
+            .last_evaluated_key
+            .as_ref()
+            .and_then(|last| match last.get(RANGE_KEY) {
+                Some(AttributeValue::S(sk)) => Some(sk.clone()),
+                _ => None,
+            });
+        Ok(LogPage { values, next })
+    }
 
     async fn log_get(&self, id: &str) -> StoreResult<Option<String>> {
             let key_ = format!("logid#{id}");

@@ -63,7 +63,9 @@ pub(crate) async fn consent_history(store: &Store, tag: &str) {
     store
         .record_consent(consent(&txn(1), Some(&u1), NOW))
         .await
-        .unwrap();
+        .unwrap()
+        .then_some(())
+        .expect("a new transaction is recorded");
     store
         .record_consent(consent(&txn(2), Some(&u2), NOW + Seconds::new(1)))
         .await
@@ -77,15 +79,20 @@ pub(crate) async fn consent_history(store: &Store, tag: &str) {
         .await
         .unwrap();
 
-    let history = store.consent_history(&u1).await.unwrap();
+    let history = store.consent_history(&u1, 10, None).await.unwrap();
+    assert_eq!(history.next, None, "everything fits on one page");
+    let history = history.records;
     let txns: Vec<&str> = history.iter().map(|r| r.txn.as_str()).collect();
     assert_eq!(txns, [txn(4), txn(1)]);
     assert_eq!(
         history[1].purpose.as_deref(),
         Some(format!("purpose of {}", txn(1)).as_str())
     );
-    let nobody = store.consent_history(&format!("{tag}-nobody")).await;
-    assert_eq!(nobody.unwrap(), Vec::new());
+    let nobody = store
+        .consent_history(&format!("{tag}-nobody"), 10, None)
+        .await
+        .unwrap();
+    assert_eq!(nobody.records, Vec::new());
     assert_eq!(
         store.consent(&txn(3)).await.unwrap().unwrap().outcome,
         ConsentOutcome::Denied
@@ -98,9 +105,39 @@ pub(crate) async fn consent_history(store: &Store, tag: &str) {
             .is_none()
     );
 
-    // Records are not transient state: purging leaves them alone.
+    // One record a page: the cursor walks the history, newest first.
+    let first = store.consent_history(&u1, 1, None).await.unwrap();
+    assert_eq!(first.records[0].txn, txn(4));
+    let cursor = first.next.expect("there is a second page");
+    let second = store.consent_history(&u1, 1, Some(&cursor)).await.unwrap();
+    assert_eq!(second.records[0].txn, txn(1));
+    if let Some(cursor) = second.next {
+        // A backend may only find out that a page was the last on the next
+        // read; that read must then come back empty.
+        let third = store.consent_history(&u1, 1, Some(&cursor)).await.unwrap();
+        assert!(third.records.is_empty() && third.next.is_none());
+    }
+
+    // A record is never replaced: the same transaction cannot be recorded
+    // twice, whoever it names.
+    let mut forged = consent(&txn(1), Some(&u2), NOW + Seconds::new(9));
+    forged.purpose = Some("overwritten".to_owned());
+    assert!(!store.record_consent(forged).await.unwrap());
+    let kept = store.consent(&txn(1)).await.unwrap().unwrap();
+    assert_eq!(kept.user_subject.as_deref(), Some(u1.as_str()));
+    assert_eq!(
+        store.consent_history(&u2, 10, None).await.unwrap().records.len(),
+        1,
+        "nothing was listed for the other user either"
+    );
+
+    // Records are kept for their retention period: purging state that
+    // expired long before then leaves them alone.
     store.purge(NOW + Seconds::new(1_000_000)).await.unwrap();
-    assert_eq!(store.consent_history(&u1).await.unwrap().len(), 2);
+    assert_eq!(
+        store.consent_history(&u1, 10, None).await.unwrap().records.len(),
+        2
+    );
 }
 
 pub(crate) async fn pushed_requests(store: &Store) {

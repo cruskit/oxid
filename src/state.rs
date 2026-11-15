@@ -164,6 +164,7 @@ pub(crate) fn configure_store(store: Store, config: &Config) -> Store {
     store
         .grant_lifetime(config.security.refresh_token_ttl + config.security.access_token_ttl)
         .session_ttl(config.security.session_ttl)
+        .consent_retention(config.store.consent_retention())
 }
 
 fn store_is_shared(config: &Config) -> bool {

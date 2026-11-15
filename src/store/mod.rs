@@ -49,6 +49,12 @@ pub(crate) const EXPIRED_SESSION_RETENTION: Seconds = Seconds::hours(1);
 /// configured (`security.session_ttl`).
 pub(crate) const DEFAULT_SESSION_TTL: Seconds = Seconds::minutes(5);
 
+/// How long a consent record is kept, unless configured otherwise.
+pub(crate) const DEFAULT_CONSENT_RETENTION: Seconds = Seconds::days(365);
+
+/// The most consent records one page of history holds.
+pub(crate) const MAX_CONSENT_PAGE: usize = 100;
+
 /// Consent records kept before the oldest are dropped.
 pub(crate) const MAX_CONSENT_RECORDS: usize = 10_000;
 
@@ -292,6 +298,23 @@ impl Record {
     }
 }
 
+/// One page of a log partition.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct LogPage {
+    /// The entries' values, most recent first.
+    pub values: Vec<String>,
+    /// Where the next page starts, if there may be one. Opaque.
+    pub next: Option<String>,
+}
+
+/// One page of a user's consent history.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ConsentPage {
+    pub records: Vec<ConsentRecord>,
+    /// Pass to [`Store::consent_history`] for the next page.
+    pub next: Option<String>,
+}
+
 /// Where the store's data lives: a key-value table with a few atomic
 /// operations, and an append-only log.
 ///
@@ -341,19 +364,29 @@ pub(crate) trait Backend: std::fmt::Debug + Send + Sync {
     /// distinct counts.
     async fn increment(&self, key: &str) -> StoreResult<Option<Record>>;
 
-    /// Append an entry to the log. `id` identifies the entry; `partition`
-    /// groups entries that are listed together; `at` orders them.
+    /// Append an entry to the log, kept until `expires_at`. `id`
+    /// identifies the entry; `partition` groups entries that are listed
+    /// together; `at` orders them. Returns `false`, and writes nothing, if
+    /// an entry with this `id` is already there: entries are never
+    /// overwritten. The entry is written whole or not at all.
     async fn log_append(
         &self,
         partition: &str,
         id: &str,
         at: Timestamp,
         value: String,
-    ) -> StoreResult<()>;
+        expires_at: Timestamp,
+    ) -> StoreResult<bool>;
 
-    /// The entries of one partition, most recent first.
+    /// Up to `limit` entries of one partition, most recent first, starting
+    /// after `cursor` (from a previous page's [`LogPage::next`]).
     #[cfg_attr(not(test), expect(dead_code, reason = "the read side of the consent log, for the planned consent history"))]
-    async fn log_list(&self, partition: &str) -> StoreResult<Vec<String>>;
+    async fn log_list(
+        &self,
+        partition: &str,
+        limit: usize,
+        cursor: Option<&str>,
+    ) -> StoreResult<LogPage>;
 
     #[cfg_attr(
         not(any(test, feature = "test-util")),
@@ -380,6 +413,8 @@ pub(crate) struct Store {
     grant_lifetime: Seconds,
     /// How long a user has at the authorization endpoint once they arrive.
     session_ttl: Seconds,
+    /// How long a consent record is kept after the decision.
+    consent_retention: Seconds,
 }
 
 impl Default for Store {
@@ -442,7 +477,15 @@ impl Store {
             backend,
             grant_lifetime: DEFAULT_GRANT_LIFETIME,
             session_ttl: DEFAULT_SESSION_TTL,
+            consent_retention: DEFAULT_CONSENT_RETENTION,
         }
+    }
+
+    /// Set how long consent records are kept.
+    #[must_use]
+    pub(crate) fn consent_retention(mut self, seconds: Seconds) -> Self {
+        self.consent_retention = seconds;
+        self
     }
 
     /// Set how long a user has at the authorization endpoint once they
@@ -791,43 +834,71 @@ impl Store {
             .await
     }
 
-    /// Record a decided transaction. Records do not expire; the in-memory
-    /// backend keeps only the most recent [`MAX_CONSENT_RECORDS`].
-    pub(crate) async fn record_consent(&self, record: ConsentRecord) -> StoreResult<()> {
+    /// Record a decided transaction. It is kept for the configured
+    /// retention, after which the backend drops it (DynamoDB by TTL); the
+    /// in-memory backend also keeps only the most recent
+    /// [`MAX_CONSENT_RECORDS`]. Returns `false`, and changes nothing, if
+    /// this transaction was already recorded: a record is never replaced.
+    pub(crate) async fn record_consent(&self, record: ConsentRecord) -> StoreResult<bool> {
         self.backend
             .log_append(
                 &consent_partition(record.user_subject.as_deref()),
                 &record.txn,
                 record.decided_at,
                 encode(&record)?,
+                record.decided_at + self.consent_retention,
             )
             .await
     }
 
-    /// A user's decided transactions, most recent first.
+    /// A user's decided transactions, most recent first, at most `limit`
+    /// (and never more than [`MAX_CONSENT_PAGE`]) at a time. Pass the
+    /// previous page's `next` as `cursor` to continue.
     ///
     /// Consent history is a planned feature; nothing outside the tests
     /// reads this yet. Do not remove it as dead code.
     #[cfg_attr(not(test), expect(dead_code, reason = "the read side of the consent log, for the planned consent history"))]
-    pub(crate) async fn consent_history(&self, user_subject: &str) -> StoreResult<Vec<ConsentRecord>> {
-        self.backend
-            .log_list(&consent_partition(Some(user_subject)))
-            .await?
-            .iter()
-            .map(|value| decode(value))
-            .collect()
+    pub(crate) async fn consent_history(
+        &self,
+        user_subject: &str,
+        limit: usize,
+        cursor: Option<&str>,
+    ) -> StoreResult<ConsentPage> {
+        self.consent_page(Some(user_subject), limit, cursor).await
+    }
+
+    #[cfg_attr(not(test), expect(dead_code, reason = "the read side of the consent log, for the planned consent history"))]
+    async fn consent_page(
+        &self,
+        user_subject: Option<&str>,
+        limit: usize,
+        cursor: Option<&str>,
+    ) -> StoreResult<ConsentPage> {
+        let page = self
+            .backend
+            .log_list(
+                &consent_partition(user_subject),
+                limit.clamp(1, MAX_CONSENT_PAGE),
+                cursor,
+            )
+            .await?;
+        Ok(ConsentPage {
+            records: page
+                .values
+                .iter()
+                .map(|value| decode(value))
+                .collect::<StoreResult<_>>()?,
+            next: page.next,
+        })
     }
 
     /// Decisions made before anyone signed in, most recent first.
     #[cfg(test)]
     pub(crate) async fn consent_history_of_nobody(&self) -> Vec<ConsentRecord> {
-        self.backend
-            .log_list(&consent_partition(None))
+        self.consent_page(None, MAX_CONSENT_PAGE, None)
             .await
             .unwrap()
-            .iter()
-            .map(|value| decode(value).unwrap())
-            .collect()
+            .records
     }
 
     /// The record of the transaction identified by `txn`. Like

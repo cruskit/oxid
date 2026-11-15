@@ -40,8 +40,7 @@ use crate::experience::{
 };
 use crate::state::AppState;
 use crate::store::{
-    AuthorizationCode, ConsentOutcome, ConsentRecord, Grant, PushedRequest, StoreError,
-    StoreResult, Visit,
+    AuthorizationCode, ConsentOutcome, ConsentRecord, Grant, PushedRequest, StoreError, Visit,
 };
 use crate::util::{ct_eq, random_token};
 
@@ -537,7 +536,7 @@ async fn record_decision(
     approval: Option<&Approval>,
     now: Timestamp,
     outcome: ConsentOutcome,
-) -> StoreResult<String> {
+) -> Result<String, AuthorizeError> {
     let txn = approval
         .and_then(|a| a.txn.clone())
         .unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -555,7 +554,7 @@ async fn record_decision(
         ?outcome,
         "authorization request decided"
     );
-    state
+    let recorded = state
         .store
         .record_consent(ConsentRecord {
             txn: txn.clone(),
@@ -568,6 +567,14 @@ async fn record_decision(
             outcome,
         })
         .await?;
+    // Transaction identifiers are fresh UUIDs, except under the technical
+    // experience, which takes one from its form: a record already there is
+    // never replaced.
+    if !recorded {
+        return Err(AuthorizeError::bad_request(
+            "This transaction has already been decided. Please start again from the application.",
+        ));
+    }
     Ok(txn)
 }
 

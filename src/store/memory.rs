@@ -3,17 +3,14 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, MutexGuard};
 
-use super::{Backend, MAX_CONSENT_RECORDS, Record, StoreResult};
+use super::{Backend, LogPage, MAX_CONSENT_RECORDS, Record, StoreResult};
 use crate::epoch::Timestamp;
 
 #[derive(Debug)]
 struct LogEntry {
+    expires_at: Timestamp,
     #[cfg_attr(not(test), expect(dead_code, reason = "the read side of the consent log, for the planned consent history"))]
     partition: String,
-    #[cfg_attr(
-        not(any(test, feature = "test-util")),
-        expect(dead_code, reason = "the read side of the consent log, for the planned consent history")
-    )]
     id: String,
     #[cfg_attr(
         not(any(test, feature = "test-util")),
@@ -152,28 +149,53 @@ impl Backend for MemoryBackend {
         id: &str,
         _at: Timestamp,
         value: String,
-    ) -> StoreResult<()> {
+        expires_at: Timestamp,
+    ) -> StoreResult<bool> {
         let mut inner = self.lock();
+        if inner.log.iter().any(|entry| entry.id == id) {
+            return Ok(false);
+        }
         if inner.log.len() >= MAX_CONSENT_RECORDS {
             inner.log.pop_front();
         }
         inner.log.push_back(LogEntry {
+            expires_at,
             partition: partition.to_owned(),
             id: id.to_owned(),
             value,
         });
-        Ok(())
+        Ok(true)
     }
 
-    async fn log_list(&self, partition: &str) -> StoreResult<Vec<String>> {
-        Ok(self
-            .lock()
+    async fn log_list(
+        &self,
+        partition: &str,
+        limit: usize,
+        cursor: Option<&str>,
+    ) -> StoreResult<LogPage> {
+        let inner = self.lock();
+        let mut entries = inner
             .log
             .iter()
             .rev()
-            .filter(|entry| entry.partition == partition)
-            .map(|entry| entry.value.clone())
-            .collect())
+            .filter(|entry| entry.partition == partition);
+        // The cursor is the id of the last entry of the previous page.
+        if let Some(cursor) = cursor {
+            for entry in entries.by_ref() {
+                if entry.id == cursor {
+                    break;
+                }
+            }
+        }
+        let page: Vec<&LogEntry> = entries.by_ref().take(limit).collect();
+        let more = entries.next().is_some();
+        Ok(LogPage {
+            values: page.iter().map(|entry| entry.value.clone()).collect(),
+            next: page
+                .last()
+                .filter(|_| more)
+                .map(|entry| entry.id.clone()),
+        })
     }
 
     async fn log_get(&self, id: &str) -> StoreResult<Option<String>> {
@@ -187,7 +209,9 @@ impl Backend for MemoryBackend {
     }
 
     async fn purge(&self, now: Timestamp) -> StoreResult<()> {
-        self.lock().records.retain(|_, record| record.live(now));
+        let mut inner = self.lock();
+        inner.records.retain(|_, record| record.live(now));
+        inner.log.retain(|entry| entry.expires_at > now);
         Ok(())
     }
 }

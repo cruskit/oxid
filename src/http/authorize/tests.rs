@@ -331,9 +331,10 @@ async fn decisions_are_recorded_with_their_purpose() {
     let history = harness
         .state
         .store
-        .consent_history("demo-user-0001")
+        .consent_history("demo-user-0001", 100, None)
         .await
-        .unwrap();
+        .unwrap()
+        .records;
     assert_eq!(history.len(), 1);
     let record = &history[0];
     assert_eq!(
@@ -354,9 +355,10 @@ async fn decisions_are_recorded_with_their_purpose() {
         harness
             .state
             .store
-            .consent_history("demo-user-0001")
+            .consent_history("demo-user-0001", 100, None)
             .await
             .unwrap()
+            .records
             .len(),
         1
     );
@@ -393,9 +395,10 @@ async fn voluntary_claims_are_shared_only_if_chosen_and_essential_ones_always() 
     let record = &harness
         .state
         .store
-        .consent_history("demo-user-0001")
+        .consent_history("demo-user-0001", 100, None)
         .await
-        .unwrap()[0];
+        .unwrap()
+        .records[0];
     assert_eq!(record.claims, ["given_name", "over18", "phone_number"]);
     assert_eq!(record.declined, ["email", "over21"]);
 
@@ -416,9 +419,10 @@ async fn voluntary_claims_are_shared_only_if_chosen_and_essential_ones_always() 
     let record = &harness
         .state
         .store
-        .consent_history("demo-user-0001")
+        .consent_history("demo-user-0001", 100, None)
         .await
-        .unwrap()[0];
+        .unwrap()
+        .records[0];
     assert_eq!(record.claims, ["given_name", "over18"]);
     assert_eq!(record.declined, ["email", "over21", "phone_number"]);
 
@@ -427,9 +431,10 @@ async fn voluntary_claims_are_shared_only_if_chosen_and_essential_ones_always() 
     let record = &harness
         .state
         .store
-        .consent_history("demo-user-0001")
+        .consent_history("demo-user-0001", 100, None)
         .await
-        .unwrap()[0];
+        .unwrap()
+        .records[0];
     assert_eq!(record.declined, ["email"]);
 }
 
@@ -676,9 +681,10 @@ async fn an_expired_session_is_explained_and_returns_access_denied_to_the_client
     let history = harness
         .state
         .store
-        .consent_history("demo-user-0001")
+        .consent_history("demo-user-0001", 100, None)
         .await
-        .unwrap();
+        .unwrap()
+        .records;
     assert_eq!(history, Vec::new(), "recorded against no user");
 }
 

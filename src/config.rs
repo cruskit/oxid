@@ -155,7 +155,7 @@ pub enum StoreBackend {
     Dynamodb,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct StoreConfig {
     pub backend: StoreBackend,
@@ -166,10 +166,38 @@ pub struct StoreConfig {
     /// Override the DynamoDB endpoint, e.g. `http://localhost:8000` for
     /// DynamoDB Local.
     pub endpoint_url: Option<String>,
+    /// Days a consent record is kept after the decision, then dropped.
+    pub consent_retention_days: u32,
+}
+
+/// The longest consent records may be kept: ten years.
+pub const MAX_CONSENT_RETENTION_DAYS: u32 = 3650;
+
+impl Default for StoreConfig {
+    fn default() -> Self {
+        Self {
+            backend: StoreBackend::default(),
+            table: None,
+            region: None,
+            endpoint_url: None,
+            consent_retention_days: 365,
+        }
+    }
+}
+
+impl StoreConfig {
+    /// How long consent records are kept.
+    pub(crate) fn consent_retention(&self) -> Seconds {
+        Seconds::days(i64::from(self.consent_retention_days))
+    }
 }
 
 impl StoreConfig {
     fn validate(&self) -> Result<()> {
+        ensure!(
+            (1..=MAX_CONSENT_RETENTION_DAYS).contains(&self.consent_retention_days),
+            "consent_retention_days must be between 1 and {MAX_CONSENT_RETENTION_DAYS}"
+        );
         match self.backend {
             StoreBackend::Memory => ensure!(
                 self.table.is_none() && self.region.is_none() && self.endpoint_url.is_none(),

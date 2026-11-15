@@ -17,8 +17,14 @@ async fn consent_records_are_bounded_in_memory() {
             .unwrap();
     }
     assert_eq!(
-        store.consent_history("u1").await.unwrap().len(),
-        MAX_CONSENT_RECORDS
+        store
+            .consent_history("u1", MAX_CONSENT_PAGE, None)
+            .await
+            .unwrap()
+            .records
+            .len(),
+        MAX_CONSENT_PAGE,
+        "a page holds at most MAX_CONSENT_PAGE"
     );
     assert!(
         store.consent("t0").await.unwrap().is_none(),
@@ -74,4 +80,22 @@ async fn revocation_outlives_the_grant_tokens() {
     assert_eq!(backend.len(), 1, "the revocation is still remembered");
     store.purge(NOW + Seconds::new(1001)).await.unwrap();
     assert!(backend.is_empty());
+}
+
+#[tokio::test]
+async fn consent_records_expire_after_the_retention_period() {
+    let store = Store::default().consent_retention(Seconds::days(30));
+    assert!(
+        store
+            .record_consent(consent("old", Some("u1"), NOW))
+            .await
+            .unwrap()
+    );
+    store
+        .purge(NOW + Seconds::days(30) - Seconds::new(1))
+        .await
+        .unwrap();
+    assert!(store.consent("old").await.unwrap().is_some());
+    store.purge(NOW + Seconds::days(30)).await.unwrap();
+    assert!(store.consent("old").await.unwrap().is_none());
 }

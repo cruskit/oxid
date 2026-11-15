@@ -136,6 +136,10 @@ backend = "memory"
 # region = "ap-southeast-2"               # defaults to the environment's
 # endpoint_url = "http://localhost:8000"  # DynamoDB Local
 
+# Days a consent record (the decision on each authorization request) is kept,
+# 1 to 3650. Records are dropped after that: by the table's TTL on DynamoDB.
+# consent_retention_days = 365
+
 # Lifetimes and tolerances, in seconds. These are the defaults. Values outside
 # the limits set by FAPI 2.0 and ConnectID are refused at startup.
 [security]
