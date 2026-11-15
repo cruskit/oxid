@@ -1,7 +1,10 @@
 [tools]
 # Keep equal to rust-toolchain.toml and `rust-version` in Cargo.toml. Bump
 # all three together, deliberately, and fix any new lints in the same change.
-rust = "1.99.1"
+# The components are named here too: mise selects the toolchain through
+# RUSTUP_TOOLCHAIN, which overrides rust-toolchain.toml, so its component
+# list would not be installed.
+rust = { version = "1.99.1", components = "clippy,rustfmt", profile = "minimal" }
 cargo-deny = "0.20.2"
 
 [tasks.fmt]
