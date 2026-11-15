@@ -27,8 +27,6 @@
 
 use std::collections::BTreeSet;
 use std::fmt::Debug;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use askama::Template;
@@ -295,23 +293,21 @@ pub(crate) enum ExperienceError {
 /// What an experience's step produces.
 pub(crate) type StepResult = Result<Step, ExperienceError>;
 
-/// A boxed future, so that [`Experience`] can be used as a trait object.
-pub(crate) type StepFuture<'a> = Pin<Box<dyn Future<Output = StepResult> + Send + 'a>>;
-
 /// Form fields submitted by the browser.
 pub(crate) type Form = crate::http::Params;
 
 /// One way of interacting with the user at the authorization endpoint.
+#[async_trait::async_trait]
 pub(crate) trait Experience: Send + Sync + Debug {
     /// The name used to select this experience in configuration.
     fn kind(&self) -> Kind;
 
     /// The first page, shown when the browser arrives with a valid request.
-    fn start<'a>(&'a self, interaction: &'a Interaction<'a>) -> StepFuture<'a>;
+    async fn start(&self, interaction: &Interaction<'_>) -> StepResult;
 
     /// Handle a form submission. The endpoint has already verified the CSRF
     /// token and that the request is still pending.
-    fn submit<'a>(&'a self, interaction: &'a Interaction<'a>, form: &'a Form) -> StepFuture<'a>;
+    async fn submit(&self, interaction: &Interaction<'_>, form: &Form) -> StepResult;
 }
 
 #[cfg(test)]

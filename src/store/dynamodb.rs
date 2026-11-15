@@ -22,7 +22,7 @@ use aws_sdk_dynamodb::operation::put_item::PutItemError;
 use aws_sdk_dynamodb::operation::update_item::UpdateItemError;
 use aws_sdk_dynamodb::types::{AttributeValue, ReturnValue};
 
-use super::{Backend, BackendFuture, Record, StoreError, StoreResult};
+use super::{Backend, Record, StoreError, StoreResult};
 use crate::config::StoreConfig;
 use crate::epoch::Timestamp;
 
@@ -135,14 +135,14 @@ fn record(item: &Item) -> StoreResult<Record> {
     })
 }
 
+#[async_trait::async_trait]
 impl Backend for DynamoBackend {
-    fn put<'a>(
-        &'a self,
-        key: &'a str,
+    async fn put(
+        &self,
+        key: &str,
         value: String,
         expires_at: Option<Timestamp>,
-    ) -> BackendFuture<'a, ()> {
-        Box::pin(async move {
+    ) -> StoreResult<()> {
             self.client
                 .put_item()
                 .table_name(&self.table)
@@ -151,17 +151,15 @@ impl Backend for DynamoBackend {
                 .await
                 .map_err(failure)?;
             Ok(())
-        })
-    }
+        }
 
-    fn put_new<'a>(
-        &'a self,
-        key: &'a str,
+    async fn put_new(
+        &self,
+        key: &str,
         value: String,
         expires_at: Option<Timestamp>,
         now: Timestamp,
-    ) -> BackendFuture<'a, bool> {
-        Box::pin(async move {
+    ) -> StoreResult<bool> {
             let result = self
                 .client
                 .put_item()
@@ -186,11 +184,9 @@ impl Backend for DynamoBackend {
                 }
                 Err(error) => Err(failure(error)),
             }
-        })
-    }
+        }
 
-    fn get<'a>(&'a self, key_: &'a str) -> BackendFuture<'a, Option<Record>> {
-        Box::pin(async move {
+    async fn get(&self, key_: &str) -> StoreResult<Option<Record>> {
             let output = self
                 .client
                 .get_item()
@@ -201,11 +197,9 @@ impl Backend for DynamoBackend {
                 .await
                 .map_err(failure)?;
             output.item.as_ref().map(record).transpose()
-        })
-    }
+        }
 
-    fn take<'a>(&'a self, key_: &'a str) -> BackendFuture<'a, Option<Record>> {
-        Box::pin(async move {
+    async fn take(&self, key_: &str) -> StoreResult<Option<Record>> {
             let output = self
                 .client
                 .delete_item()
@@ -216,11 +210,9 @@ impl Backend for DynamoBackend {
                 .await
                 .map_err(failure)?;
             output.attributes.as_ref().map(record).transpose()
-        })
-    }
+        }
 
-    fn increment<'a>(&'a self, key_: &'a str) -> BackendFuture<'a, Option<Record>> {
-        Box::pin(async move {
+    async fn increment(&self, key_: &str) -> StoreResult<Option<Record>> {
             let result = self
                 .client
                 .update_item()
@@ -246,17 +238,15 @@ impl Backend for DynamoBackend {
                 }
                 Err(error) => Err(failure(error)),
             }
-        })
-    }
+        }
 
-    fn log_append<'a>(
-        &'a self,
-        partition: &'a str,
-        id: &'a str,
+    async fn log_append(
+        &self,
+        partition: &str,
+        id: &str,
         at: Timestamp,
         value: String,
-    ) -> BackendFuture<'a, ()> {
-        Box::pin(async move {
+    ) -> StoreResult<()> {
             // The by-id item first: if the second write fails, the entry is
             // findable but unlisted, rather than listed but unfindable.
             self.client
@@ -285,11 +275,9 @@ impl Backend for DynamoBackend {
                 .await
                 .map_err(failure)?;
             Ok(())
-        })
-    }
+        }
 
-    fn log_list<'a>(&'a self, partition: &'a str) -> BackendFuture<'a, Vec<String>> {
-        Box::pin(async move {
+    async fn log_list(&self, partition: &str) -> StoreResult<Vec<String>> {
             let mut values = Vec::new();
             let mut start = None;
             loop {
@@ -314,19 +302,16 @@ impl Backend for DynamoBackend {
                     return Ok(values);
                 }
             }
-        })
-    }
+        }
 
-    fn log_get<'a>(&'a self, id: &'a str) -> BackendFuture<'a, Option<String>> {
-        Box::pin(async move {
+    async fn log_get(&self, id: &str) -> StoreResult<Option<String>> {
             let key_ = format!("logid#{id}");
             Ok(self.get(&key_).await?.map(|record| record.value))
-        })
-    }
+        }
 
-    fn purge(&self, _now: Timestamp) -> BackendFuture<'_, ()> {
+    async fn purge(&self, _now: Timestamp) -> StoreResult<()> {
         // The table's TTL setting removes expired items.
-        Box::pin(std::future::ready(Ok(())))
+        Ok(())
     }
 }
 

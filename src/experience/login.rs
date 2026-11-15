@@ -23,7 +23,7 @@ use serde_json::{Map, Value};
 use crate::epoch::Seconds;
 use crate::cookie::{SameSite, SetCookie};
 use super::{
-    Approval, Decision, Experience, Form, FormTarget, Interaction, Kind, Page, Step, StepFuture,
+    Approval, Decision, Experience, Form, FormTarget, Interaction, Kind, Page, Step,
     StepResult, duration_text, render,
 };
 use crate::claims::{self, ConsentItem};
@@ -64,23 +64,21 @@ impl Login {
     }
 }
 
+#[async_trait::async_trait]
 impl Experience for Login {
     fn kind(&self) -> Kind {
         Kind::Login
     }
 
-    fn start<'a>(&'a self, interaction: &'a Interaction<'a>) -> StepFuture<'a> {
+    async fn start(&self, interaction: &Interaction<'_>) -> StepResult {
         // A reload after signing in comes back to the consent page.
-        Box::pin(async move {
-            Ok(match self.signed_in(interaction) {
-                Some(user) => consent_page(interaction, &user, false)?.into(),
-                None => login_page(interaction, None)?.into(),
-            })
+        Ok(match self.signed_in(interaction) {
+            Some(user) => consent_page(interaction, &user, false)?.into(),
+            None => login_page(interaction, None)?.into(),
         })
     }
 
-    fn submit<'a>(&'a self, interaction: &'a Interaction<'a>, form: &'a Form) -> StepFuture<'a> {
-        Box::pin(async move {
+    async fn submit(&self, interaction: &Interaction<'_>, form: &Form) -> StepResult {
             let action = form.get("action").and_then(|action| action.parse().ok());
             Ok(match (action, self.signed_in(interaction)) {
                 (Some(Action::Deny), _) => Step {
@@ -102,8 +100,7 @@ impl Experience for Login {
                 (_, Some(user)) => consent_page(interaction, &user, false)?.into(),
                 (_, None) => login_page(interaction, None)?.into(),
             })
-        })
-    }
+        }
 }
 
 impl Login {

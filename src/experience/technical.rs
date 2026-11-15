@@ -34,7 +34,7 @@ use crate::epoch::Seconds;
 use crate::cookie::{SameSite, SetCookie};
 use super::{
     Approval, Decision, ERROR_CONDITIONS, ErrorCondition, Experience, Form, FormTarget,
-    Interaction, Kind, MAX_ERROR_DESCRIPTION, Page, Step, StepFuture, StepResult, error_condition,
+    Interaction, Kind, MAX_ERROR_DESCRIPTION, Page, Step, StepResult, error_condition,
     everything_requested, is_error_description, render,
 };
 use crate::id_token::{self, ClaimEdits};
@@ -166,18 +166,15 @@ struct View<'a> {
     notice: Option<String>,
 }
 
+#[async_trait::async_trait]
 impl Experience for Technical {
     fn kind(&self) -> Kind {
         Kind::Technical
     }
 
-    fn start<'a>(&'a self, interaction: &'a Interaction<'a>) -> StepFuture<'a> {
-        Box::pin(async move { Ok(self.page(interaction, &View::default())?.into()) })
-    }
+    async fn start(&self, interaction: &Interaction<'_>) -> StepResult { Ok(self.page(interaction, &View::default())?.into()) }
 
-    fn submit<'a>(&'a self, interaction: &'a Interaction<'a>, form: &'a Form) -> StepFuture<'a> {
-        Box::pin(async move { self.handle(interaction, form) })
-    }
+    async fn submit(&self, interaction: &Interaction<'_>, form: &Form) -> StepResult { self.handle(interaction, form) }
 }
 
 impl Technical {

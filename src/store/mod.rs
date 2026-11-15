@@ -14,8 +14,6 @@
 //! digest, so the bearer values themselves are never held.
 
 use std::collections::BTreeSet;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use serde::de::DeserializeOwned;
@@ -279,12 +277,10 @@ pub(crate) struct Record {
 }
 
 impl Record {
-    fn live(&self, now: Timestamp) -> bool {
+    pub(crate) fn live(&self, now: Timestamp) -> bool {
         self.expires_at.is_none_or(|at| at > now)
     }
 }
-
-pub(crate) type BackendFuture<'a, T> = Pin<Box<dyn Future<Output = StoreResult<T>> + Send + 'a>>;
 
 /// Where the store's data lives: a key-value table with a few atomic
 /// operations, and an append-only log.
@@ -292,60 +288,61 @@ pub(crate) type BackendFuture<'a, T> = Pin<Box<dyn Future<Output = StoreResult<T
 /// Backends may return records that have expired; [`Store`] checks. Each
 /// operation must be atomic with respect to the others on the same key,
 /// including across processes for a shared backend.
+#[async_trait::async_trait]
 pub(crate) trait Backend: std::fmt::Debug + Send + Sync {
     /// Write `value` under `key`, replacing anything there and resetting its
     /// counter.
-    fn put<'a>(
-        &'a self,
-        key: &'a str,
+    async fn put(
+        &self,
+        key: &str,
         value: String,
         expires_at: Option<Timestamp>,
-    ) -> BackendFuture<'a, ()>;
+    ) -> StoreResult<()>;
 
     /// Write `value` only if `key` is absent or its record expired at or
     /// before `now`. Returns whether it was written.
-    fn put_new<'a>(
-        &'a self,
-        key: &'a str,
+    async fn put_new(
+        &self,
+        key: &str,
         value: String,
         expires_at: Option<Timestamp>,
         now: Timestamp,
-    ) -> BackendFuture<'a, bool>;
+    ) -> StoreResult<bool>;
 
-    fn get<'a>(&'a self, key: &'a str) -> BackendFuture<'a, Option<Record>>;
+    async fn get(&self, key: &str) -> StoreResult<Option<Record>>;
 
     /// Remove and return the record. Of concurrent callers, exactly one gets
     /// it.
-    fn take<'a>(&'a self, key: &'a str) -> BackendFuture<'a, Option<Record>>;
+    async fn take(&self, key: &str) -> StoreResult<Option<Record>>;
 
     /// Add one to the record's counter and return the record with the new
     /// count, or `None` if there is no such record. Concurrent callers see
     /// distinct counts.
-    fn increment<'a>(&'a self, key: &'a str) -> BackendFuture<'a, Option<Record>>;
+    async fn increment(&self, key: &str) -> StoreResult<Option<Record>>;
 
     /// Append an entry to the log. `id` identifies the entry; `partition`
     /// groups entries that are listed together; `at` orders them.
-    fn log_append<'a>(
-        &'a self,
-        partition: &'a str,
-        id: &'a str,
+    async fn log_append(
+        &self,
+        partition: &str,
+        id: &str,
         at: Timestamp,
         value: String,
-    ) -> BackendFuture<'a, ()>;
+    ) -> StoreResult<()>;
 
     /// The entries of one partition, most recent first.
     #[cfg_attr(not(test), expect(dead_code, reason = "the read side of the consent log, for the planned consent history"))]
-    fn log_list<'a>(&'a self, partition: &'a str) -> BackendFuture<'a, Vec<String>>;
+    async fn log_list(&self, partition: &str) -> StoreResult<Vec<String>>;
 
     #[cfg_attr(
         not(any(test, feature = "test-util")),
         expect(dead_code, reason = "the read side of the consent log, for the planned consent history")
     )]
-    fn log_get<'a>(&'a self, id: &'a str) -> BackendFuture<'a, Option<String>>;
+    async fn log_get(&self, id: &str) -> StoreResult<Option<String>>;
 
     /// Drop everything that expired at or before `now`. Backends that
     /// expire records themselves need do nothing.
-    fn purge(&self, now: Timestamp) -> BackendFuture<'_, ()>;
+    async fn purge(&self, now: Timestamp) -> StoreResult<()>;
 }
 
 /// How long a revoked grant is remembered when nothing better is known:

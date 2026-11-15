@@ -3,7 +3,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, MutexGuard};
 
-use super::{Backend, BackendFuture, MAX_CONSENT_RECORDS, Record};
+use super::{Backend, MAX_CONSENT_RECORDS, Record, StoreResult};
 use crate::epoch::Timestamp;
 
 #[derive(Debug)]
@@ -73,17 +73,9 @@ impl MemoryBackend {
     }
 }
 
-fn ready<'a, T: Send + 'a>(value: T) -> BackendFuture<'a, T> {
-    Box::pin(std::future::ready(Ok(value)))
-}
-
+#[async_trait::async_trait]
 impl Backend for MemoryBackend {
-    fn put<'a>(
-        &'a self,
-        key: &'a str,
-        value: String,
-        expires_at: Option<Timestamp>,
-    ) -> BackendFuture<'a, ()> {
+    async fn put(&self, key: &str, value: String, expires_at: Option<Timestamp>) -> StoreResult<()> {
         self.lock().records.insert(
             key.to_owned(),
             Record {
@@ -92,21 +84,18 @@ impl Backend for MemoryBackend {
                 count: 0,
             },
         );
-        ready(())
+        Ok(())
     }
 
-    fn put_new<'a>(
-        &'a self,
-        key: &'a str,
+    async fn put_new(
+        &self,
+        key: &str,
         value: String,
         expires_at: Option<Timestamp>,
         now: Timestamp,
-    ) -> BackendFuture<'a, bool> {
+    ) -> StoreResult<bool> {
         let mut inner = self.lock();
-        let occupied = inner
-            .records
-            .get(key)
-            .is_some_and(|record| record.expires_at.is_none_or(|at| at > now));
+        let occupied = inner.records.get(key).is_some_and(|record| record.live(now));
         if !occupied {
             inner.records.insert(
                 key.to_owned(),
@@ -117,31 +106,31 @@ impl Backend for MemoryBackend {
                 },
             );
         }
-        ready(!occupied)
+        Ok(!occupied)
     }
 
-    fn get<'a>(&'a self, key: &'a str) -> BackendFuture<'a, Option<Record>> {
-        ready(self.lock().records.get(key).cloned())
+    async fn get(&self, key: &str) -> StoreResult<Option<Record>> {
+        Ok(self.lock().records.get(key).cloned())
     }
 
-    fn take<'a>(&'a self, key: &'a str) -> BackendFuture<'a, Option<Record>> {
-        ready(self.lock().records.remove(key))
+    async fn take(&self, key: &str) -> StoreResult<Option<Record>> {
+        Ok(self.lock().records.remove(key))
     }
 
-    fn increment<'a>(&'a self, key: &'a str) -> BackendFuture<'a, Option<Record>> {
-        ready(self.lock().records.get_mut(key).map(|record| {
+    async fn increment(&self, key: &str) -> StoreResult<Option<Record>> {
+        Ok(self.lock().records.get_mut(key).map(|record| {
             record.count += 1;
             record.clone()
         }))
     }
 
-    fn log_append<'a>(
-        &'a self,
-        partition: &'a str,
-        id: &'a str,
+    async fn log_append(
+        &self,
+        partition: &str,
+        id: &str,
         _at: Timestamp,
         value: String,
-    ) -> BackendFuture<'a, ()> {
+    ) -> StoreResult<()> {
         let mut inner = self.lock();
         if inner.log.len() >= MAX_CONSENT_RECORDS {
             inner.log.pop_front();
@@ -151,36 +140,32 @@ impl Backend for MemoryBackend {
             id: id.to_owned(),
             value,
         });
-        ready(())
+        Ok(())
     }
 
-    fn log_list<'a>(&'a self, partition: &'a str) -> BackendFuture<'a, Vec<String>> {
-        ready(
-            self.lock()
-                .log
-                .iter()
-                .rev()
-                .filter(|entry| entry.partition == partition)
-                .map(|entry| entry.value.clone())
-                .collect(),
-        )
+    async fn log_list(&self, partition: &str) -> StoreResult<Vec<String>> {
+        Ok(self
+            .lock()
+            .log
+            .iter()
+            .rev()
+            .filter(|entry| entry.partition == partition)
+            .map(|entry| entry.value.clone())
+            .collect())
     }
 
-    fn log_get<'a>(&'a self, id: &'a str) -> BackendFuture<'a, Option<String>> {
-        ready(
-            self.lock()
-                .log
-                .iter()
-                .rev()
-                .find(|entry| entry.id == id)
-                .map(|entry| entry.value.clone()),
-        )
+    async fn log_get(&self, id: &str) -> StoreResult<Option<String>> {
+        Ok(self
+            .lock()
+            .log
+            .iter()
+            .rev()
+            .find(|entry| entry.id == id)
+            .map(|entry| entry.value.clone()))
     }
 
-    fn purge(&self, now: Timestamp) -> BackendFuture<'_, ()> {
-        self.lock()
-            .records
-            .retain(|_, record| record.expires_at.is_none_or(|at| at > now));
-        ready(())
+    async fn purge(&self, now: Timestamp) -> StoreResult<()> {
+        self.lock().records.retain(|_, record| record.live(now));
+        Ok(())
     }
 }

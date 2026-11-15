@@ -11,6 +11,7 @@ publish = false
 anyhow = "1"
 argon2 = "0.6"
 askama = { version = "0.16", features = ["serde_json"] }
+async-trait = "0.1"
 aws-lc-rs = "1"
 axum = { version = "0.8", features = ["http2"] }
 base64 = "0.23"

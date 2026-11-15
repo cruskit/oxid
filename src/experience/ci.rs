@@ -31,7 +31,7 @@ use askama::Template;
 use tokio::time::Instant;
 
 use super::{
-    Approval, Decision, Experience, ExperienceError, Form, Interaction, Kind, Page, StepFuture,
+    Approval, Decision, Experience, ExperienceError, Form, Interaction, Kind, Page,
     StepResult, everything_requested, render,
 };
 use crate::store::PlannedResponse;
@@ -51,18 +51,19 @@ pub(crate) fn default_user(users: &dyn UserStore) -> Option<Arc<User>> {
     users.list().first().cloned()
 }
 
+#[async_trait::async_trait]
 impl Experience for Ci {
     fn kind(&self) -> Kind {
         Kind::Ci
     }
 
-    fn start<'a>(&'a self, interaction: &'a Interaction<'a>) -> StepFuture<'a> {
-        Box::pin(self.respond(interaction))
+    async fn start(&self, interaction: &Interaction<'_>) -> StepResult {
+        self.respond(interaction).await
     }
 
     /// There are no forms. Anything posted gets the same answer as arriving.
-    fn submit<'a>(&'a self, interaction: &'a Interaction<'a>, _form: &'a Form) -> StepFuture<'a> {
-        Box::pin(self.respond(interaction))
+    async fn submit(&self, interaction: &Interaction<'_>, _form: &Form) -> StepResult {
+        self.respond(interaction).await
     }
 }
 
