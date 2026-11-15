@@ -7,7 +7,7 @@
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
-use serde_json::{Map, Value, json};
+use crate::epoch::Seconds;
 
 use super::{ConnInfo, OAuthForm, Params, authenticate_client, no_store};
 use crate::authz::SCOPE_OPENID;
@@ -47,7 +47,7 @@ pub(super) async fn token(
         }
         None => return Err(OAuthError::invalid_request("grant_type is required")),
     };
-    Ok(no_store(Json(Value::Object(body)).into_response()))
+    Ok(no_store(Json(body).into_response()))
 }
 
 async fn code_grant(
@@ -55,7 +55,7 @@ async fn code_grant(
     client: &Client,
     params: &Params,
     thumbprint: &str,
-) -> Result<Map<String, Value>, OAuthError> {
+) -> Result<TokenResponse, OAuthError> {
     let code = params
         .get("code")
         .ok_or_else(|| OAuthError::invalid_request("code is required"))?;
@@ -114,7 +114,7 @@ async fn code_grant(
                 expires_at: state.now() + state.security.refresh_token_ttl,
             })
             .await?;
-        body.insert("refresh_token".to_owned(), refresh.into());
+        body.refresh_token = Some(refresh);
     }
     Ok(body)
 }
@@ -124,7 +124,7 @@ async fn refresh_grant(
     client: &Client,
     params: &Params,
     thumbprint: &str,
-) -> Result<Map<String, Value>, OAuthError> {
+) -> Result<TokenResponse, OAuthError> {
     if !client.allows_refresh_tokens() {
         return Err(OAuthError::new(
             ErrorCode::UnauthorizedClient,
@@ -166,6 +166,19 @@ async fn refresh_grant(
     issue_tokens(state, client, &grant, None, thumbprint).await
 }
 
+/// A successful token response (RFC 6749 §5.1, OpenID Connect Core §3.1.3.3).
+#[derive(Debug, serde::Serialize)]
+struct TokenResponse {
+    access_token: String,
+    token_type: &'static str,
+    expires_in: Seconds,
+    scope: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    refresh_token: Option<String>,
+}
+
 /// Issue a certificate-bound access token and, for `OpenID` requests, an ID
 /// token.
 async fn issue_tokens(
@@ -174,7 +187,7 @@ async fn issue_tokens(
     grant: &Grant,
     nonce: Option<&str>,
     thumbprint: &str,
-) -> Result<Map<String, Value>, OAuthError> {
+) -> Result<TokenResponse, OAuthError> {
     let expires_in = state.security.access_token_ttl;
     let access_token = state
         .store
@@ -185,24 +198,32 @@ async fn issue_tokens(
         })
         .await?;
 
-    let Value::Object(mut body) = json!({
-        "access_token": access_token,
-        "token_type": "Bearer",
-        "expires_in": expires_in,
-        "scope": grant.scope.join(" "),
-    }) else {
-        unreachable!("literal is an object");
-    };
-
-    if grant.scope.iter().any(|s| s == SCOPE_OPENID) {
+    let id_token = if grant.scope.iter().any(|s| s == SCOPE_OPENID) {
         let user = state
             .users
             .find_by_subject(&grant.user_subject)
             .ok_or_else(|| OAuthError::invalid_grant("the user no longer exists"))?;
-        let id_token = id_token::issue(&state.issuer_context(), client, &user, grant, nonce, &access_token)
-            .map_err(OAuthError::server_error)?;
-        body.insert("id_token".to_owned(), id_token.into());
-    }
+        let token = id_token::issue(
+            &state.issuer_context(),
+            client,
+            &user,
+            grant,
+            nonce,
+            &access_token,
+        )
+        .map_err(OAuthError::server_error)?;
+        Some(token)
+    } else {
+        None
+    };
+    let body = TokenResponse {
+        access_token,
+        token_type: "Bearer",
+        expires_in,
+        scope: grant.scope.join(" "),
+        id_token,
+        refresh_token: None,
+    };
     tracing::info!(client_id = %client.id, "tokens issued");
     Ok(body)
 }

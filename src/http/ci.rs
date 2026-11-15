@@ -16,15 +16,15 @@ use std::collections::BTreeSet;
 use axum::Json;
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
-use serde_json::{Value, json};
+use serde::Serialize;
 
 use super::{OAuthForm, PATH_CI_RESPONSE, Params, authenticate_client, no_store};
-use crate::epoch::Timestamp;
+use crate::epoch::{Seconds, Timestamp};
 use crate::client::Client;
-use crate::error::OAuthError;
+use crate::error::{ErrorCode, OAuthError};
 use crate::experience::ci::default_user;
 use crate::experience::{
-    ERROR_CONDITIONS, MAX_ERROR_DESCRIPTION, error_condition, is_error_description,
+    DEFAULT_ERROR_CONDITION, ERROR_CONDITIONS, MAX_ERROR_DESCRIPTION, error_condition, is_error_description,
 };
 use crate::state::AppState;
 use crate::store::{PlannedResponse, PushedRequest, Visit};
@@ -39,34 +39,82 @@ crate::wire::wire_enum! {
     }
 }
 
+/// The body of `GET /ci`.
+#[derive(Debug, Serialize)]
+struct Options {
+    response_endpoint: String,
+    response_delay: Seconds,
+    outcomes: &'static [Outcome],
+    default_user: Option<String>,
+    users: Vec<OptionUser>,
+    errors: Vec<OptionError>,
+}
+
+#[derive(Debug, Serialize)]
+struct OptionUser {
+    username: String,
+    name: String,
+}
+
+#[derive(Debug, Serialize)]
+struct OptionError {
+    error: ErrorCode,
+    error_description: &'static str,
+    meaning: &'static str,
+}
+
 /// `GET /ci`: the choices the response endpoint offers. Nothing here is
 /// secret from anyone who may use a provider running this experience.
 pub(super) async fn options(State(state): State<AppState>) -> Response {
-    let users: Vec<Value> = state
-        .users
-        .list()
-        .iter()
-        .map(|user| json!({ "username": user.username, "name": user.display_name() }))
-        .collect();
-    let errors: Vec<Value> = ERROR_CONDITIONS
-        .iter()
-        .map(|condition| {
-            json!({
-                "error": condition.code.as_str(),
-                "error_description": condition.description,
-                "meaning": condition.label,
+    let body = Options {
+        response_endpoint: state.url(PATH_CI_RESPONSE),
+        response_delay: state.ci.response_delay,
+        outcomes: Outcome::ALL,
+        default_user: default_user(state.users.as_ref()).map(|user| user.username.clone()),
+        users: state
+            .users
+            .list()
+            .iter()
+            .map(|user| OptionUser {
+                username: user.username.clone(),
+                name: user.display_name(),
             })
-        })
-        .collect();
-    let body = json!({
-        "response_endpoint": state.url(PATH_CI_RESPONSE),
-        "response_delay": state.ci.response_delay,
-        "outcomes": Outcome::ALL,
-        "default_user": default_user(state.users.as_ref()).map(|user| user.username.clone()),
-        "users": users,
-        "errors": errors,
-    });
+            .collect(),
+        errors: ERROR_CONDITIONS
+            .iter()
+            .map(|condition| OptionError {
+                error: condition.code,
+                error_description: condition.description,
+                meaning: condition.label,
+            })
+            .collect(),
+    };
     no_store(Json(body).into_response())
+}
+
+/// The body of a `POST /ci/response` answer: the response that will be
+/// given.
+#[derive(Debug, Serialize)]
+struct Chosen<'a> {
+    request_uri: &'a str,
+    outcome: Outcome,
+    #[serde(flatten)]
+    details: ChosenDetails,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum ChosenDetails {
+    Success {
+        user: String,
+        claims: BTreeSet<String>,
+        declined: Vec<String>,
+    },
+    Error {
+        error: ErrorCode,
+        error_description: String,
+    },
+    Abandon {},
 }
 
 /// `POST /ci/response`: set the response to one pushed request.
@@ -127,7 +175,7 @@ pub(super) async fn plan_response(
             None => Ok(()),
         }
     };
-    let (plan, mut body) = match outcome {
+    let (plan, details) = match outcome {
         Outcome::Success => {
             refuse_others(&["error", "error_description"])?;
             success(&state, &client, &pushed, &params)?
@@ -138,7 +186,7 @@ pub(super) async fn plan_response(
         }
         Outcome::Abandon => {
             refuse_others(&["user", "voluntary_claims", "error", "error_description"])?;
-            (PlannedResponse::Abandon, json!({}))
+            (PlannedResponse::Abandon, ChosenDetails::Abandon {})
         }
     };
 
@@ -151,8 +199,11 @@ pub(super) async fn plan_response(
         .await?;
     tracing::info!(client_id = %client.id, %outcome, "ci: the client chose the response");
 
-    body["request_uri"] = request_uri.into();
-    body["outcome"] = outcome.as_str().into();
+    let body = Chosen {
+        request_uri,
+        outcome,
+        details,
+    };
     Ok(no_store(Json(body).into_response()))
 }
 
@@ -194,7 +245,7 @@ fn success(
     client: &Client,
     pushed: &PushedRequest,
     params: &Params,
-) -> Result<(PlannedResponse, Value), OAuthError> {
+) -> Result<(PlannedResponse, ChosenDetails), OAuthError> {
     let user = match params.get("user") {
         Some(name) => find_user(state, name)
             .ok_or_else(|| OAuthError::invalid_request(format!("user '{name}' does not exist")))?,
@@ -235,11 +286,11 @@ fn success(
         .filter(|name| !shared_claims.contains(name))
         .collect();
 
-    let body = json!({
-        "user": user.username,
-        "claims": shared_claims,
-        "declined": declined,
-    });
+    let body = ChosenDetails::Success {
+        user: user.username.clone(),
+        claims: shared_claims.clone(),
+        declined: declined.clone(),
+    };
     let plan = PlannedResponse::Success {
         user_subject: user.subject.clone(),
         shared_claims,
@@ -248,7 +299,7 @@ fn success(
     Ok((plan, body))
 }
 
-fn error(params: &Params) -> Result<(PlannedResponse, Value), OAuthError> {
+fn error(params: &Params) -> Result<(PlannedResponse, ChosenDetails), OAuthError> {
     let condition = match params.get("error") {
         Some(code) => error_condition(code).ok_or_else(|| {
             let known: Vec<&str> = ERROR_CONDITIONS
@@ -260,7 +311,7 @@ fn error(params: &Params) -> Result<(PlannedResponse, Value), OAuthError> {
                 known.join(", ")
             ))
         })?,
-        None => &ERROR_CONDITIONS[0],
+        None => &DEFAULT_ERROR_CONDITION,
     };
     let description = match params.get("error_description") {
         // RFC 6749 §4.1.2.1 limits what an error_description may contain.
@@ -273,7 +324,10 @@ fn error(params: &Params) -> Result<(PlannedResponse, Value), OAuthError> {
         }
         None => condition.description,
     };
-    let body = json!({ "error": condition.code, "error_description": description });
+    let body = ChosenDetails::Error {
+        error: condition.code,
+        error_description: description.to_owned(),
+    };
     let plan = PlannedResponse::Error {
         error: condition.code,
         description: description.to_owned(),

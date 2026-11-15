@@ -194,12 +194,16 @@ pub(crate) struct ErrorCondition {
 }
 
 /// The predefined error conditions, in the order they are offered.
-pub(crate) const ERROR_CONDITIONS: &[ErrorCondition] = &[
-    ErrorCondition {
+/// The error condition chosen when none is: the user did not consent.
+pub(crate) const DEFAULT_ERROR_CONDITION: ErrorCondition = ErrorCondition {
+
         code: ErrorCode::AccessDenied,
         label: "The user did not consent",
         description: "the user denied the request",
-    },
+};
+
+pub(crate) const ERROR_CONDITIONS: &[ErrorCondition] = &[
+    DEFAULT_ERROR_CONDITION,
     ErrorCondition {
         code: ErrorCode::LoginRequired,
         label: "The user could not be authenticated",

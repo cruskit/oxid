@@ -149,15 +149,23 @@ pub(super) fn beneficiary_account(user: &User, claim: &str) -> Option<Value> {
             _ => bsb_and_number(),
         }),
         BENEFICIARY_ACCOUNT_INTERNATIONAL => {
-            let mut value = json!({
-                "beneficiary_name": account.beneficiary_name,
-                "bic_swift_code": account.bic_swift_code.as_ref()?,
-                "account_number_international": account.international_number(),
-            });
+            let mut value = Map::new();
+            value.insert(
+                "beneficiary_name".to_owned(),
+                account.beneficiary_name.clone().into(),
+            );
+            value.insert(
+                "bic_swift_code".to_owned(),
+                account.bic_swift_code.clone()?.into(),
+            );
+            value.insert(
+                "account_number_international".to_owned(),
+                account.international_number().into(),
+            );
             if let Some(address) = user.claims.get("address").and_then(one_line_address) {
-                value["beneficiary_residential_address"] = address.into();
+                value.insert("beneficiary_residential_address".to_owned(), address.into());
             }
-            Some(value)
+            Some(Value::Object(value))
         }
         _ => None,
     }

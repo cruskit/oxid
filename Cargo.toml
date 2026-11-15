@@ -84,6 +84,7 @@ too_many_lines = "allow"
 dbg_macro = "warn"
 unwrap_used = "warn"
 expect_used = "warn"
+indexing_slicing = "warn"
 
 # Password hashing and big-number maths are painfully slow unoptimised; keep
 # `cargo test` fast without giving up debug info for our own code.

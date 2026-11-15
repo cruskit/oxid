@@ -33,7 +33,7 @@ use uuid::Uuid;
 use crate::epoch::Seconds;
 use crate::cookie::{SameSite, SetCookie};
 use super::{
-    Approval, Decision, ERROR_CONDITIONS, ErrorCondition, Experience, Form, FormTarget,
+    Approval, Decision, DEFAULT_ERROR_CONDITION, ERROR_CONDITIONS, ErrorCondition, Experience, Form, FormTarget,
     Interaction, Kind, MAX_ERROR_DESCRIPTION, Page, Step, StepResult, error_condition,
     everything_requested, is_error_description, render,
 };
@@ -352,7 +352,7 @@ impl Technical {
         let error_code = view
             .error_code
             .and_then(error_condition)
-            .unwrap_or(&ERROR_CONDITIONS[0]);
+            .unwrap_or(&DEFAULT_ERROR_CONDITION);
         let error_description = view
             .error_description
             .map(str::trim)
@@ -517,20 +517,23 @@ fn decode_jwt(token: &str) -> (String, String) {
 
 /// Everything known about a customer, for display.
 fn attributes(user: &User) -> Value {
-    let mut out = json!({
-        "username": user.username,
-        "subject": user.subject,
-        "claims": user.claims,
-    });
-    if let Some(account) = &user.bank_account {
-        out["bank_account"] = json!({
+    let bank_account = user.bank_account.as_ref().map(|account| {
+        json!({
             "beneficiary_name": account.beneficiary_name,
             "bsb": account.bsb,
             "account_number": account.account_number,
             "payid": account.payid,
             "payid_type": account.payid_type.map(crate::user::PayIdType::as_str),
             "bic_swift_code": account.bic_swift_code,
-        });
+        })
+    });
+    let mut out = json!({
+        "username": user.username,
+        "subject": user.subject,
+        "claims": user.claims,
+    });
+    if let (Some(account), Value::Object(out)) = (bank_account, &mut out) {
+        out.insert("bank_account".to_owned(), account);
     }
     out
 }

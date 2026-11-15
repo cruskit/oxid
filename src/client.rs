@@ -39,6 +39,24 @@ crate::wire::wire_enum! {
     }
 }
 
+/// What a client is registered with, before its rules are checked.
+#[derive(Debug, Clone)]
+pub(crate) struct Registration {
+    pub id: String,
+    /// The name shown to users; the id when absent.
+    pub name: Option<String>,
+    pub redirect_uris: Vec<String>,
+    pub jwks: JwkSet,
+    pub scopes: Vec<String>,
+    pub grant_types: Vec<GrantType>,
+    /// Derived from the redirect URIs when absent, if they share a host.
+    pub sector_identifier: Option<String>,
+    pub profile: Profile,
+    /// The claims the client is provisioned for; `None` for all of its
+    /// profile's.
+    pub claims: Option<Vec<String>>,
+}
+
 /// A confidential client. FAPI 2.0 §5.3.2.1-3 permits no other kind.
 #[derive(Debug, Clone)]
 #[cfg_attr(
@@ -63,26 +81,10 @@ pub struct Client {
 }
 
 impl Client {
+    /// A client from the configuration file: its key set read from the
+    /// file, if it names one, then [`Client::new`].
     pub(crate) fn from_config(config: &ClientConfig) -> Result<Self> {
         let id = config.client_id.trim();
-        ensure!(!id.is_empty(), "client_id must not be empty");
-        ensure!(
-            !config.redirect_uris.is_empty(),
-            "client '{id}' has no redirect_uris"
-        );
-
-        let mut hosts = BTreeSet::new();
-        for uri in &config.redirect_uris {
-            hosts.insert(validate_redirect_uri(uri).with_context(|| format!("client '{id}'"))?);
-        }
-        let sector_identifier = match (&config.sector_identifier, hosts.len()) {
-            (Some(explicit), _) => explicit.clone(),
-            (None, 1) => hosts.into_iter().next().unwrap_or_default(),
-            (None, _) => {
-                bail!("client '{id}' has redirect_uris on several hosts; set sector_identifier")
-            }
-        };
-
         let jwks = match (&config.jwks, &config.jwks_file) {
             (Some(jwks), None) => jwks.clone(),
             (None, Some(path)) => {
@@ -93,36 +95,75 @@ impl Client {
             }
             _ => bail!("client '{id}' needs exactly one of jwks or jwks_file"),
         };
+        Self::new(Registration {
+            id: config.client_id.clone(),
+            name: config.client_name.clone(),
+            redirect_uris: config.redirect_uris.clone(),
+            jwks,
+            scopes: config.scopes.clone(),
+            grant_types: config.grant_types.clone(),
+            sector_identifier: config.sector_identifier.clone(),
+            profile: config.profile,
+            claims: config.claims.clone(),
+        })
+    }
+
+    /// A client from its registration, wherever that came from (the
+    /// configuration file or the ConnectID registry), once its rules are
+    /// checked.
+    pub(crate) fn new(registration: Registration) -> Result<Self> {
+        let Registration {
+            id,
+            name,
+            redirect_uris,
+            jwks,
+            scopes,
+            grant_types,
+            sector_identifier,
+            profile,
+            claims,
+        } = registration;
+        let id = id.trim().to_owned();
+        ensure!(!id.is_empty(), "client_id must not be empty");
+        ensure!(!redirect_uris.is_empty(), "client '{id}' has no redirect_uris");
+
+        let mut hosts = BTreeSet::new();
+        for uri in &redirect_uris {
+            hosts.insert(validate_redirect_uri(uri).with_context(|| format!("client '{id}'"))?);
+        }
+        let sector_identifier = match (sector_identifier, hosts.len()) {
+            (Some(explicit), _) => explicit,
+            (None, 1) => hosts.into_iter().next().unwrap_or_default(),
+            (None, _) => {
+                bail!("client '{id}' has redirect_uris on several hosts; set sector_identifier")
+            }
+        };
         ensure!(!jwks.keys.is_empty(), "client '{id}' has an empty JWK Set");
 
-        let grant_types: BTreeSet<GrantType> = config.grant_types.iter().copied().collect();
+        let grant_types: BTreeSet<GrantType> = grant_types.into_iter().collect();
         ensure!(
             grant_types.contains(&GrantType::AuthorizationCode),
             "client '{id}' must allow the authorization_code grant"
         );
 
-        if let Some(unknown) = config
-            .claims
+        if let Some(unknown) = claims
             .iter()
             .flatten()
-            .find(|name| !crate::claims::profile_allows(config.profile, name))
+            .find(|name| !crate::claims::profile_allows(profile, name))
         {
             bail!("client '{id}': claim '{unknown}' is not available under its profile");
         }
 
         Ok(Self {
-            id: id.to_owned(),
-            name: config.client_name.clone().unwrap_or_else(|| id.to_owned()),
-            redirect_uris: config.redirect_uris.clone(),
+            name: name.unwrap_or_else(|| id.clone()),
+            id,
+            redirect_uris,
             jwks,
-            scopes: config.scopes.iter().cloned().collect(),
+            scopes: scopes.into_iter().collect(),
             grant_types,
             sector_identifier,
-            profile: config.profile,
-            claims: config
-                .claims
-                .as_ref()
-                .map(|claims| claims.iter().cloned().collect()),
+            profile,
+            claims: claims.map(|claims| claims.into_iter().collect()),
         })
     }
 
