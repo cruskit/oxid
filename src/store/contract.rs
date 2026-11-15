@@ -191,6 +191,7 @@ pub(crate) async fn sessions(store: &Store) {
     let Some(Visit::Active(_, session)) = store.arrive(&uri, arrived).await.unwrap() else {
         panic!("arriving in time starts a session");
     };
+    assert_eq!(session.started_at, Some(arrived));
     assert_eq!(session.expires_at, arrived + ttl);
     assert_eq!(session.signed_in, None);
 
@@ -208,10 +209,21 @@ pub(crate) async fn sessions(store: &Store) {
         assert_eq!(pushed.request, request());
     }
 
+    let stale = session.clone();
     let session = store
         .sign_in(&uri, &session, "u1", "browser-secret")
         .await
-        .unwrap();
+        .unwrap()
+        .expect("the session was as read");
+    // A second sign-in from the same stale snapshot (a race) is refused
+    // rather than overwriting the first.
+    assert!(
+        store
+            .sign_in(&uri, &stale, "u2", "other-browser")
+            .await
+            .unwrap()
+            .is_none()
+    );
     let Some(Visit::Active(_, read)) = store.resume(&uri, later).await.unwrap() else {
         panic!("signing in keeps the session");
     };

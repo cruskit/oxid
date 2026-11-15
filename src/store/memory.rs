@@ -109,6 +109,28 @@ impl Backend for MemoryBackend {
         Ok(!occupied)
     }
 
+    async fn replace(
+        &self,
+        key: &str,
+        expected: &str,
+        value: String,
+        expires_at: Option<Timestamp>,
+    ) -> StoreResult<bool> {
+        let mut inner = self.lock();
+        let Some(record) = inner.records.get_mut(key) else {
+            return Ok(false);
+        };
+        if record.value != expected {
+            return Ok(false);
+        }
+        *record = Record {
+            value,
+            expires_at,
+            count: 0,
+        };
+        Ok(true)
+    }
+
     async fn get(&self, key: &str) -> StoreResult<Option<Record>> {
         Ok(self.lock().records.get(key).cloned())
     }

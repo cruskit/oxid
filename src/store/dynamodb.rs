@@ -186,6 +186,36 @@ impl Backend for DynamoBackend {
             }
         }
 
+    async fn replace(
+        &self,
+        key: &str,
+        expected: &str,
+        value: String,
+        expires_at: Option<Timestamp>,
+    ) -> StoreResult<bool> {
+        let result = self
+            .client
+            .put_item()
+            .table_name(&self.table)
+            .set_item(Some(item(key, SOLE, value, expires_at)))
+            .condition_expression("#data = :expected")
+            .expression_attribute_names("#data", VALUE)
+            .expression_attribute_values(":expected", string(expected))
+            .send()
+            .await;
+        match result {
+            Ok(_) => Ok(true),
+            Err(error)
+                if error
+                    .as_service_error()
+                    .is_some_and(PutItemError::is_conditional_check_failed_exception) =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(failure(error)),
+        }
+    }
+
     async fn get(&self, key_: &str) -> StoreResult<Option<Record>> {
             let output = self
                 .client

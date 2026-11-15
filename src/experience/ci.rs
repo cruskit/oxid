@@ -78,7 +78,10 @@ impl Ci {
     /// The delay runs from when the session started, that is from the
     /// browser's first arrival, so a retry does not wait all over again.
     async fn respond(&self, interaction: &Interaction<'_>) -> StepResult {
-        let arrived = interaction.session.expires_at - interaction.session_ttl();
+        let session = interaction.session;
+        let arrived = session
+            .started_at
+            .unwrap_or_else(|| session.expires_at - interaction.session_ttl());
         // Negative once the delay has passed, which `to_std` makes zero.
         let left = (arrived + interaction.ci_response_delay()) - interaction.now();
         let deadline = Instant::now() + left.to_std();

@@ -129,8 +129,9 @@ impl InteractionStore<'_> {
     }
 
     /// Record that `user_subject` signed in during this session, from the
-    /// browser holding `browser_secret`.
-    pub(crate) async fn sign_in(&self, user_subject: &str, browser_secret: &str) -> StoreResult<()> {
+    /// browser holding `browser_secret`. `false` if the session changed
+    /// since this request read it, so the sign-in did not take effect.
+    pub(crate) async fn sign_in(&self, user_subject: &str, browser_secret: &str) -> StoreResult<bool> {
         let interaction = self.interaction;
         self.store()
             .sign_in(
@@ -140,7 +141,7 @@ impl InteractionStore<'_> {
                 browser_secret,
             )
             .await
-            .map(drop)
+            .map(|session| session.is_some())
     }
 
     /// The response the client chose for this request, if it chose one.

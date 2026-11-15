@@ -61,7 +61,13 @@ pub(crate) struct PushedRequest {
     /// When the `request_uri` stops being accepted from a browser that has
     /// not yet arrived (RFC 9126 §2.2 `expires_in`).
     pub expires_at: Timestamp,
-    /// Kept by the backend as the record's counter, not in the stored value.
+    /// Failed sign-ins so far. Kept by the backend as the record's counter
+    /// ([`Backend::increment`]), not in the stored value.
+    ///
+    /// Invariant: only [`Store::push_request`] writes this record. A later
+    /// `put` or `replace` would reset the counter, and so the count of
+    /// failed sign-ins: anything that must change a pushed request has to
+    /// keep that count some other way.
     #[serde(skip)]
     pub failed_logins: u32,
 }
@@ -92,6 +98,10 @@ impl std::fmt::Debug for PushedRequest {
 /// long the user has to sign in and decide.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Session {
+    /// When the browser first arrived. Absent from sessions stored by an
+    /// older version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<Timestamp>,
     pub expires_at: Timestamp,
     /// Set once the user has signed in during this session.
     #[serde(default)]
@@ -309,6 +319,17 @@ pub(crate) trait Backend: std::fmt::Debug + Send + Sync {
         now: Timestamp,
     ) -> StoreResult<bool>;
 
+    /// Write `value` only if the record under `key` still holds `expected`
+    /// (compare and set). Returns whether it was written. Like
+    /// [`Backend::put`], it resets the counter.
+    async fn replace(
+        &self,
+        key: &str,
+        expected: &str,
+        value: String,
+        expires_at: Option<Timestamp>,
+    ) -> StoreResult<bool>;
+
     async fn get(&self, key: &str) -> StoreResult<Option<Record>>;
 
     /// Remove and return the record. Of concurrent callers, exactly one gets
@@ -485,12 +506,10 @@ impl Store {
             .filter(|pushed| !pushed.is_exhausted()))
     }
 
-    async fn session(&self, request_uri: &str) -> StoreResult<Option<Session>> {
-        self.backend
-            .get(&session_key(request_uri))
-            .await?
-            .map(|record| decode(&record.value))
-            .transpose()
+    /// The session for a request, while it is kept. An expired session is
+    /// kept for [`EXPIRED_SESSION_RETENTION`], so the user can be told.
+    async fn session(&self, request_uri: &str, now: Timestamp) -> StoreResult<Option<Session>> {
+        self.live(&session_key(request_uri), now).await
     }
 
     fn visit(pushed: PushedRequest, session: Session, now: Timestamp) -> Visit {
@@ -516,13 +535,14 @@ impl Store {
         let Some(pushed) = self.peek_request(request_uri, now).await? else {
             return Ok(None);
         };
-        if let Some(session) = self.session(request_uri).await? {
+        if let Some(session) = self.session(request_uri, now).await? {
             return Ok(Some(Self::visit(pushed, session, now)));
         }
         if pushed.expires_at <= now {
             return Ok(None);
         }
         let session = Session {
+            started_at: Some(now),
             expires_at: now + self.session_ttl,
             signed_in: None,
         };
@@ -540,7 +560,7 @@ impl Store {
         }
         // Another request for the same `request_uri` started it first.
         Ok(self
-            .session(request_uri)
+            .session(request_uri, now)
             .await?
             .map(|session| Self::visit(pushed, session, now)))
     }
@@ -553,35 +573,40 @@ impl Store {
             return Ok(None);
         };
         Ok(self
-            .session(request_uri)
+            .session(request_uri, now)
             .await?
             .map(|session| Self::visit(pushed, session, now)))
     }
 
     /// Record that `user_subject` signed in during `session`, from the
-    /// browser holding `browser_secret`. Returns the updated session.
+    /// browser holding `browser_secret`. Returns the updated session, or
+    /// `None` if the stored session no longer is `session`: another request
+    /// changed it first (two sign-ins racing on one `request_uri`), and the
+    /// caller must not act as if this one took effect.
     pub(crate) async fn sign_in(
         &self,
         request_uri: &str,
         session: &Session,
         user_subject: &str,
         browser_secret: &str,
-    ) -> StoreResult<Session> {
-        let session = Session {
-            expires_at: session.expires_at,
+    ) -> StoreResult<Option<Session>> {
+        let updated = Session {
             signed_in: Some(SignedIn {
                 user_subject: user_subject.to_owned(),
                 browser: digest(browser_secret),
             }),
+            ..session.clone()
         };
-        self.backend
-            .put(
+        let written = self
+            .backend
+            .replace(
                 &session_key(request_uri),
-                encode(&session)?,
-                Some(session.expires_at + EXPIRED_SESSION_RETENTION),
+                &encode(session)?,
+                encode(&updated)?,
+                Some(updated.expires_at + EXPIRED_SESSION_RETENTION),
             )
             .await?;
-        Ok(session)
+        Ok(written.then_some(updated))
     }
 
     /// Set the response the `ci` experience is to give to a pushed request,
@@ -668,7 +693,7 @@ impl Store {
             self.revoke_grant(&stored.grant.id, now).await?;
             return Ok(CodeRedemption::Replayed);
         }
-        if stored.expires_at <= now {
+        if !record.live(now) {
             return Ok(CodeRedemption::Invalid);
         }
         // The counter decides between concurrent presentations: only the

@@ -147,7 +147,14 @@ impl Login {
 
         let secret = random_token(32);
         let session = interaction.session;
-        store.sign_in(&user.subject, &secret).await?;
+        if !store.sign_in(&user.subject, &secret).await? {
+            // Another sign-in on this request got there first.
+            return Ok(login_page(
+                interaction,
+                Some("Your sign-in could not be completed. Please try again."),
+            )?
+            .into());
+        }
         let remaining = (session.expires_at - interaction.now()).max(Seconds::new(1));
         Ok(Step {
             decision: Decision::Page(consent_page(interaction, &user, false)?),
