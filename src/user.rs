@@ -34,31 +34,17 @@ pub const DEMO_USERNAME: &str = "demo";
 #[cfg(any(test, feature = "test-util"))]
 pub const DEMO_PASSWORD: &str = "demo-password";
 
-/// The kind of a `PayID`, in the notation ConnectID uses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-pub enum PayIdType {
-    /// An email address.
-    #[serde(rename = "/EMAL")]
-    Email,
-    /// A mobile number.
-    #[serde(rename = "/TELI")]
-    Mobile,
-    /// An Australian Business Number.
-    #[serde(rename = "/AUBN")]
-    Abn,
-    /// An organisation identifier.
-    #[serde(rename = "/ORGN")]
-    Organisation,
-}
-
-impl PayIdType {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Email => "/EMAL",
-            Self::Mobile => "/TELI",
-            Self::Abn => "/AUBN",
-            Self::Organisation => "/ORGN",
-        }
+crate::wire::wire_enum! {
+    /// The kind of a `PayID`, in the notation ConnectID uses.
+    pub enum PayIdType ("PayID type") {
+        /// An email address.
+        Email = "/EMAL",
+        /// A mobile number.
+        Mobile = "/TELI",
+        /// An Australian Business Number.
+        Abn = "/AUBN",
+        /// An organisation identifier.
+        Organisation = "/ORGN",
     }
 }
 

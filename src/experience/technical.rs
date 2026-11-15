@@ -46,9 +46,21 @@ use crate::util::b64url;
 pub(crate) const CUSTOMER_COOKIE: &str = "__Host-oxid-customer";
 const CUSTOMER_COOKIE_MAX_AGE: Seconds = Seconds::days(365);
 
-/// The `outcome` form value for an error response. Anything else, such as
-/// the template's `success`, is a successful one.
-const OUTCOME_ERROR: &str = "error";
+crate::wire::wire_enum! {
+    /// The response the form asks for. Anything unrecognised counts as a
+    /// success, as the template's default does.
+    enum Outcome ("outcome") {
+        Success = "success",
+        Error = "error",
+    }
+}
+
+crate::wire::wire_enum! {
+    /// The `action` of the page's submit button.
+    enum Action ("action") {
+        Send = "send",
+    }
+}
 
 /// The styles of the page.
 const STYLE: &str = include_str!("../../templates/technical/technical.css");
@@ -190,7 +202,8 @@ impl Technical {
 
     fn handle(&self, interaction: &Interaction<'_>, form: &Form) -> StepResult {
         let subject = form.get("customer").unwrap_or_default();
-        let error_outcome = form.get("outcome") == Some(OUTCOME_ERROR);
+        let error_outcome = form.get("outcome").and_then(|text| text.parse().ok())
+            == Some(Outcome::Error);
         let view = View {
             customer: self.customer(subject).map(|user| user.subject.clone()),
             error_outcome,
@@ -210,7 +223,7 @@ impl Technical {
                 .into())
         };
 
-        if form.get("action") != Some("send") {
+        if form.get("action").and_then(|text| text.parse().ok()) != Some(Action::Send) {
             return again(view, "Choose a response and send it.");
         }
 
@@ -358,7 +371,7 @@ impl Technical {
             RequestRow {
                 label: "Profile",
                 id: "client-profile",
-                value: format!("{:?}", client.profile).to_lowercase().into(),
+                value: client.profile.as_str().into(),
             },
             RequestRow {
                 label: "Redirect URI",

@@ -100,7 +100,10 @@ impl TestOp {
             jwks_file: None,
             jwks: Some(rp_key.jwks()),
             scopes: vec!["openid".to_owned()],
-            grant_types: vec!["authorization_code".to_owned(), "refresh_token".to_owned()],
+            grant_types: vec![
+                oxid::client::GrantType::AuthorizationCode,
+                oxid::client::GrantType::RefreshToken,
+            ],
             sector_identifier: None,
             profile: oxid::client::Profile::Connectid,
             claims: None,

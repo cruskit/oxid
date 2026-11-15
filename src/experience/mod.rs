@@ -33,7 +33,6 @@ use std::sync::Arc;
 
 use askama::Template;
 use axum::http::HeaderMap;
-use serde::Deserialize;
 
 use crate::epoch::Seconds;
 use crate::cookie::SetCookie;
@@ -50,67 +49,20 @@ pub(crate) mod ci;
 pub(crate) mod login;
 pub(crate) mod technical;
 
-/// The experiences that can be selected in configuration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Kind {
-    /// Technical debugging: inspect the request, pick a customer, edit the
-    /// response or return an error. No authentication. Development only.
-    #[default]
-    Technical,
-    /// Sign in with a username and password, then consent.
-    Login,
-    /// No user at all: the request is answered automatically, with a
-    /// response the client may choose. No authentication. Automated testing
-    /// only.
-    Ci,
-}
-
-impl Kind {
-    pub const ALL: &[Self] = &[Self::Technical, Self::Login, Self::Ci];
-
-    /// Every name, for messages.
-    fn names() -> String {
-        Self::ALL
-            .iter()
-            .map(|kind| kind.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Technical => "technical",
-            Self::Login => "login",
-            Self::Ci => "ci",
-        }
-    }
-}
-
-/// An experience name that is not one of [`Kind::ALL`].
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("unknown experience '{name}' (expected one of: {known})", known = Kind::names())]
-pub struct UnknownExperience {
-    name: String,
-}
-
-impl std::str::FromStr for Kind {
-    type Err = UnknownExperience;
-
-    fn from_str(value: &str) -> Result<Self, UnknownExperience> {
-        Self::ALL
-            .iter()
-            .copied()
-            .find(|kind| kind.as_str() == value)
-            .ok_or_else(|| UnknownExperience {
-                name: value.to_owned(),
-            })
-    }
-}
-
-impl std::fmt::Display for Kind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
+crate::wire::wire_enum! {
+    /// The experiences that can be selected in configuration.
+    #[derive(Default)]
+    pub enum Kind ("experience") {
+        /// Technical debugging: inspect the request, pick a customer, edit the
+        /// response or return an error. No authentication. Development only.
+        #[default]
+        Technical = "technical",
+        /// Sign in with a username and password, then consent.
+        Login = "login",
+        /// No user at all: the request is answered automatically, with a
+        /// response the client may choose. No authentication. Automated
+        /// testing only.
+        Ci = "ci",
     }
 }
 

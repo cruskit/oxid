@@ -14,7 +14,7 @@ use std::sync::OnceLock;
 
 use serde_json::{Map, Value, json};
 
-use crate::client::{Client, GRANT_AUTHORIZATION_CODE, GRANT_REFRESH_TOKEN, Profile};
+use crate::client::{Client, GrantType, Profile};
 use crate::config::ClientConfig;
 use crate::keys::SigningKey;
 use crate::user::{StaticUserStore, default_time_zone};
@@ -54,10 +54,7 @@ pub fn client_with_key(id: &str, key: &SigningKey) -> Client {
         // A second scope, so scope handling can be exercised. Scopes
         // other than `openid` imply no claims.
         scopes: vec!["openid".to_owned(), "email".to_owned()],
-        grant_types: vec![
-            GRANT_AUTHORIZATION_CODE.to_owned(),
-            GRANT_REFRESH_TOKEN.to_owned(),
-        ],
+        grant_types: vec![GrantType::AuthorizationCode, GrantType::RefreshToken],
         sector_identifier: None,
         profile: Profile::Connectid,
         claims: None,

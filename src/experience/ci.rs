@@ -32,7 +32,7 @@ use tokio::time::Instant;
 
 use super::{
     Approval, Decision, Experience, ExperienceError, Form, Interaction, Kind, Page, StepFuture,
-    StepResult, error_condition, everything_requested, render,
+    StepResult, everything_requested, render,
 };
 use crate::store::PlannedResponse;
 use crate::theme::Theme;
@@ -156,11 +156,9 @@ impl Ci {
             // Handled by the caller, which has to clear it.
             PlannedResponse::Abandon => abandoned_page(interaction)?.into(),
             PlannedResponse::Error { error, description } => {
-                let condition = error_condition(&error)
-                    .ok_or(ExperienceError::Inconsistent("the chosen error is not a known one"))?;
                 tracing::info!(%client_id, %error, "ci: giving the error response the client chose");
                 Decision::Deny {
-                    code: condition.code,
+                    code: error,
                     description,
                 }
                 .into()

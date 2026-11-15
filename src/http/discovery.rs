@@ -35,7 +35,7 @@ pub(super) async fn metadata(State(state): State<AppState>) -> Json<Value> {
         "scopes_supported": claims::scopes_supported(&profiles),
         "response_types_supported": ["code"],
         "response_modes_supported": ["query"],
-        "grant_types_supported": ["authorization_code", "refresh_token"],
+        "grant_types_supported": crate::client::GrantType::ALL,
         "subject_types_supported": ["pairwise"],
         "code_challenge_methods_supported": [pkce::METHOD_S256],
 

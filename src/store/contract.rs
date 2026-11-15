@@ -145,7 +145,7 @@ pub(crate) async fn planned_responses(store: &Store) {
     assert_eq!(store.planned_response(&uri, NOW).await.unwrap(), None);
 
     let error = PlannedResponse::Error {
-        error: "access_denied".to_owned(),
+        error: crate::error::ErrorCode::AccessDenied,
         description: "the user denied the request".to_owned(),
     };
     store.plan_response(&uri, &error, NOW + Seconds::new(60)).await.unwrap();

@@ -9,7 +9,7 @@ fn config() -> ClientConfig {
         jwks_file: None,
         jwks: Some(shared_key().jwks()),
         scopes: vec!["openid".to_owned()],
-        grant_types: vec![GRANT_AUTHORIZATION_CODE.to_owned()],
+        grant_types: vec![GrantType::AuthorizationCode],
         sector_identifier: None,
         profile: Profile::Connectid,
         claims: None,
@@ -110,12 +110,11 @@ fn needs_keys_and_supported_grants() {
     empty_keys.jwks = Some(JwkSet { keys: vec![] });
     assert!(Client::from_config(&empty_keys).is_err());
 
-    let mut password_grant = config();
-    password_grant.grant_types.push("password".to_owned());
-    assert!(Client::from_config(&password_grant).is_err());
+    // An unsupported grant type does not get past the configuration file.
+    assert!(serde_json::from_value::<Vec<GrantType>>(serde_json::json!(["password"])).is_err());
 
     let mut refresh_only = config();
-    refresh_only.grant_types = vec![GRANT_REFRESH_TOKEN.to_owned()];
+    refresh_only.grant_types = vec![GrantType::RefreshToken];
     assert!(Client::from_config(&refresh_only).is_err());
 
     let mut no_redirects = config();

@@ -5,47 +5,28 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
-/// Error codes from RFC 6749, RFC 9101, RFC 9126 and OpenID Connect Core.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ErrorCode {
-    InvalidRequest,
-    InvalidClient,
-    InvalidGrant,
-    UnauthorizedClient,
-    UnsupportedGrantType,
-    UnsupportedResponseType,
-    InvalidScope,
-    InvalidRequestObject,
-    AccessDenied,
-    LoginRequired,
-    ConsentRequired,
-    InteractionRequired,
-    AccountSelectionRequired,
-    ServerError,
-    TemporarilyUnavailable,
+crate::wire::wire_enum! {
+    /// Error codes from RFC 6749, RFC 9101, RFC 9126 and OpenID Connect Core.
+    pub(crate) enum ErrorCode ("error code") {
+        InvalidRequest = "invalid_request",
+        InvalidClient = "invalid_client",
+        InvalidGrant = "invalid_grant",
+        UnauthorizedClient = "unauthorized_client",
+        UnsupportedGrantType = "unsupported_grant_type",
+        UnsupportedResponseType = "unsupported_response_type",
+        InvalidScope = "invalid_scope",
+        InvalidRequestObject = "invalid_request_object",
+        AccessDenied = "access_denied",
+        LoginRequired = "login_required",
+        ConsentRequired = "consent_required",
+        InteractionRequired = "interaction_required",
+        AccountSelectionRequired = "account_selection_required",
+        ServerError = "server_error",
+        TemporarilyUnavailable = "temporarily_unavailable",
+    }
 }
 
 impl ErrorCode {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::InvalidRequest => "invalid_request",
-            Self::InvalidClient => "invalid_client",
-            Self::InvalidGrant => "invalid_grant",
-            Self::UnauthorizedClient => "unauthorized_client",
-            Self::UnsupportedGrantType => "unsupported_grant_type",
-            Self::UnsupportedResponseType => "unsupported_response_type",
-            Self::InvalidScope => "invalid_scope",
-            Self::InvalidRequestObject => "invalid_request_object",
-            Self::AccessDenied => "access_denied",
-            Self::LoginRequired => "login_required",
-            Self::ConsentRequired => "consent_required",
-            Self::InteractionRequired => "interaction_required",
-            Self::AccountSelectionRequired => "account_selection_required",
-            Self::ServerError => "server_error",
-            Self::TemporarilyUnavailable => "temporarily_unavailable",
-        }
-    }
-
     fn status(self) -> StatusCode {
         match self {
             Self::InvalidClient => StatusCode::UNAUTHORIZED,

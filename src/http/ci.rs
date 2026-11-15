@@ -30,9 +30,14 @@ use crate::state::AppState;
 use crate::store::{PlannedResponse, PushedRequest, Visit};
 use crate::user::User;
 
-const OUTCOME_SUCCESS: &str = "success";
-const OUTCOME_ERROR: &str = "error";
-const OUTCOME_ABANDON: &str = "abandon";
+crate::wire::wire_enum! {
+    /// The responses a client can choose.
+    enum Outcome ("outcome") {
+        Success = "success",
+        Error = "error",
+        Abandon = "abandon",
+    }
+}
 
 /// `GET /ci`: the choices the response endpoint offers. Nothing here is
 /// secret from anyone who may use a provider running this experience.
@@ -56,7 +61,7 @@ pub(super) async fn options(State(state): State<AppState>) -> Response {
     let body = json!({
         "response_endpoint": state.url(PATH_CI_RESPONSE),
         "response_delay": state.ci.response_delay,
-        "outcomes": [OUTCOME_SUCCESS, OUTCOME_ERROR, OUTCOME_ABANDON],
+        "outcomes": Outcome::ALL,
         "default_user": default_user(state.users.as_ref()).map(|user| user.username.clone()),
         "users": users,
         "errors": errors,
@@ -108,7 +113,12 @@ pub(super) async fn plan_response(
             )
         })?;
 
-    let outcome = params.get("outcome").unwrap_or(OUTCOME_SUCCESS);
+    let outcome = match params.get("outcome") {
+        None => Outcome::Success,
+        Some(text) => text
+            .parse()
+            .map_err(|error: crate::wire::UnknownName| OAuthError::invalid_request(error.to_string()))?,
+    };
     let refuse_others = |names: &[&str]| -> Result<(), OAuthError> {
         match names.iter().find(|name| params.contains(name)) {
             Some(name) => Err(OAuthError::invalid_request(format!(
@@ -118,23 +128,17 @@ pub(super) async fn plan_response(
         }
     };
     let (plan, mut body) = match outcome {
-        OUTCOME_SUCCESS => {
+        Outcome::Success => {
             refuse_others(&["error", "error_description"])?;
             success(&state, &client, &pushed, &params)?
         }
-        OUTCOME_ERROR => {
+        Outcome::Error => {
             refuse_others(&["user", "voluntary_claims"])?;
             error(&params)?
         }
-        OUTCOME_ABANDON => {
+        Outcome::Abandon => {
             refuse_others(&["user", "voluntary_claims", "error", "error_description"])?;
             (PlannedResponse::Abandon, json!({}))
-        }
-        other => {
-            return Err(OAuthError::invalid_request(format!(
-                "outcome '{other}' is not one of: {OUTCOME_SUCCESS}, {OUTCOME_ERROR}, \
-                 {OUTCOME_ABANDON}"
-            )));
         }
     };
 
@@ -145,10 +149,10 @@ pub(super) async fn plan_response(
         .store
         .plan_response(request_uri, &plan, kept_until)
         .await?;
-    tracing::info!(client_id = %client.id, outcome, "ci: the client chose the response");
+    tracing::info!(client_id = %client.id, %outcome, "ci: the client chose the response");
 
     body["request_uri"] = request_uri.into();
-    body["outcome"] = outcome.into();
+    body["outcome"] = outcome.as_str().into();
     Ok(no_store(Json(body).into_response()))
 }
 
@@ -269,10 +273,9 @@ fn error(params: &Params) -> Result<(PlannedResponse, Value), OAuthError> {
         }
         None => condition.description,
     };
-    let error = condition.code.as_str();
-    let body = json!({ "error": error, "error_description": description });
+    let body = json!({ "error": condition.code, "error_description": description });
     let plan = PlannedResponse::Error {
-        error: error.to_owned(),
+        error: condition.code,
         description: description.to_owned(),
     };
     Ok((plan, body))

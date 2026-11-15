@@ -144,7 +144,10 @@ pub(crate) enum PlannedResponse {
         declined: Vec<String>,
     },
     /// Return an OAuth error to the client's redirect URI.
-    Error { error: String, description: String },
+    Error {
+        error: crate::error::ErrorCode,
+        description: String,
+    },
     /// Give no response: the user arrives and leaves without deciding. The
     /// request stays pending. This applies to one visit only.
     Abandon,

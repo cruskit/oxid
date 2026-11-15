@@ -39,12 +39,16 @@ const SHARE_FIELD_PREFIX: &str = "share_";
 /// Holds the secret that ties a signed-in session to this browser.
 pub(crate) const LOGIN_COOKIE: &str = "__Host-oxid-login";
 
-// The `action` values of the buttons in the templates.
-const ACTION_SIGN_IN: &str = "sign-in";
-const ACTION_APPROVE: &str = "approve";
-const ACTION_DENY: &str = "deny";
-/// Shows the consent page again with every voluntary claim turned on.
-const ACTION_SHARE_ALL: &str = "share-all";
+crate::wire::wire_enum! {
+    /// The `action` values of the buttons in the templates.
+    enum Action ("action") {
+        SignIn = "sign-in",
+        Approve = "approve",
+        Deny = "deny",
+        /// Shows the consent page again with every voluntary claim turned on.
+        ShareAll = "share-all",
+    }
+}
 
 /// The styles of both pages.
 const STYLE: &str = include_str!("../../templates/login/login.css");
@@ -77,21 +81,22 @@ impl Experience for Login {
 
     fn submit<'a>(&'a self, interaction: &'a Interaction<'a>, form: &'a Form) -> StepFuture<'a> {
         Box::pin(async move {
-            Ok(match (form.get("action"), self.signed_in(interaction)) {
-                (Some(ACTION_DENY), _) => Step {
+            let action = form.get("action").and_then(|action| action.parse().ok());
+            Ok(match (action, self.signed_in(interaction)) {
+                (Some(Action::Deny), _) => Step {
                     decision: Decision::Deny {
                         code: ErrorCode::AccessDenied,
                         description: "the user denied the request".to_owned(),
                     },
                     set_cookies: vec![forget_browser()],
                 },
-                (Some(ACTION_SIGN_IN), _) => self.sign_in(interaction, form).await?,
-                (Some(ACTION_APPROVE), Some(user)) => approve(interaction, form, &user),
-                (Some(ACTION_SHARE_ALL), Some(user)) => {
+                (Some(Action::SignIn), _) => self.sign_in(interaction, form).await?,
+                (Some(Action::Approve), Some(user)) => approve(interaction, form, &user),
+                (Some(Action::ShareAll), Some(user)) => {
                     consent_page(interaction, &user, true)?.into()
                 }
                 // Consent is only ever taken from the browser that signed in.
-                (Some(ACTION_APPROVE), None) => {
+                (Some(Action::Approve), None) => {
                     login_page(interaction, Some("Log in to continue."))?.into()
                 }
                 (_, Some(user)) => consent_page(interaction, &user, false)?.into(),

@@ -305,7 +305,10 @@ fn relative_paths_resolve_against_the_config_directory() {
         Path::new("/etc/oxid/c.jwks.json")
     );
     assert_eq!(config.clients[0].scopes, ["openid"]);
-    assert_eq!(config.clients[0].grant_types, ["authorization_code"]);
+    assert_eq!(
+        config.clients[0].grant_types,
+        [crate::client::GrantType::AuthorizationCode]
+    );
 }
 
 #[test]

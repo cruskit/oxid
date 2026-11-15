@@ -34,7 +34,7 @@ use serde_json::{Value, json};
 use url::Url;
 
 use crate::epoch::{Seconds, Timestamp};
-use crate::client::{Client, GRANT_AUTHORIZATION_CODE, GRANT_REFRESH_TOKEN, Profile};
+use crate::client::{Client, GrantType, Profile};
 use crate::client_auth::ASSERTION_TYPE;
 use crate::config::ClientConfig;
 use crate::keys::SigningKey;
@@ -427,7 +427,7 @@ struct RegistryClient {
     redirect_uris: Vec<String>,
     jwks_uri: Option<String>,
     jwks: Option<JwkSet>,
-    grant_types: Vec<String>,
+    grant_types: Vec<GrantType>,
     scopes: Vec<String>,
     claims: Vec<String>,
     sector_identifier: Option<String>,
@@ -470,12 +470,12 @@ impl RegistryClient {
         ensure!(!redirect_uris.is_empty(), "no redirect_uris");
 
         // Only the grants this provider implements are kept.
-        let mut grant_types: Vec<String> = strings(&entry["grant_types"])
-            .into_iter()
-            .filter(|grant| grant == GRANT_AUTHORIZATION_CODE || grant == GRANT_REFRESH_TOKEN)
+        let mut grant_types: Vec<GrantType> = strings(&entry["grant_types"])
+            .iter()
+            .filter_map(|grant| grant.parse().ok())
             .collect();
-        if !grant_types.iter().any(|g| g == GRANT_AUTHORIZATION_CODE) {
-            grant_types.insert(0, GRANT_AUTHORIZATION_CODE.to_owned());
+        if !grant_types.contains(&GrantType::AuthorizationCode) {
+            grant_types.insert(0, GrantType::AuthorizationCode);
         }
 
         let mut scopes: Vec<String> = entry["scope"]

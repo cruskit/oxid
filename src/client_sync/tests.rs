@@ -1,4 +1,5 @@
 use super::*;
+use crate::client::GrantType;
 use crate::jose::{SigningAlg, UnverifiedJws};
 use crate::testing::shared_key;
 
@@ -258,7 +259,10 @@ fn registry_entries_are_normalised() {
         parsed.client_id, "26c2183c-5e9c-4a63-bc65-164d8e316719",
         "software_id"
     );
-    assert_eq!(parsed.grant_types, ["authorization_code", "refresh_token"]);
+    assert_eq!(
+        parsed.grant_types,
+        [GrantType::AuthorizationCode, GrantType::RefreshToken]
+    );
     assert_eq!(parsed.scopes, ["openid", "profile", "payments"]);
     assert_eq!(
         parsed.claims,

@@ -14,21 +14,29 @@ use url::Url;
 
 use crate::config::ClientConfig;
 
-pub(crate) const GRANT_AUTHORIZATION_CODE: &str = "authorization_code";
-pub(crate) const GRANT_REFRESH_TOKEN: &str = "refresh_token";
 
-/// Which set of identity claims a client works with. The security profile
-/// (FAPI 2.0 with the ConnectID restrictions) is the same for both.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Profile {
-    /// The ConnectID Identity Assurance Profile: its standard claims and
-    /// `verified_claims`, requested with the `claims` parameter only.
-    #[default]
-    Connectid,
-    /// Standard `OpenID` Connect: every claim of Core §5.1, requested with
-    /// the `claims` parameter or the claim scopes.
-    Oidc,
+crate::wire::wire_enum! {
+    /// Which set of identity claims a client works with. The security
+    /// profile (FAPI 2.0 with the ConnectID restrictions) is the same for
+    /// both.
+    #[derive(Default)]
+    pub enum Profile ("client profile") {
+        /// The ConnectID Identity Assurance Profile: its standard claims and
+        /// `verified_claims`, requested with the `claims` parameter only.
+        #[default]
+        Connectid = "connectid",
+        /// Standard `OpenID` Connect: every claim of Core §5.1, requested
+        /// with the `claims` parameter or the claim scopes.
+        Oidc = "oidc",
+    }
+}
+
+crate::wire::wire_enum! {
+    /// The grant types oxID supports at the token endpoint.
+    pub enum GrantType ("grant type") {
+        AuthorizationCode = "authorization_code",
+        RefreshToken = "refresh_token",
+    }
 }
 
 /// A confidential client. FAPI 2.0 §5.3.2.1-3 permits no other kind.
@@ -44,7 +52,7 @@ pub struct Client {
     /// Public keys for `private_key_jwt` and request object verification.
     pub jwks: JwkSet,
     pub scopes: BTreeSet<String>,
-    pub grant_types: BTreeSet<String>,
+    pub grant_types: BTreeSet<GrantType>,
     /// Host that scopes this client's pairwise subject identifiers.
     pub sector_identifier: String,
     pub profile: Profile,
@@ -87,15 +95,9 @@ impl Client {
         };
         ensure!(!jwks.keys.is_empty(), "client '{id}' has an empty JWK Set");
 
-        let grant_types: BTreeSet<String> = config.grant_types.iter().cloned().collect();
-        for grant in &grant_types {
-            ensure!(
-                grant == GRANT_AUTHORIZATION_CODE || grant == GRANT_REFRESH_TOKEN,
-                "client '{id}': unsupported grant type '{grant}'"
-            );
-        }
+        let grant_types: BTreeSet<GrantType> = config.grant_types.iter().copied().collect();
         ensure!(
-            grant_types.contains(GRANT_AUTHORIZATION_CODE),
+            grant_types.contains(&GrantType::AuthorizationCode),
             "client '{id}' must allow the authorization_code grant"
         );
 
@@ -154,7 +156,7 @@ impl Client {
         expect(unreachable_pub, reason = "the integration tests use it")
     )]
     pub fn allows_refresh_tokens(&self) -> bool {
-        self.grant_types.contains(GRANT_REFRESH_TOKEN)
+        self.grant_types.contains(&GrantType::RefreshToken)
     }
 }
 

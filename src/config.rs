@@ -260,7 +260,7 @@ pub struct ClientConfig {
     #[serde(default = "default_scopes")]
     pub scopes: Vec<String>,
     #[serde(default = "default_grant_types")]
-    pub grant_types: Vec<String>,
+    pub grant_types: Vec<crate::client::GrantType>,
     /// Host used to derive pairwise subjects. Defaults to the host shared by
     /// all redirect URIs.
     pub sector_identifier: Option<String>,
@@ -278,8 +278,8 @@ fn default_scopes() -> Vec<String> {
     vec!["openid".to_owned()]
 }
 
-fn default_grant_types() -> Vec<String> {
-    vec!["authorization_code".to_owned()]
+fn default_grant_types() -> Vec<crate::client::GrantType> {
+    vec![crate::client::GrantType::AuthorizationCode]
 }
 
 #[derive(Debug, Clone, Deserialize)]

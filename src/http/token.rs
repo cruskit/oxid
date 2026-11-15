@@ -11,7 +11,7 @@ use serde_json::{Map, Value, json};
 
 use super::{ConnInfo, OAuthForm, Params, authenticate_client, no_store};
 use crate::authz::SCOPE_OPENID;
-use crate::client::{Client, GRANT_AUTHORIZATION_CODE, GRANT_REFRESH_TOKEN};
+use crate::client::{Client, GrantType};
 use crate::error::{ErrorCode, OAuthError};
 use crate::id_token;
 use crate::pkce;
@@ -31,10 +31,15 @@ pub(super) async fn token(
         )
     })?;
 
-    let body = match params.get("grant_type") {
-        Some(GRANT_AUTHORIZATION_CODE) => code_grant(&state, &client, &params, &thumbprint).await?,
-        Some(GRANT_REFRESH_TOKEN) => refresh_grant(&state, &client, &params, &thumbprint).await?,
-        Some(_) => {
+    let grant_type = params.get("grant_type").map(str::parse::<GrantType>);
+    let body = match grant_type {
+        Some(Ok(GrantType::AuthorizationCode)) => {
+            code_grant(&state, &client, &params, &thumbprint).await?
+        }
+        Some(Ok(GrantType::RefreshToken)) => {
+            refresh_grant(&state, &client, &params, &thumbprint).await?
+        }
+        Some(Err(_)) => {
             return Err(OAuthError::new(
                 ErrorCode::UnsupportedGrantType,
                 "grant_type must be authorization_code or refresh_token",
