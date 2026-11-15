@@ -48,11 +48,11 @@ jobs:
     env:
       OXID_TEST_DYNAMODB_ENDPOINT: http://localhost:8000
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Installs the toolchain and cargo-deny pinned in mise.toml, so CI and
       # local builds use the same tasks.
-      - uses: jdx/mise-action@v2
+      - uses: jdx/mise-action@v4
 
       - uses: Swatinem/rust-cache@v2
 
@@ -81,7 +81,7 @@ jobs:
     env:
       OXID_EXPERIENCE: ${{ matrix.experience }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Builds oxID into a container and runs the FAPI 2.0 Message Signing
       # plan (ConnectID profile) against it. Needs only Docker, Python and
@@ -91,7 +91,7 @@ jobs:
 
       - name: Upload conformance results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: conformance-results-${{ matrix.experience }}
           path: conformance/results/
@@ -103,14 +103,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Built on Amazon Linux 2023, the Lambda runtime's own distribution.
       - name: Build the Lambda package
         run: scripts/build-lambda.sh
 
       - name: Upload the Lambda package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: oxid-lambda
           path: dist/lambda/
@@ -135,9 +135,9 @@ jobs:
           echo "::error::Run this workflow on ${{ github.event.repository.default_branch }} to create a release."
           exit 1
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: jdx/mise-action@v2
+      - uses: jdx/mise-action@v4
 
       - uses: Swatinem/rust-cache@v2
 
@@ -174,7 +174,7 @@ jobs:
 
       # The package the lambda job built and uploaded for this commit.
       - name: Fetch the Lambda package
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: oxid-lambda
           path: dist/lambda
